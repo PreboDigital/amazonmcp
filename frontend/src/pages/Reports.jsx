@@ -116,7 +116,8 @@ function getPresetDateRange(preset) {
     return { start: iso(from), end: iso(today), label: 'Last 7 days' }
   }
   if (preset === 'last_30_days') {
-    const from = new Date(today); from.setDate(from.getDate() - 29)
+    // Match Amazon Ads dashboard: 31 days (today - 30 through today)
+    const from = new Date(today); from.setDate(from.getDate() - 30)
     return { start: iso(from), end: iso(today), label: 'Last 30 days' }
   }
   if (preset === 'year_to_date') {
@@ -1312,6 +1313,17 @@ export default function Reports() {
               <><RefreshCw size={13} /> Retry</>
             )}
           </button>
+        </div>
+      )}
+
+      {/* Cached data may not match selected date range (report pending + campaign cache fallback) */}
+      {reportData?.data_may_not_match_range && (
+        <div className="card bg-amber-50 border-amber-200 p-4 flex items-center gap-3">
+          <AlertTriangle size={16} className="text-amber-500 shrink-0" />
+          <p className="text-sm text-amber-800 flex-1">
+            Report is still processing. The numbers shown may not match the selected date range.
+            Click &quot;Generate Report&quot; again when ready to refresh with accurate data.
+          </p>
         </div>
       )}
 

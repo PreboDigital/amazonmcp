@@ -376,6 +376,7 @@ async def generate_report(
             logger.warning(f"Campaign auto-sync failed: {e}")
 
     # ── Step 1: Try MCP report first (user clicked Generate — get fresh data) ──
+    logger.info(f"Report generate: date range {start_str} to {end_str} (preset={preset}, storage_key={storage_key})")
     try:
         client = await get_mcp_client_with_fresh_token(cred, db)
         adv_account_id = await _resolve_advertiser_account_id(db, cred)
@@ -537,6 +538,22 @@ async def generate_report(
     # ── Compute summary ───────────────────────────────────────────────
     summary = compute_metrics(campaigns_data)
 
+    # Log metrics for comparison with Amazon Ads dashboard
+    logger.info(
+        "Report metrics [%s–%s] source=%s campaigns=%d | spend=%.2f sales=%.2f clicks=%d impressions=%d orders=%d acos=%.1f%% roas=%.2f",
+        start_str,
+        end_str,
+        report_source,
+        len(campaigns_data),
+        summary.get("spend", 0),
+        summary.get("sales", 0),
+        summary.get("clicks", 0),
+        summary.get("impressions", 0),
+        summary.get("orders", 0),
+        summary.get("acos", 0),
+        summary.get("roas", 0),
+    )
+
     by_sales = sorted(campaigns_data, key=lambda x: x.get("sales", 0), reverse=True)
     by_acos_worst = sorted(
         [c for c in campaigns_data if c.get("spend", 0) > 0],
@@ -562,6 +579,15 @@ async def generate_report(
         state_breakdown[s]["spend"] += c.get("spend", 0)
         state_breakdown[s]["sales"] += c.get("sales", 0)
 
+    # When report is pending and we fell back to campaign_cache, data may not match the requested range
+    data_may_not_match = (
+        report_pending_id is not None and report_source == "campaign_cache"
+    )
+    if data_may_not_match:
+        logger.warning(
+            f"Report pending but using campaign_cache fallback — data may not match {start_str}–{end_str}"
+        )
+
     response = {
         "period": {
             "start_date": start_str,
@@ -581,6 +607,7 @@ async def generate_report(
         "generated_at": utcnow().isoformat(),
         "report_pending": report_pending_id is not None,
         "report_pending_id": report_pending_id,
+        "data_may_not_match_range": data_may_not_match,
     }
 
     # ── Comparison period ─────────────────────────────────────────────

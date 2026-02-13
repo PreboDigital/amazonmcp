@@ -87,7 +87,8 @@ def get_date_range(preset: str) -> Tuple[date, date]:
         sunday = monday + timedelta(days=6)
         return monday, sunday
     elif preset == "last_30_days":
-        return today - timedelta(days=29), today
+        # Match Amazon Ads dashboard: 31 days (today - 30 through today)
+        return today - timedelta(days=30), today
     elif preset == "this_month":
         return today.replace(day=1), today
     elif preset == "last_month":
@@ -120,7 +121,8 @@ def get_comparison_range(preset: str) -> Tuple[date, date]:
         sunday = monday + timedelta(days=6)
         return monday, sunday
     elif preset == "last_30_days":
-        return today - timedelta(days=59), today - timedelta(days=30)
+        # Previous 31-day period
+        return today - timedelta(days=61), today - timedelta(days=31)
     elif preset == "this_month":
         return get_date_range("last_month")
     elif preset == "last_month":
@@ -495,37 +497,89 @@ async def query_campaign_daily(
     Query campaign_performance_daily for a date range and return
     aggregated per-campaign metrics (summed across days).
     Cross-references Campaign table for state/type data that reports don't include.
-    """
-    from sqlalchemy.orm import aliased
 
-    result = await db.execute(
-        select(
-            CampaignPerformanceDaily.amazon_campaign_id,
-            func.max(CampaignPerformanceDaily.campaign_name).label("campaign_name"),
-            func.max(CampaignPerformanceDaily.campaign_type).label("campaign_type"),
-            func.max(CampaignPerformanceDaily.targeting_type).label("targeting_type"),
-            func.max(CampaignPerformanceDaily.state).label("state"),
-            func.sum(CampaignPerformanceDaily.spend).label("spend"),
-            func.sum(CampaignPerformanceDaily.sales).label("sales"),
-            func.sum(CampaignPerformanceDaily.impressions).label("impressions"),
-            func.sum(CampaignPerformanceDaily.clicks).label("clicks"),
-            func.sum(CampaignPerformanceDaily.orders).label("orders"),
-            func.max(CampaignPerformanceDaily.daily_budget).label("daily_budget"),
+    IMPORTANT: Never mix range keys (e.g. "2026-01-15__2026-02-13") with single-day
+    keys (e.g. "2026-02-13") in the same query — that would double-count metrics.
+    For range queries, prefer exact range key match; otherwise use single-day rows only.
+    """
+    base_where = [
+        CampaignPerformanceDaily.credential_id == credential_id,
+        CampaignPerformanceDaily.profile_id == profile_id
+        if profile_id is not None
+        else CampaignPerformanceDaily.profile_id.is_(None),
+    ]
+
+    # Range query: prefer exact range key to avoid mixing with single-day rows
+    if start_date != end_date:
+        range_key = f"{start_date}__{end_date}"
+        exact_result = await db.execute(
+            select(
+                CampaignPerformanceDaily.amazon_campaign_id,
+                func.max(CampaignPerformanceDaily.campaign_name).label("campaign_name"),
+                func.max(CampaignPerformanceDaily.campaign_type).label("campaign_type"),
+                func.max(CampaignPerformanceDaily.targeting_type).label("targeting_type"),
+                func.max(CampaignPerformanceDaily.state).label("state"),
+                func.sum(CampaignPerformanceDaily.spend).label("spend"),
+                func.sum(CampaignPerformanceDaily.sales).label("sales"),
+                func.sum(CampaignPerformanceDaily.impressions).label("impressions"),
+                func.sum(CampaignPerformanceDaily.clicks).label("clicks"),
+                func.sum(CampaignPerformanceDaily.orders).label("orders"),
+                func.max(CampaignPerformanceDaily.daily_budget).label("daily_budget"),
+            )
+            .where(and_(*base_where, CampaignPerformanceDaily.date == range_key))
+            .group_by(CampaignPerformanceDaily.amazon_campaign_id)
+            .order_by(func.sum(CampaignPerformanceDaily.spend).desc())
         )
-        .where(
-            and_(
-                CampaignPerformanceDaily.credential_id == credential_id,
+        exact_rows = exact_result.all()
+        if exact_rows:
+            rows = exact_rows
+        else:
+            # No exact range key — use single-day rows only (exclude range keys to avoid double-count)
+            range_where = base_where + [
                 CampaignPerformanceDaily.date >= start_date,
                 CampaignPerformanceDaily.date <= end_date,
-                CampaignPerformanceDaily.profile_id == profile_id
-                if profile_id is not None
-                else CampaignPerformanceDaily.profile_id.is_(None),
+                func.strpos(CampaignPerformanceDaily.date, "__") <= 0,  # single-day only
+            ]
+            result = await db.execute(
+                select(
+                    CampaignPerformanceDaily.amazon_campaign_id,
+                    func.max(CampaignPerformanceDaily.campaign_name).label("campaign_name"),
+                    func.max(CampaignPerformanceDaily.campaign_type).label("campaign_type"),
+                    func.max(CampaignPerformanceDaily.targeting_type).label("targeting_type"),
+                    func.max(CampaignPerformanceDaily.state).label("state"),
+                    func.sum(CampaignPerformanceDaily.spend).label("spend"),
+                    func.sum(CampaignPerformanceDaily.sales).label("sales"),
+                    func.sum(CampaignPerformanceDaily.impressions).label("impressions"),
+                    func.sum(CampaignPerformanceDaily.clicks).label("clicks"),
+                    func.sum(CampaignPerformanceDaily.orders).label("orders"),
+                    func.max(CampaignPerformanceDaily.daily_budget).label("daily_budget"),
+                )
+                .where(and_(*range_where))
+                .group_by(CampaignPerformanceDaily.amazon_campaign_id)
+                .order_by(func.sum(CampaignPerformanceDaily.spend).desc())
             )
+            rows = result.all()
+    else:
+        # Single-day or exact key match — use exact date to avoid mixing with range keys
+        result = await db.execute(
+            select(
+                CampaignPerformanceDaily.amazon_campaign_id,
+                func.max(CampaignPerformanceDaily.campaign_name).label("campaign_name"),
+                func.max(CampaignPerformanceDaily.campaign_type).label("campaign_type"),
+                func.max(CampaignPerformanceDaily.targeting_type).label("targeting_type"),
+                func.max(CampaignPerformanceDaily.state).label("state"),
+                func.sum(CampaignPerformanceDaily.spend).label("spend"),
+                func.sum(CampaignPerformanceDaily.sales).label("sales"),
+                func.sum(CampaignPerformanceDaily.impressions).label("impressions"),
+                func.sum(CampaignPerformanceDaily.clicks).label("clicks"),
+                func.sum(CampaignPerformanceDaily.orders).label("orders"),
+                func.max(CampaignPerformanceDaily.daily_budget).label("daily_budget"),
+            )
+            .where(and_(*base_where, CampaignPerformanceDaily.date == start_date))
+            .group_by(CampaignPerformanceDaily.amazon_campaign_id)
+            .order_by(func.sum(CampaignPerformanceDaily.spend).desc())
         )
-        .group_by(CampaignPerformanceDaily.amazon_campaign_id)
-        .order_by(func.sum(CampaignPerformanceDaily.spend).desc())
-    )
-    rows = result.all()
+        rows = result.all()
 
     # Build a lookup of campaign state/type from the Campaign table
     campaign_ids = [r.amazon_campaign_id for r in rows]
@@ -791,6 +845,7 @@ class ReportingService:
 
             # Phase 2: Create a new report if no pending ID or pending failed
             if not report_ids:
+                logger.info(f"MCP report requested: startDate={start_date} endDate={end_date}")
                 report_config = {
                     "reports": [
                         {

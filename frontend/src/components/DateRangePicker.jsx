@@ -51,7 +51,8 @@ function getPresetRange(preset) {
     return { from: mon, to: sun }
   }
   if (preset === 'last_30_days') {
-    const from = new Date(today); from.setDate(from.getDate() - 29)
+    // Match Amazon Ads dashboard: 31 days (today - 30 through today)
+    const from = new Date(today); from.setDate(from.getDate() - 30)
     return { from, to: today }
   }
   if (preset === 'this_month') {
