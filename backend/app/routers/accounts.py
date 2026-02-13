@@ -17,7 +17,7 @@ from app.database import get_db
 from app.models import (
     Credential, Account, Campaign, AdGroup, Target, Ad, ActivityLog,
 )
-from app.mcp_client import create_mcp_client
+from app.mcp_client import create_mcp_client, MCPError
 from app.services.token_service import get_mcp_client_with_fresh_token
 from app.utils import parse_uuid, safe_error_detail, utcnow, extract_target_expression
 
@@ -887,7 +887,11 @@ async def list_user_invitations(
         )
         invitations = _extract_list(result, ["userInvitations", "invitations", "result", "results", "items"])
         return {"invitations": invitations, "count": len(invitations), "next_token": result.get("nextToken")}
-    except Exception as e:
+    except (MCPError, Exception) as e:
+        err_str = str(e).lower()
+        if "unknown tool" in err_str or "invalid_tool" in err_str:
+            logger.info(f"User invitations not supported by Amazon MCP: {e}")
+            return {"invitations": [], "count": 0, "next_token": None, "unsupported": True}
         logger.error(f"List invitations failed: {e}")
         err = safe_error_detail(e, "Failed to list user invitations.")
         err += " User invitations typically require a Manager account; advertiser accounts may not support this."

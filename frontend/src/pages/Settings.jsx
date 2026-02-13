@@ -29,13 +29,11 @@ import {
 import StatusBadge from '../components/StatusBadge'
 import EmptyState from '../components/EmptyState'
 import { Link } from 'react-router-dom'
-import { credentials, accounts, settingsApi, cronApi } from '../lib/api'
+import { credentials, accounts, settingsApi } from '../lib/api'
 import { useAccount } from '../lib/AccountContext'
-import { useAuth } from '../lib/AuthContext'
 
 export default function Settings() {
   const { refreshAccounts, activeAccountId, activeAccount } = useAccount()
-  const { isAdmin } = useAuth()
   const [creds, setCreds] = useState([])
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
@@ -79,6 +77,7 @@ export default function Settings() {
   const [invitations, setInvitations] = useState([])
   const [invitationsLoading, setInvitationsLoading] = useState(false)
   const [invitationsError, setInvitationsError] = useState(null)
+  const [invitationsUnsupported, setInvitationsUnsupported] = useState(false)
   const [inviteForm, setInviteForm] = useState({ email: '', role: '' })
   const [inviteSending, setInviteSending] = useState(false)
   const [accountBillingExpanded, setAccountBillingExpanded] = useState(true)
@@ -87,10 +86,6 @@ export default function Settings() {
   const [streamSubs, setStreamSubs] = useState([])
   const [streamSubsLoading, setStreamSubsLoading] = useState(false)
   const [streamSubsExpanded, setStreamSubsExpanded] = useState(false)
-  const [dataSyncExpanded, setDataSyncExpanded] = useState(true)
-  const [dataSyncTriggering, setDataSyncTriggering] = useState(null)
-  const [schedules, setSchedules] = useState([])
-  const [schedulesLoading, setSchedulesLoading] = useState(false)
 
   useEffect(() => {
     loadCredentials()
@@ -142,9 +137,11 @@ export default function Settings() {
     }
     setInvitationsLoading(true)
     setInvitationsError(null)
+    setInvitationsUnsupported(false)
     try {
       const data = await accounts.invitations.list(credId)
       setInvitations(data?.invitations || [])
+      setInvitationsUnsupported(!!data?.unsupported)
     } catch (err) {
       setInvitationsError(err.message || 'Failed to load invitations')
       setInvitations([])
@@ -160,30 +157,6 @@ export default function Settings() {
     finally { setStreamSubsLoading(false) }
   }
 
-  async function loadSchedules() {
-    if (!isAdmin) return
-    setSchedulesLoading(true)
-    try {
-      const data = await cronApi.listSchedules()
-      setSchedules(data?.schedules || [])
-    } catch { setSchedules([]) }
-    finally { setSchedulesLoading(false) }
-  }
-
-  async function triggerDataSync(job) {
-    setDataSyncTriggering(job)
-    setError(null)
-    try {
-      if (job === 'sync') await cronApi.triggerSync()
-      else if (job === 'reports') await cronApi.triggerReports()
-      else if (job === 'search-terms') await cronApi.triggerSearchTerms()
-      await loadSchedules()
-    } catch (err) {
-      setError(err.message || `Failed to run ${job}`)
-    } finally {
-      setDataSyncTriggering(null)
-    }
-  }
 
   async function sendInvite(e) {
     e?.preventDefault?.()
@@ -822,6 +795,9 @@ export default function Settings() {
                     </button>
                   </form>
                   {invitationsError && <p className="text-xs text-red-600">{invitationsError}</p>}
+                  {invitationsUnsupported && (
+                    <p className="text-xs text-slate-500">User invitations are not supported by this Amazon Ads account.</p>
+                  )}
                   {invitationsLoading ? (
                     <div className="flex items-center gap-2 text-xs text-slate-500"><Loader2 size={12} className="animate-spin" /> Loading invitations...</div>
                   ) : invitations.length > 0 ? (

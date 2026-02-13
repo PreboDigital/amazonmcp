@@ -17,6 +17,7 @@ import {
   BarChart3,
   Users,
   LogOut,
+  Clock,
 } from 'lucide-react'
 import clsx from 'clsx'
 import { useState, useRef, useEffect } from 'react'
@@ -226,7 +227,10 @@ export default function Layout({ children }) {
 
   const navigation = [
     ...baseNavigation,
-    ...(isAdmin ? [{ name: 'Users', href: '/users', icon: Users }] : []),
+    ...(isAdmin ? [
+      { name: 'Data Sync', href: '/data-sync', icon: Clock },
+      { name: 'Users', href: '/users', icon: Users },
+    ] : []),
   ]
 
   useEffect(() => {

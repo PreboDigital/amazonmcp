@@ -11,6 +11,7 @@ import Reports from './pages/Reports'
 import Harvester from './pages/Harvester'
 import Optimizer from './pages/Optimizer'
 import Settings from './pages/Settings'
+import DataSync from './pages/DataSync'
 import Login from './pages/Login'
 import Register from './pages/Register'
 import ForgotPassword from './pages/ForgotPassword'
@@ -58,6 +59,7 @@ export default function App() {
                     <Route path="/harvester" element={<Harvester />} />
                     <Route path="/optimizer" element={<Optimizer />} />
                     <Route path="/settings" element={<Settings />} />
+                    <Route path="/data-sync" element={<DataSync />} />
                     <Route path="/users" element={<UserManagement />} />
                     <Route path="*" element={<Navigate to="/" replace />} />
                   </Routes>
