@@ -219,8 +219,7 @@ async def create_invitation(
     # Build invite link (frontend will use this)
     from app.config import get_settings
     settings = get_settings()
-    # Use first CORS origin as base URL for invite link, or a placeholder
-    base = settings.cors_origin_list[0] if settings.cors_origin_list else "https://amazonmcp-frontend-production.up.railway.app"
+    base = settings.effective_public_url
     invite_link = f"{base}/register?token={token}"
 
     # Send invite email via Resend (non-blocking; does not fail the request if email fails)
@@ -248,7 +247,7 @@ async def list_invitations(
     """List invitations. Admin only."""
     from app.config import get_settings
     settings = get_settings()
-    base = settings.cors_origin_list[0] if settings.cors_origin_list else "https://amazonmcp-frontend-production.up.railway.app"
+    base = settings.effective_public_url
 
     result = await db.execute(
         select(Invitation).order_by(Invitation.created_at.desc())

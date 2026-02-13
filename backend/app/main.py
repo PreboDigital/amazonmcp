@@ -74,14 +74,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS: allow production frontend + localhost
-CORS_ORIGINS = [
-    "https://amazonmcp-frontend-production.up.railway.app",
-    "https://amazonmcp-production.up.railway.app",
-    "https://amazonmcp-backend-production.up.railway.app",
-    "http://localhost:5173",
-    "http://localhost:3000",
-]
+# CORS: use config so CORS_ORIGINS env is respected
+CORS_ORIGINS = settings.cors_origin_list
 
 
 class AddCORSHeadersMiddleware(BaseHTTPMiddleware):
@@ -94,7 +88,7 @@ class AddCORSHeadersMiddleware(BaseHTTPMiddleware):
                 return Response(
                     status_code=200,
                     headers={
-                        "Access-Control-Allow-Origin": origin or CORS_ORIGINS[0],
+                        "Access-Control-Allow-Origin": origin or (CORS_ORIGINS[0] if CORS_ORIGINS else "*"),
                         "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
                         "Access-Control-Allow-Headers": "Content-Type, Authorization",
                         "Access-Control-Allow-Credentials": "true",

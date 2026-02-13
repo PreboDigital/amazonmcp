@@ -57,7 +57,7 @@ async function request(path, options = {}) {
         localStorage.removeItem('auth_token')
         window.dispatchEvent(new Event('auth:logout'))
       }
-      const msg = data.detail || data.message || _friendlyError(res.status, null)
+      const msg = _extractErrorMessage(data, res.status)
       throw new Error(msg)
     }
 
@@ -66,6 +66,15 @@ async function request(path, options = {}) {
     console.error(`API Error [${path}]:`, err)
     throw err
   }
+}
+
+function _extractErrorMessage(data, status) {
+  const raw = data?.detail ?? data?.message
+  if (Array.isArray(raw)) {
+    return raw.map((e) => (typeof e === 'object' && e?.msg) ? e.msg : String(e)).join('; ') || _friendlyError(status, null)
+  }
+  if (raw && typeof raw === 'string') return raw
+  return _friendlyError(status, null)
 }
 
 function _friendlyError(status, body) {

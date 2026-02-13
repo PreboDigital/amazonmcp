@@ -33,13 +33,15 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 def create_access_token(user_id: str, email: str, role: str) -> str:
     settings = get_settings()
-    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    # python-jose requires integer timestamps for exp/iat, not datetime objects
     payload = {
         "sub": str(user_id),
         "email": email,
         "role": role,
-        "exp": expire,
-        "iat": datetime.now(timezone.utc),
+        "exp": int(expire.timestamp()),
+        "iat": int(now.timestamp()),
     }
     return jwt.encode(payload, settings.secret_key, algorithm=ALGORITHM)
 

@@ -195,7 +195,7 @@ async def forgot_password(payload: ForgotPasswordRequest, db: AsyncSession = Dep
     """Request password reset. Sends email if user exists. Always returns success to prevent email enumeration."""
     from app.config import get_settings
     settings = get_settings()
-    base = settings.cors_origin_list[0] if settings.cors_origin_list else "https://amazonmcp-frontend-production.up.railway.app"
+    base = settings.effective_public_url
 
     result = await db.execute(select(User).where(User.email == payload.email.lower()))
     user = result.scalar_one_or_none()
