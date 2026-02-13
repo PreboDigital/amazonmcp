@@ -109,7 +109,14 @@ Use [Upstash QStash](https://upstash.com/docs/qstash) to schedule HTTP calls to 
 - Go to [Upstash Console](https://console.upstash.com/) → QStash
 - Copy `QSTASH_TOKEN` (for creating schedules)
 
-### 2. Create Schedules
+### 2. Create Schedules (In-App)
+
+**Recommended:** Use the **Data Sync** page in the app. Admins can add schedules directly:
+- Set `QSTASH_TOKEN` and `CRON_SECRET` in Railway Variables
+- Railway provides `RAILWAY_PUBLIC_DOMAIN` automatically; or set `PUBLIC_URL` if your app uses a custom domain
+- Go to Data Sync → Add schedule (job + frequency)
+
+### 3. Create Schedules (curl / alternative)
 
 Replace `https://your-app.railway.app` with your Railway public URL.
 
@@ -221,7 +228,7 @@ curl -X POST "https://qstash.upstash.io/v2/schedules" \
 - [ ] Add Backend service — **Root Directory: empty** (unified deploy)
 - [ ] **Backend** vars: DATABASE_URL (`${{Postgres.DATABASE_URL}}`), SECRET_KEY, API_KEY, ENCRYPTION_KEY, FIRST_ADMIN_EMAIL, FIRST_ADMIN_PASSWORD
 - [ ] Do **not** set VITE_API_BASE_URL (unified deploy uses relative `/api`)
-- [ ] Set CRON_SECRET for scheduled jobs
+- [ ] Set CRON_SECRET and QSTASH_TOKEN for in-app schedule management
 - [ ] Add Resend + Upstash Redis vars if using
 - [ ] Create QStash schedules for sync, reports, search-terms
 - [ ] Add Amazon Security Profile: Allowed Origins + Return URLs (see Amazon console)

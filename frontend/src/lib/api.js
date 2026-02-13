@@ -583,6 +583,13 @@ export const cronApi = {
   triggerReports: () => request('/cron/trigger/reports', { method: 'POST' }),
   triggerSearchTerms: () => request('/cron/trigger/search-terms', { method: 'POST' }),
   listSchedules: () => request('/cron/schedules'),
+  createSchedule: (job, cron) =>
+    request('/cron/schedules', {
+      method: 'POST',
+      body: JSON.stringify({ job, cron }),
+    }),
+  deleteSchedule: (scheduleId) =>
+    request(`/cron/schedules/${encodeURIComponent(scheduleId)}`, { method: 'DELETE' }),
 }
 
 // ── Health ───────────────────────────────────────────────────────────

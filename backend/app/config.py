@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     qstash_url: str = "https://qstash.upstash.io"  # or regional e.g. https://qstash-eu-central-1.upstash.io
     qstash_token: str = ""
 
+    # Public app URL for QStash schedule destinations (e.g. https://amazonmcp-production.up.railway.app)
+    # Set PUBLIC_URL in Railway, or it falls back to RAILWAY_PUBLIC_DOMAIN (Railway provides this)
+    public_url: str = ""
+
     @model_validator(mode="after")
     def _validate_production_settings(self) -> "Settings":
         """Enforce that critical secrets are set when running in production."""
@@ -89,6 +93,18 @@ class Settings(BaseSettings):
         if self.is_production and prod_frontend not in origins:
             origins.append(prod_frontend)
         return origins or [prod_frontend, "http://localhost:5173", "http://localhost:3000"]
+
+    @property
+    def effective_public_url(self) -> str:
+        """Public URL for QStash destinations. Uses PUBLIC_URL, RAILWAY_PUBLIC_DOMAIN, or localhost."""
+        import os
+        url = (self.public_url or os.environ.get("PUBLIC_URL", "")).strip()
+        if not url and os.environ.get("RAILWAY_PUBLIC_DOMAIN"):
+            domain = os.environ["RAILWAY_PUBLIC_DOMAIN"]
+            url = f"https://{domain}" if not domain.startswith("http") else domain
+        if not url:
+            url = "http://localhost:8000"
+        return url.rstrip("/")
 
 
 @lru_cache

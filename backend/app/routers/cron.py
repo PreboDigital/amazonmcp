@@ -15,6 +15,7 @@ Admin-only /trigger/* endpoints allow manual runs from the UI.
 import logging
 from datetime import date, timedelta
 from fastapi import APIRouter, Depends, Header, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import require_admin
@@ -232,6 +233,15 @@ async def trigger_search_terms(
         raise HTTPException(500, str(e))
 
 
+# Job type -> cron path suffix
+CRON_JOB_PATHS = {"sync": "/api/cron/sync", "reports": "/api/cron/reports", "search-terms": "/api/cron/search-terms"}
+
+
+class CreateScheduleRequest(BaseModel):
+    job: str  # sync | reports | search-terms
+    cron: str  # e.g. "0 */6 * * *"
+
+
 @router.get("/schedules")
 async def list_schedules(_: User = Depends(require_admin)):
     """List QStash schedules. Admin only. Requires QSTASH_TOKEN."""
@@ -253,3 +263,86 @@ async def list_schedules(_: User = Depends(require_admin)):
     except Exception as e:
         logger.exception("Failed to list QStash schedules")
         return {"schedules": [], "error": str(e)}
+
+
+@router.post("/schedules")
+async def create_schedule(
+    body: CreateScheduleRequest,
+    _: User = Depends(require_admin),
+):
+    """Create a QStash schedule. Admin only. Requires QSTASH_TOKEN and CRON_SECRET."""
+    from urllib.parse import quote
+    from app.config import get_settings
+    import httpx
+    job = body.job
+    cron = body.cron
+    if job not in CRON_JOB_PATHS:
+        raise HTTPException(400, f"Invalid job. Use: {list(CRON_JOB_PATHS.keys())}")
+    if not cron or not isinstance(cron, str):
+        raise HTTPException(400, "cron expression is required")
+    settings = get_settings()
+    if not settings.qstash_token:
+        raise HTTPException(500, "QSTASH_TOKEN not configured")
+    secret = _get_cron_secret()
+    if not secret:
+        raise HTTPException(500, "CRON_SECRET not configured")
+    base_url = settings.effective_public_url
+    destination = base_url.rstrip("/") + CRON_JOB_PATHS[job]
+    # QStash v2: POST /v2/schedules/{destination} with destination URL-encoded
+    encoded = quote(destination, safe="")
+    base = (settings.qstash_url or "https://qstash.upstash.io").rstrip("/")
+    schedule_id = f"amazon-ads-{job}"
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                f"{base}/v2/schedules/{encoded}",
+                headers={
+                    "Authorization": f"Bearer {settings.qstash_token}",
+                    "Upstash-Cron": cron,
+                    "Upstash-Schedule-Id": schedule_id,
+                    "Upstash-Forward-X-Cron-Secret": secret,
+                    "Content-Type": "application/json",
+                },
+                content=b"{}",
+            )
+            if r.status_code in (400, 412):
+                err = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+                msg = err.get("error", r.text) or r.text
+                raise HTTPException(r.status_code, msg)
+            r.raise_for_status()
+            data = r.json()
+            return {"scheduleId": data.get("scheduleId", schedule_id), "destination": destination, "cron": cron}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to create QStash schedule")
+        raise HTTPException(500, str(e))
+
+
+@router.delete("/schedules/{schedule_id}")
+async def delete_schedule(
+    schedule_id: str,
+    _: User = Depends(require_admin),
+):
+    """Delete a QStash schedule. Admin only. Requires QSTASH_TOKEN."""
+    from app.config import get_settings
+    import httpx
+    settings = get_settings()
+    if not settings.qstash_token:
+        raise HTTPException(500, "QSTASH_TOKEN not configured")
+    base = (settings.qstash_url or "https://qstash.upstash.io").rstrip("/")
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.delete(
+                f"{base}/v2/schedules/{schedule_id}",
+                headers={"Authorization": f"Bearer {settings.qstash_token}"},
+            )
+            if r.status_code == 404:
+                raise HTTPException(404, "Schedule not found")
+            r.raise_for_status()
+            return {"status": "ok", "scheduleId": schedule_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Failed to delete QStash schedule")
+        raise HTTPException(500, str(e))
