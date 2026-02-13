@@ -43,39 +43,60 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _is_keyword_like(s: str) -> bool:
+    """True if string looks like keyword text, not an ID."""
+    if not s or not isinstance(s, str) or len(s) > 200:
+        return False
+    if s.isdigit() or (len(s) > 10 and s.replace("-", "").replace("_", "").isdigit()):
+        return False
+    return True
+
+
 def extract_target_expression(tgt_data: dict) -> Optional[str]:
     """
     Extract human-readable keyword/expression from Amazon Ads target data.
-    Handles multiple MCP/API response formats: keywordText, targetDetails, expression arrays, etc.
+    MCP returns targetDetails with type-specific keys: keywordTarget, themeTarget, productTarget, etc.
     """
     if not tgt_data or not isinstance(tgt_data, dict):
         return None
-    # Unwrap if MCP nests target inside "target" key
     if "target" in tgt_data and isinstance(tgt_data["target"], dict):
         tgt_data = tgt_data["target"]
     target_details = tgt_data.get("targetDetails") or {}
-    # Try all known field names (SP v3, common model, Marketing Stream, MCP variants)
-    for key in (
-        "keywordText", "keyword", "expression", "text", "value",
-        "targetingClause", "targetingExpression", "resolvedTargetingExpression",
-    ):
+    tgt_type = (tgt_data.get("targetType") or "").upper()
+
+    # Direct fields
+    for key in ("keywordText", "keyword", "expression", "text", "value", "targetingClause"):
         val = tgt_data.get(key) or target_details.get(key)
-        if val and isinstance(val, str) and not val.isdigit():
+        if val and isinstance(val, str) and _is_keyword_like(val):
             return val
-    # Nested: keywordTarget.keyword, productTarget.asin, etc.
+
+    # MCP targetDetails: keywordTarget, themeTarget, productTarget, productCategoryTarget, etc.
+    for detail_key, detail_val in target_details.items():
+        if not isinstance(detail_val, dict):
+            continue
+        for k in ("keyword", "expression", "value", "theme", "asin", "productCategoryId"):
+            v = detail_val.get(k)
+            if v and isinstance(v, str) and _is_keyword_like(v):
+                return v
+        # themeTarget has matchType (e.g. KEYWORDS_CLOSE_MATCH) — use as fallback label
+        if detail_key == "themeTarget" and detail_val.get("matchType"):
+            return f"Theme: {detail_val['matchType']}"
+        # productTarget / category may have resolvedExpression
+        resolved = detail_val.get("resolvedExpression") or detail_val.get("productCategoryResolved")
+        if resolved and isinstance(resolved, str):
+            return resolved
+
+    # Nested keywordTarget.keyword, productTarget.asin
     for nest in ("keywordTarget", "productTarget", "targeting"):
-        nested = tgt_data.get(nest) or target_details.get(nest)
+        nested = target_details.get(nest)
         if isinstance(nested, dict):
             for k in ("keyword", "expression", "value", "asin"):
                 v = nested.get(k)
-                if v and isinstance(v, str) and not v.isdigit():
+                if v and isinstance(v, str) and _is_keyword_like(v):
                     return v
-    # expression as list
-    expr = tgt_data.get("expression") or target_details.get("expression")
-    if isinstance(expr, list) and expr:
-        return str(expr[0]) if len(expr) == 1 else " | ".join(str(x) for x in expr)
-    # expressions array with {type, value}
-    expressions = tgt_data.get("expressions") or tgt_data.get("expression")
+
+    # expression/expressions arrays
+    expressions = tgt_data.get("expressions") or tgt_data.get("expression") or target_details.get("expression")
     if isinstance(expressions, list):
         parts = []
         for ex in expressions:
@@ -83,17 +104,22 @@ def extract_target_expression(tgt_data: dict) -> Optional[str]:
                 val = ex.get("value") or ex.get("targeting")
                 if isinstance(val, dict):
                     val = val.get("value")
-                if val and str(val) and not str(val).isdigit():
+                if val and _is_keyword_like(str(val)):
                     parts.append(str(val))
-            elif ex and str(ex) and not str(ex).isdigit():
+            elif ex and _is_keyword_like(str(ex)):
                 parts.append(str(ex))
         if parts:
             return " | ".join(parts)
+    expr = tgt_data.get("expression") or target_details.get("expression")
+    if isinstance(expr, list) and expr:
+        return str(expr[0]) if len(expr) == 1 else " | ".join(str(x) for x in expr)
+
     # Resolved human-readable
     for k in ("resolvedExpression", "productCategoryResolved", "productBrandResolved"):
         v = target_details.get(k)
         if v and isinstance(v, str):
             return v
+
     return None
 
 

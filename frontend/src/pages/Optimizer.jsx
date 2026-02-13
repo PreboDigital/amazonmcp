@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
   TrendingUp,
   Plus,
@@ -10,11 +10,142 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   CheckCircle,
+  Search,
+  ChevronDown,
+  RefreshCw,
 } from 'lucide-react'
 import StatusBadge from '../components/StatusBadge'
 import EmptyState from '../components/EmptyState'
-import { optimizer } from '../lib/api'
+import { optimizer, campaignManager } from '../lib/api'
 import { useAccount } from '../lib/AccountContext'
+
+// ── Campaign Multi-Select for Bid Rules ────────────────────────────────────
+function CampaignSelector({ campaigns, selectedIds, onChange, loading, onRefresh }) {
+  const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
+  const ref = useRef(null)
+
+  useEffect(() => {
+    function onClickOutside(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onClickOutside)
+    return () => document.removeEventListener('mousedown', onClickOutside)
+  }, [])
+
+  const filtered = campaigns.filter((c) => {
+    const q = search.toLowerCase()
+    return (c.campaign_name || '').toLowerCase().includes(q) || (c.amazon_campaign_id || '').toLowerCase().includes(q)
+  })
+
+  const autoCampaigns = filtered.filter(c => c.targeting_type?.toLowerCase() === 'auto')
+  const manualCampaigns = filtered.filter(c => c.targeting_type?.toLowerCase() === 'manual')
+  const otherCampaigns = filtered.filter(c => !['auto', 'manual'].includes(c.targeting_type?.toLowerCase()))
+
+  function toggle(campaign) {
+    const id = campaign.amazon_campaign_id
+    if (selectedIds.includes(id)) {
+      onChange(selectedIds.filter((x) => x !== id))
+    } else {
+      onChange([...selectedIds, id])
+    }
+  }
+
+  function isSelected(campaign) {
+    return selectedIds.includes(campaign.amazon_campaign_id)
+  }
+
+  const selectedCampaigns = campaigns.filter(c => selectedIds.includes(c.amazon_campaign_id))
+
+  return (
+    <div className="relative" ref={ref}>
+      <label className="label">Campaigns</label>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="input flex items-center justify-between gap-2 text-left min-h-[42px] cursor-pointer"
+      >
+        <div className="flex-1 min-w-0">
+          {selectedIds.length === 0 ? (
+            <span className="text-slate-400">All campaigns (or select specific ones)</span>
+          ) : (
+            <div className="flex flex-wrap gap-1">
+              {selectedCampaigns.slice(0, 3).map((c) => (
+                <span key={c.amazon_campaign_id} className="inline-flex items-center gap-1 bg-brand-50 text-brand-700 text-xs font-medium px-2 py-0.5 rounded-md">
+                  {c.campaign_name || c.amazon_campaign_id}
+                  <button type="button" onClick={(e) => { e.stopPropagation(); toggle(c) }} className="hover:text-brand-900">
+                    <X size={10} />
+                  </button>
+                </span>
+              ))}
+              {selectedCampaigns.length > 3 && <span className="text-xs text-slate-500 self-center">+{selectedCampaigns.length - 3} more</span>}
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {selectedIds.length > 0 && (
+            <span className="bg-brand-600 text-white text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center">{selectedIds.length}</span>
+          )}
+          <ChevronDown size={16} className={`text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+        </div>
+      </button>
+
+      {open && (
+        <div className="absolute z-50 mt-1 w-full bg-white border border-slate-200 rounded-xl shadow-xl max-h-[280px] overflow-hidden flex flex-col">
+          <div className="p-2 border-b border-slate-100 flex items-center gap-2">
+            <Search size={14} className="text-slate-400 shrink-0" />
+            <input type="text" placeholder="Search campaigns..." value={search} onChange={(e) => setSearch(e.target.value)} className="flex-1 text-sm border-0 outline-none bg-transparent placeholder:text-slate-300" autoFocus />
+            <button type="button" onClick={onRefresh} className="p-1 hover:bg-slate-100 rounded transition-colors" title="Refresh campaigns">
+              <RefreshCw size={12} className={`text-slate-400 ${loading ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
+          <div className="px-3 py-1.5 border-b border-slate-100 flex items-center gap-2">
+            <button type="button" onClick={() => onChange([])} className="text-[11px] font-medium text-slate-500 hover:text-slate-700 transition-colors">Clear (use all campaigns)</button>
+          </div>
+          <div className="overflow-y-auto flex-1">
+            {loading ? (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 size={18} className="animate-spin text-slate-400" />
+                <span className="ml-2 text-sm text-slate-400">Loading campaigns...</span>
+              </div>
+            ) : filtered.length === 0 ? (
+              <div className="py-8 text-center text-sm text-slate-400">
+                {search ? 'No campaigns match your search' : 'No campaigns found. Sync campaigns in Campaign Manager first.'}
+              </div>
+            ) : (
+              <>
+                {[
+                  { label: 'Auto Campaigns', items: autoCampaigns },
+                  { label: 'Manual Campaigns', items: manualCampaigns },
+                  { label: 'Other', items: otherCampaigns },
+                ].filter(g => g.items.length > 0).map(group => (
+                  <div key={group.label}>
+                    <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider font-semibold text-slate-500 bg-slate-50 sticky top-0">
+                      {group.label} ({group.items.length})
+                    </div>
+                    {group.items.map((c) => (
+                      <button
+                        key={c.amazon_campaign_id}
+                        type="button"
+                        onClick={() => toggle(c)}
+                        className={`w-full px-3 py-2 text-left text-sm flex items-center gap-2 hover:bg-slate-50 transition-colors ${isSelected(c) ? 'bg-brand-50 text-brand-700' : 'text-slate-700'}`}
+                      >
+                        <span className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 ${isSelected(c) ? 'bg-brand-600 border-brand-600 text-white' : 'border-slate-300'}`}>
+                          {isSelected(c) ? '✓' : ''}
+                        </span>
+                        <span className="truncate">{c.campaign_name || c.amazon_campaign_id}</span>
+                      </button>
+                    ))}
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
 
 export default function Optimizer() {
   const { activeAccount, activeAccountId } = useAccount()
@@ -24,9 +155,12 @@ export default function Optimizer() {
   const [runningId, setRunningId] = useState(null)
   const [preview, setPreview] = useState(null)
   const [error, setError] = useState(null)
+  const [campaigns, setCampaigns] = useState([])
+  const [campaignsLoading, setCampaignsLoading] = useState(false)
 
   const [form, setForm] = useState({
     name: '',
+    campaign_ids: [],
     target_acos: 30,
     min_bid: 0.02,
     max_bid: 100,
@@ -39,6 +173,22 @@ export default function Optimizer() {
     setPreview(null)
     loadRules()
   }, [activeAccountId])
+
+  useEffect(() => {
+    if (showCreate && activeAccountId) loadCampaigns()
+  }, [showCreate, activeAccountId])
+
+  async function loadCampaigns() {
+    setCampaignsLoading(true)
+    try {
+      const data = await campaignManager.listCampaigns(activeAccountId, { page_size: 500 })
+      setCampaigns(data.campaigns || [])
+    } catch {
+      setCampaigns([])
+    } finally {
+      setCampaignsLoading(false)
+    }
+  }
 
   async function loadRules() {
     setLoading(true)
@@ -59,6 +209,7 @@ export default function Optimizer() {
       await optimizer.createRule({
         ...form,
         credential_id: activeAccountId,
+        campaign_ids: form.campaign_ids?.length ? form.campaign_ids : null,
         target_acos: parseFloat(form.target_acos),
         min_bid: parseFloat(form.min_bid),
         max_bid: parseFloat(form.max_bid),
@@ -67,7 +218,7 @@ export default function Optimizer() {
         min_clicks: parseInt(form.min_clicks),
       })
       setShowCreate(false)
-      setForm({ name: '', target_acos: 30, min_bid: 0.02, max_bid: 100, bid_step: 0.10, lookback_days: 14, min_clicks: 10 })
+      setForm({ name: '', campaign_ids: [], target_acos: 30, min_bid: 0.02, max_bid: 100, bid_step: 0.10, lookback_days: 14, min_clicks: 10 })
       await loadRules()
     } catch (err) {
       setError(err.message)
@@ -163,6 +314,13 @@ export default function Optimizer() {
                 <label className="label">Rule Name</label>
                 <input type="text" className="input" placeholder="e.g., All SP Campaigns — 25% ACOS" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
               </div>
+              <CampaignSelector
+                campaigns={campaigns}
+                selectedIds={form.campaign_ids || []}
+                onChange={(ids) => setForm({ ...form, campaign_ids: ids })}
+                loading={campaignsLoading}
+                onRefresh={loadCampaigns}
+              />
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="label">Target ACOS (%)</label>
@@ -297,7 +455,11 @@ export default function Optimizer() {
                     <StatusBadge status={rule.status} />
                     {rule.is_active && <span className="badge-green">Active</span>}
                   </div>
-                  <div className="mt-3 grid grid-cols-2 sm:grid-cols-5 gap-4 text-sm">
+                  <div className="mt-3 grid grid-cols-2 sm:grid-cols-6 gap-4 text-sm">
+                    <div>
+                      <p className="text-xs text-slate-400">Campaigns</p>
+                      <p className="text-slate-700">{rule.campaign_ids?.length ? `${rule.campaign_ids.length} selected` : 'All campaigns'}</p>
+                    </div>
                     <div>
                       <p className="text-xs text-slate-400">Target ACOS</p>
                       <p className="font-bold text-brand-600">{rule.target_acos}%</p>
