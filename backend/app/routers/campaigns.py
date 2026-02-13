@@ -83,6 +83,7 @@ def _perf_date_filter(perf_where, perf_start: str, perf_end: str):
     perf_where.append(or_(single_day_match, range_match))
 
 
+@router.get("")
 @router.get("/")
 async def list_campaigns(
     credential_id: Optional[str] = Query(None),

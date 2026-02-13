@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     upstash_redis_rest_token: str = ""
 
     # Upstash QStash (scheduled jobs — campaign sync, reports, search terms)
+    qstash_url: str = "https://qstash.upstash.io"  # or regional e.g. https://qstash-eu-central-1.upstash.io
     qstash_token: str = ""
 
     @model_validator(mode="after")

@@ -40,13 +40,15 @@ async function request(path, options = {}) {
     } else {
       const text = await res.text()
       if (!res.ok) {
-        throw new Error(text || `Request failed: ${res.status}`)
+        const msg = _friendlyError(res.status, text)
+        throw new Error(msg)
       }
       // Try parsing as JSON anyway (some servers don't set content-type correctly)
       try {
         data = JSON.parse(text)
       } catch {
-        throw new Error(text || `Unexpected response format (${res.status})`)
+        const msg = _friendlyError(res.status, text)
+        throw new Error(msg)
       }
     }
 
@@ -55,7 +57,8 @@ async function request(path, options = {}) {
         localStorage.removeItem('auth_token')
         window.dispatchEvent(new Event('auth:logout'))
       }
-      throw new Error(data.detail || data.message || `Request failed: ${res.status}`)
+      const msg = data.detail || data.message || _friendlyError(res.status, null)
+      throw new Error(msg)
     }
 
     return data
@@ -63,6 +66,19 @@ async function request(path, options = {}) {
     console.error(`API Error [${path}]:`, err)
     throw err
   }
+}
+
+function _friendlyError(status, body) {
+  if (status === 502 || status === 503) {
+    return 'Service temporarily unavailable. Please try again in a moment.'
+  }
+  if (status === 404 && (!body || body === 'Not Found' || (typeof body === 'string' && body.trim() === ''))) {
+    return 'Resource not found. Ensure you have added credentials and discovered accounts.'
+  }
+  if (status >= 500) {
+    return 'Server error. Please try again later.'
+  }
+  return body || `Request failed: ${status}`
 }
 
 // ── Credentials ──────────────────────────────────────────────────────
@@ -547,6 +563,14 @@ export const usersApi = {
       }),
     revoke: (id) => request(`/users/invitations/${id}`, { method: 'DELETE' }),
   },
+}
+
+// ── Cron / Data Sync (admin) ──────────────────────────────────────────
+export const cronApi = {
+  triggerSync: () => request('/cron/trigger/sync', { method: 'POST' }),
+  triggerReports: () => request('/cron/trigger/reports', { method: 'POST' }),
+  triggerSearchTerms: () => request('/cron/trigger/search-terms', { method: 'POST' }),
+  listSchedules: () => request('/cron/schedules'),
 }
 
 // ── Health ───────────────────────────────────────────────────────────

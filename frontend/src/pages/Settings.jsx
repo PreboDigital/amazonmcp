@@ -29,11 +29,13 @@ import {
 import StatusBadge from '../components/StatusBadge'
 import EmptyState from '../components/EmptyState'
 import { Link } from 'react-router-dom'
-import { credentials, accounts, settingsApi } from '../lib/api'
+import { credentials, accounts, settingsApi, cronApi } from '../lib/api'
 import { useAccount } from '../lib/AccountContext'
+import { useAuth } from '../lib/AuthContext'
 
 export default function Settings() {
   const { refreshAccounts, activeAccountId, activeAccount } = useAccount()
+  const { isAdmin } = useAuth()
   const [creds, setCreds] = useState([])
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
@@ -85,6 +87,10 @@ export default function Settings() {
   const [streamSubs, setStreamSubs] = useState([])
   const [streamSubsLoading, setStreamSubsLoading] = useState(false)
   const [streamSubsExpanded, setStreamSubsExpanded] = useState(false)
+  const [dataSyncExpanded, setDataSyncExpanded] = useState(true)
+  const [dataSyncTriggering, setDataSyncTriggering] = useState(null)
+  const [schedules, setSchedules] = useState([])
+  const [schedulesLoading, setSchedulesLoading] = useState(false)
 
   useEffect(() => {
     loadCredentials()
@@ -93,6 +99,10 @@ export default function Settings() {
   const credId = activeAccountId || null
 
   async function loadAccountLinks() {
+    if (!credId) {
+      setAccountLinksError('Select an account to view account links.')
+      return
+    }
     setAccountLinksLoading(true)
     setAccountLinksError(null)
     try {
@@ -126,6 +136,10 @@ export default function Settings() {
   }
 
   async function loadInvitations() {
+    if (!credId) {
+      setInvitationsError('Select an account to view invitations.')
+      return
+    }
     setInvitationsLoading(true)
     setInvitationsError(null)
     try {
@@ -144,6 +158,31 @@ export default function Settings() {
       setStreamSubs(data?.subscriptions || [])
     } catch { setStreamSubs([]) }
     finally { setStreamSubsLoading(false) }
+  }
+
+  async function loadSchedules() {
+    if (!isAdmin) return
+    setSchedulesLoading(true)
+    try {
+      const data = await cronApi.listSchedules()
+      setSchedules(data?.schedules || [])
+    } catch { setSchedules([]) }
+    finally { setSchedulesLoading(false) }
+  }
+
+  async function triggerDataSync(job) {
+    setDataSyncTriggering(job)
+    setError(null)
+    try {
+      if (job === 'sync') await cronApi.triggerSync()
+      else if (job === 'reports') await cronApi.triggerReports()
+      else if (job === 'search-terms') await cronApi.triggerSearchTerms()
+      await loadSchedules()
+    } catch (err) {
+      setError(err.message || `Failed to run ${job}`)
+    } finally {
+      setDataSyncTriggering(null)
+    }
   }
 
   async function sendInvite(e) {

@@ -8,6 +8,8 @@ default credential.
 Set CRON_SECRET in Railway Variables. QStash sends:
   Authorization: Bearer <QSTASH_CURRENT_SIGNING_KEY> (verify via Upstash-Signature)
   OR use a simple secret: X-Cron-Secret: <CRON_SECRET>
+
+Admin-only /trigger/* endpoints allow manual runs from the UI.
 """
 
 import logging
@@ -15,7 +17,9 @@ from datetime import date, timedelta
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import require_admin
 from app.database import get_db
+from app.models import User
 from app.routers.campaigns import run_full_sync
 from app.routers.reporting import _get_cred, _resolve_advertiser_account_id
 from app.services.reporting_service import (
@@ -143,3 +147,109 @@ async def cron_search_terms(
     except Exception as e:
         logger.exception("Cron search terms failed")
         raise HTTPException(500, str(e))
+
+
+# ── Admin-only manual trigger (no CRON_SECRET) ──────────────────────────
+
+async def _run_reports(db: AsyncSession):
+    """Shared logic for reports cron."""
+    cred = await _get_cred(db, None)
+    end_d = date.today()
+    start_d = end_d - timedelta(days=6)
+    start_str = start_d.isoformat()
+    end_str = end_d.isoformat()
+    client = await get_mcp_client_with_fresh_token(cred, db)
+    adv_id = await _resolve_advertiser_account_id(db, cred)
+    service = ReportingService(client, advertiser_account_id=adv_id)
+    mcp_result = await service.generate_mcp_report(start_str, end_str, max_wait=180)
+    if mcp_result.get("_pending_report_id"):
+        return {"status": "pending", "report_id": mcp_result["_pending_report_id"]}
+    parsed = service.parse_report_campaigns(mcp_result)
+    if parsed:
+        await sync_campaigns_to_db(db, cred.id, parsed, profile_id=cred.profile_id)
+        for d in (start_d + timedelta(days=i) for i in range(7)):
+            ds = d.isoformat()
+            await store_campaign_daily_data(db, cred.id, parsed, ds, source="cron", profile_id=cred.profile_id)
+            await store_account_daily_summary(db, cred.id, parsed, ds, source="cron", profile_id=cred.profile_id)
+    return {"status": "ok", "rows": len(parsed) if parsed else 0}
+
+
+async def _run_search_terms(db: AsyncSession):
+    """Shared logic for search terms cron."""
+    cred = await _get_cred(db, None)
+    client = await get_mcp_client_with_fresh_token(cred, db)
+    adv_id = await _resolve_advertiser_account_id(db, cred)
+    service = SearchTermService(client, adv_id)
+    end_d = date.today()
+    start_d = end_d - timedelta(days=6)
+    return await service.sync_search_terms(
+        db=db,
+        credential_id=cred.id,
+        start_date=start_d.isoformat(),
+        end_date=end_d.isoformat(),
+        profile_id=cred.profile_id,
+    )
+
+
+@router.post("/trigger/sync")
+async def trigger_sync(
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually trigger campaign sync. Admin only."""
+    try:
+        result = await run_full_sync(db, None)
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        logger.exception("Manual sync failed")
+        raise HTTPException(500, str(e))
+
+
+@router.post("/trigger/reports")
+async def trigger_reports(
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually trigger report generation. Admin only."""
+    try:
+        return await _run_reports(db)
+    except Exception as e:
+        logger.exception("Manual reports failed")
+        raise HTTPException(500, str(e))
+
+
+@router.post("/trigger/search-terms")
+async def trigger_search_terms(
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually trigger search term sync. Admin only."""
+    try:
+        result = await _run_search_terms(db)
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        logger.exception("Manual search terms failed")
+        raise HTTPException(500, str(e))
+
+
+@router.get("/schedules")
+async def list_schedules(_: User = Depends(require_admin)):
+    """List QStash schedules. Admin only. Requires QSTASH_TOKEN."""
+    from app.config import get_settings
+    import httpx
+    settings = get_settings()
+    if not settings.qstash_token:
+        return {"schedules": [], "message": "QSTASH_TOKEN not configured"}
+    base = (settings.qstash_url or "https://qstash.upstash.io").rstrip("/")
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                f"{base}/v2/schedules",
+                headers={"Authorization": f"Bearer {settings.qstash_token}"},
+            )
+            r.raise_for_status()
+            data = r.json()
+            return {"schedules": data if isinstance(data, list) else data.get("schedules", [])}
+    except Exception as e:
+        logger.exception("Failed to list QStash schedules")
+        return {"schedules": [], "error": str(e)}

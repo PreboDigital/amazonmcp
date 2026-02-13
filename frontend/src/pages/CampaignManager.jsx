@@ -32,6 +32,7 @@ import {
   Globe,
   Rocket,
 } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import { useAccount } from '../lib/AccountContext'
 import { campaignManager, accounts } from '../lib/api'
 import StatusBadge from '../components/StatusBadge'
@@ -354,7 +355,7 @@ function SingleshotModal({ products = [], onSave, onClose, saving }) {
 // ══════════════════════════════════════════════════════════════════════
 
 export default function CampaignManager() {
-  const { activeAccountId, activeAccount } = useAccount()
+  const { activeAccountId, activeAccount, loading: accountLoading } = useAccount()
 
   // Navigation state: which level are we viewing?
   const [view, setView] = useState('campaigns') // campaigns | ad-groups | targets | ads
@@ -375,7 +376,7 @@ export default function CampaignManager() {
   const PAGE_SIZE = 25
 
   // UI state
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [syncStep, setSyncStep] = useState('') // progress text during sync
   const [searchTerm, setSearchTerm] = useState('')
@@ -420,6 +421,7 @@ export default function CampaignManager() {
 
   // ── Load data based on current view ─────────────────────────────
   const loadStats = useCallback(async () => {
+    if (!activeAccountId) return
     try {
       const data = await campaignManager.stats(activeAccountId)
       setStats(data)
@@ -427,6 +429,12 @@ export default function CampaignManager() {
   }, [activeAccountId])
 
   const loadCampaigns = useCallback(async (pageNum) => {
+    if (!activeAccountId) {
+      setLoading(false)
+      setCampaigns([])
+      setError(null)
+      return
+    }
     setLoading(true)
     setError(null)
     const currentPage = pageNum || page
@@ -449,7 +457,14 @@ export default function CampaignManager() {
       setTotalCampaigns(data.total || 0)
       setPage(data.page || currentPage)
     } catch (err) {
-      setError(err.message)
+      const msg = err.message || ''
+      if (msg.includes('502') || msg.toLowerCase().includes('failed to fetch') || msg.toLowerCase().includes('network')) {
+        setError('Service temporarily unavailable. Please try again in a moment.')
+      } else if (msg === 'Not Found' || msg.includes('404')) {
+        setError('Could not load campaigns. Add API credentials in Settings, discover accounts on the Dashboard, and select an active profile.')
+      } else {
+        setError(msg)
+      }
     } finally {
       setLoading(false)
     }
@@ -489,6 +504,13 @@ export default function CampaignManager() {
   }, [activeAccountId])
 
   useEffect(() => {
+    if (!activeAccountId) {
+      setLoading(false)
+      setError(null)
+      setCampaigns([])
+      setStats(null)
+      return
+    }
     loadStats()
     loadCampaigns(1)
   }, [activeAccountId, stateFilter, campaignTypeFilter, targetingTypeFilter, searchTerm, dateRange.preset, dateRange.start, dateRange.end, sortBy, sortDir]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -1139,11 +1161,26 @@ export default function CampaignManager() {
               <ArrowLeft size={16} /> Back
             </button>
           )}
-          <button onClick={handleSync} disabled={syncing} className="btn-secondary text-sm">
+          <button onClick={handleSync} disabled={syncing || !activeAccountId} className="btn-secondary text-sm">
             {syncing ? <><Loader2 size={14} className="animate-spin" /> Syncing...</> : <><RefreshCw size={14} /> Sync Data</>}
           </button>
         </div>
       </div>
+
+      {/* No account selected — show setup prompt instead of errors */}
+      {!accountLoading && !activeAccountId && (
+        <EmptyState
+          icon={Megaphone}
+          title="Select an account to view campaigns"
+          description="Add API credentials in Settings, then discover accounts on the Dashboard and select an active profile from the header."
+          action={
+            <div className="flex flex-wrap justify-center gap-3">
+              <Link to="/" className="btn-primary text-sm">Go to Dashboard</Link>
+              <Link to="/settings" className="btn-secondary text-sm">Settings</Link>
+            </div>
+          }
+        />
+      )}
 
       {/* Sync progress banner */}
       {syncing && syncStep && (
@@ -1159,8 +1196,8 @@ export default function CampaignManager() {
         </div>
       )}
 
-      {/* Stats bar */}
-      {stats && view === 'campaigns' && (
+      {/* Stats bar — only when we have an account */}
+      {activeAccountId && stats && view === 'campaigns' && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div className="card px-4 py-3">
             <div className="flex items-center gap-2.5">
@@ -1214,14 +1251,14 @@ export default function CampaignManager() {
         </div>
       )}
 
-      {/* Success / Error */}
-      {successMsg && (
+      {/* Success / Error — only when we have an account */}
+      {activeAccountId && successMsg && (
         <div className="card bg-emerald-50 border-emerald-200 px-4 py-3 text-sm text-emerald-700 flex items-center gap-2">
           <Check size={16} /> {successMsg}
           <button onClick={() => setSuccessMsg(null)} className="ml-auto text-emerald-400 hover:text-emerald-600"><X size={14} /></button>
         </div>
       )}
-      {error && (
+      {activeAccountId && error && (
         <div className="card bg-red-50 border-red-200 px-4 py-3 text-sm text-red-700 flex items-center gap-2">
           <AlertTriangle size={16} /> {error}
           <button onClick={() => setError(null)} className="ml-auto text-red-400 hover:text-red-600"><X size={14} /></button>
@@ -1229,7 +1266,7 @@ export default function CampaignManager() {
       )}
 
       {/* ── Campaigns List ───────────────────────────────────────── */}
-      {view === 'campaigns' && (
+      {activeAccountId && view === 'campaigns' && (
         <>
           {/* Amazon-style rich filter bar */}
           <div className="flex flex-wrap items-center gap-2 sm:gap-3">
@@ -1718,7 +1755,7 @@ export default function CampaignManager() {
       )}
 
       {/* ── Ad Groups List ───────────────────────────────────────── */}
-      {view === 'ad-groups' && (
+      {activeAccountId && view === 'ad-groups' && (
         <>
           {/* Campaign context header */}
           {selectedCampaign && (
@@ -1837,7 +1874,7 @@ export default function CampaignManager() {
       )}
 
       {/* ── Targets & Ads (within Ad Group) ─────────────────────── */}
-      {view === 'targets' && selectedAdGroup && (
+      {activeAccountId && view === 'targets' && selectedAdGroup && (
         <>
           {/* Ad Group context header */}
           <div className="card px-5 py-4 bg-gradient-to-r from-slate-50 to-white">
