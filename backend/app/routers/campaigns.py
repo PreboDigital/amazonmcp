@@ -1368,14 +1368,9 @@ async def delete_ad(
 #  SYNC — Pull fresh data from MCP into local cache
 # ══════════════════════════════════════════════════════════════════════
 
-@router.post("/sync")
-async def sync_all(
-    credential_id: Optional[str] = Query(None),
-    db: AsyncSession = Depends(get_db),
-):
+async def run_full_sync(db: AsyncSession, credential_id: Optional[str] = None) -> dict:
     """
-    Full sync: Pull campaigns, ad groups, targets, and ads from MCP
-    and cache them in the local database.
+    Run full campaign/ad group/target/ad sync. Used by both POST /sync and cron.
     """
     cred = await _get_credential(db, credential_id)
     client = await _make_client(cred, db)
@@ -1617,6 +1612,18 @@ async def sync_all(
     except Exception as e:
         logger.error(f"Full sync failed: {e}")
         raise HTTPException(status_code=502, detail=safe_error_detail(e, "Campaign operation failed. Please try again."))
+
+
+@router.post("/sync")
+async def sync_all(
+    credential_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Full sync: Pull campaigns, ad groups, targets, and ads from MCP
+    and cache them in the local database.
+    """
+    return await run_full_sync(db, credential_id)
 
 
 # ══════════════════════════════════════════════════════════════════════

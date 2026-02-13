@@ -1,0 +1,9 @@
+# Nixpacks config when Railway Root Directory = backend
+[phases.setup]
+nixPkgs = ["python313", "postgresql"]
+
+[phases.install]
+cmds = ["pip install -r requirements.txt"]
+
+[start]
+cmd = "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"

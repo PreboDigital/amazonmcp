@@ -252,7 +252,7 @@ async def sync_campaigns_to_db(
         result = await db.execute(select(Campaign).where(and_(*lookup)))
         campaign = result.scalar_one_or_none()
 
-        camp_name = camp_data.get("name") or camp_data.get("campaignName")
+        camp_name = camp_data.get("name") or camp_data.get("campaignName") or camp_data.get("campaign_name")
         camp_type = camp_data.get("adProduct") or camp_data.get("campaignType") or camp_data.get("type")
         targeting = camp_data.get("targetingType") or camp_data.get("targeting")
         if not targeting and camp_data.get("autoCreationSettings"):

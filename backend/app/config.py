@@ -17,6 +17,17 @@ class Settings(BaseSettings):
     environment: str = "development"
 
     database_url: str = "postgresql+asyncpg://localhost/amazon_ads"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fix_database_url_for_asyncpg(cls, values: dict) -> dict:
+        """Railway/Postgres gives postgresql:// — we need postgresql+asyncpg:// for asyncpg."""
+        if not isinstance(values, dict):
+            return values
+        url = values.get("database_url") or ""
+        if url.startswith("postgresql://") and "+asyncpg" not in url:
+            values["database_url"] = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return values
     secret_key: str = "change-me-in-production"
     api_key: str = ""  # Required in production; in dev, empty = auth disabled
     cors_origins: str = "http://localhost:5173,http://localhost:3000"
@@ -28,6 +39,14 @@ class Settings(BaseSettings):
     paapi_access_key: str = ""
     paapi_secret_key: str = ""
     paapi_partner_tag: str = ""
+
+    # Resend (email notifications)
+    resend_api_key: str = ""
+    from_email: str = ""
+
+    # Upstash Redis (caching, future job queues)
+    upstash_redis_rest_url: str = ""
+    upstash_redis_rest_token: str = ""
 
     @model_validator(mode="after")
     def _validate_production_settings(self) -> "Settings":

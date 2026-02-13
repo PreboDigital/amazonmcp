@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.database import init_db, check_db_connection
 from app.auth import require_auth
-from app.routers import credentials, audit, harvest, optimizer, accounts, ai, approvals, reporting, campaigns, settings as settings_router
+from app.routers import credentials, audit, harvest, optimizer, accounts, ai, approvals, reporting, campaigns, settings as settings_router, cron
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -55,6 +55,7 @@ app.include_router(approvals.router, prefix="/api/approvals", tags=["Approval Qu
 app.include_router(reporting.router, prefix="/api/reports", tags=["Reports"], dependencies=_auth)
 app.include_router(campaigns.router, prefix="/api/campaigns", tags=["Campaign Management"], dependencies=_auth)
 app.include_router(settings_router.router, prefix="/api/settings", tags=["Settings"], dependencies=_auth)
+app.include_router(cron.router, prefix="/api")  # No auth — uses CRON_SECRET
 
 
 @app.get("/api/health")
