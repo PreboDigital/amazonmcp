@@ -79,7 +79,12 @@ class Settings(BaseSettings):
 
     @property
     def cors_origin_list(self) -> list[str]:
-        return [o.strip() for o in self.cors_origins.split(",")]
+        origins = [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+        # Always include production frontend when in production (credentials require explicit origin)
+        prod_frontend = "https://amazonmcp-frontend-production.up.railway.app"
+        if self.is_production and prod_frontend not in origins:
+            origins.append(prod_frontend)
+        return origins or [prod_frontend, "http://localhost:5173", "http://localhost:3000"]
 
 
 @lru_cache
