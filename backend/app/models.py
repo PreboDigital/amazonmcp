@@ -1001,6 +1001,27 @@ class Invitation(Base):
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  PASSWORD RESET — Forgot password flow
+# ══════════════════════════════════════════════════════════════════════
+
+class PasswordResetToken(Base):
+    """Password reset token. Single-use, expires in 1 hour."""
+    __tablename__ = "password_reset_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    token: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    used_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+    __table_args__ = (
+        Index("ix_password_reset_tokens_token", "token"),
+        Index("ix_password_reset_tokens_email", "email"),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  APP SETTINGS — Application-wide settings (LLM configuration, etc.)
 # ══════════════════════════════════════════════════════════════════════
 

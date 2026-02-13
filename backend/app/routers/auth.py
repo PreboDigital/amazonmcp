@@ -1,9 +1,11 @@
 """
-Auth Router — Login, register (via invitation), whoami.
+Auth Router — Login, register (via invitation), forgot/reset password, whoami.
 """
 
+import asyncio
 import logging
-from datetime import datetime, timezone
+import secrets
+from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,7 +13,7 @@ from sqlalchemy import select
 
 from app.auth import get_current_user
 from app.database import get_db
-from app.models import User, Invitation
+from app.models import User, Invitation, PasswordResetToken
 from app.services.auth_service import (
     hash_password,
     verify_password,
@@ -51,6 +53,15 @@ class WhoAmIResponse(BaseModel):
     name: str | None
     role: str
     is_active: bool
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    password: str
 
 
 # ── Endpoints ───────────────────────────────────────────────────────────
@@ -176,4 +187,69 @@ async def whoami(user: User = Depends(get_current_user)):
         name=user.name,
         role=user.role,
         is_active=user.is_active,
+    )
+
+
+@router.post("/forgot-password")
+async def forgot_password(payload: ForgotPasswordRequest, db: AsyncSession = Depends(get_db)):
+    """Request password reset. Sends email if user exists. Always returns success to prevent email enumeration."""
+    from app.config import get_settings
+    settings = get_settings()
+    base = settings.cors_origin_list[0] if settings.cors_origin_list else "https://amazonmcp-frontend-production.up.railway.app"
+
+    result = await db.execute(select(User).where(User.email == payload.email.lower()))
+    user = result.scalar_one_or_none()
+    if not user:
+        return {"message": "If that email is registered, you will receive a reset link."}
+
+    # Create new token (old ones remain but we send fresh link)
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=1)
+    prt = PasswordResetToken(
+        email=payload.email.lower(),
+        token=token,
+        expires_at=expires_at,
+    )
+    db.add(prt)
+    await db.flush()
+    reset_link = f"{base}/reset-password?token={token}"
+
+    from app.services.email_service import send_password_reset_email
+    asyncio.create_task(asyncio.to_thread(send_password_reset_email, payload.email.lower(), reset_link))
+
+    return {"message": "If that email is registered, you will receive a reset link."}
+
+
+@router.post("/reset-password", response_model=TokenResponse)
+async def reset_password(payload: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+    """Reset password using token from email. Returns JWT on success."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    result = await db.execute(select(PasswordResetToken).where(PasswordResetToken.token == payload.token))
+    prt = result.scalar_one_or_none()
+    if not prt:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset link")
+    if prt.used_at:
+        raise HTTPException(status_code=400, detail="This reset link has already been used")
+    if prt.expires_at < now:
+        raise HTTPException(status_code=400, detail="This reset link has expired")
+
+    user_result = await db.execute(select(User).where(User.email == prt.email))
+    user = user_result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=400, detail="User not found")
+
+    user.password_hash = hash_password(payload.password)
+    prt.used_at = now
+    await db.flush()
+
+    token = create_access_token(str(user.id), user.email, user.role)
+    return TokenResponse(
+        access_token=token,
+        user={
+            "id": str(user.id),
+            "email": user.email,
+            "name": user.name,
+            "role": user.role,
+            "is_active": user.is_active,
+        },
     )

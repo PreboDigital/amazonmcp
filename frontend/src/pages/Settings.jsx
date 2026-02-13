@@ -665,7 +665,7 @@ export default function Settings() {
                 <button onClick={loadAccountLinks} disabled={accountLinksLoading} className="btn-secondary text-xs mb-2">
                   {accountLinksLoading ? <Loader2 size={12} className="animate-spin" /> : <Link2 size={12} />} Load links
                 </button>
-                {accountLinksError && <p className="text-xs text-red-600 mb-2">{accountLinksError}</p>}
+                {accountLinksError && <p className="text-xs text-amber-700 mb-2">{accountLinksError}</p>}
                 {accountLinks.length > 0 ? (
                   <ul className="text-xs text-slate-600 space-y-1.5">
                     {accountLinks.slice(0, 5).map((l, i) => (
@@ -767,7 +767,7 @@ export default function Settings() {
                 <UserPlus size={14} /> User invitations
                 {invitationsExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
               </button>
-              {invitationsExpanded && (
+                {invitationsExpanded && (
                 <div className="mt-3 space-y-3">
                   <form onSubmit={sendInvite} className="flex flex-wrap items-end gap-2">
                     <div>

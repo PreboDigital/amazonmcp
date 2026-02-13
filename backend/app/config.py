@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     upstash_redis_rest_url: str = ""
     upstash_redis_rest_token: str = ""
 
+    # Upstash QStash (scheduled jobs — campaign sync, reports, search terms)
+    qstash_token: str = ""
+
     @model_validator(mode="after")
     def _validate_production_settings(self) -> "Settings":
         """Enforce that critical secrets are set when running in production."""

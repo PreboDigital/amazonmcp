@@ -1,28 +1,43 @@
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
-import { Zap, Loader2 } from 'lucide-react'
-import { useAuth } from '../lib/AuthContext'
+import { Link } from 'react-router-dom'
+import { Zap, Loader2, CheckCircle } from 'lucide-react'
+import { authApi } from '../lib/api'
 
-export default function Login() {
-  const { login } = useAuth()
-  const navigate = useNavigate()
+export default function ForgotPassword() {
   const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [sent, setSent] = useState(false)
+  const [error, setError] = useState('')
 
   async function handleSubmit(e) {
     e.preventDefault()
     setError('')
     setLoading(true)
     try {
-      await login(email, password)
-      navigate('/', { replace: true })
+      await authApi.forgotPassword(email)
+      setSent(true)
     } catch (err) {
-      setError(err.message || 'Invalid email or password')
+      setError(err.message || 'Failed to send reset email')
     } finally {
       setLoading(false)
     }
+  }
+
+  if (sent) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 px-4">
+        <div className="card p-8 max-w-md text-center">
+          <CheckCircle className="w-12 h-12 text-emerald-500 mx-auto mb-4" />
+          <h1 className="text-lg font-semibold text-slate-800 mb-2">Check your email</h1>
+          <p className="text-slate-600 text-sm mb-6">
+            If an account exists for {email}, you will receive a password reset link shortly.
+          </p>
+          <Link to="/login" className="btn-primary">
+            Back to login
+          </Link>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -34,8 +49,8 @@ export default function Login() {
               <Zap className="w-8 h-8 text-brand-600" />
             </div>
             <div>
-              <h1 className="text-xl font-semibold text-slate-800">Amazon Ads Optimizer</h1>
-              <p className="text-sm text-slate-500">Sign in to your account</p>
+              <h1 className="text-xl font-semibold text-slate-800">Forgot password?</h1>
+              <p className="text-sm text-slate-500">Enter your email to receive a reset link</p>
             </div>
           </div>
 
@@ -57,18 +72,6 @@ export default function Login() {
                 autoComplete="email"
               />
             </div>
-            <div>
-              <label className="label">Password</label>
-              <input
-                type="password"
-                className="input"
-                placeholder="••••••••"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                autoComplete="current-password"
-              />
-            </div>
             <button
               type="submit"
               className="btn-primary w-full justify-center"
@@ -77,16 +80,13 @@ export default function Login() {
               {loading ? (
                 <Loader2 className="w-5 h-5 animate-spin" />
               ) : (
-                'Sign in'
+                'Send reset link'
               )}
             </button>
           </form>
 
-          <p className="mt-6 text-center text-sm text-slate-500 space-y-1">
-            <span className="block">
-              <Link to="/forgot-password" className="text-brand-600 hover:underline">Forgot password?</Link>
-            </span>
-            <span className="block">Need an account? Ask an admin for an invitation link.</span>
+          <p className="mt-6 text-center text-sm text-slate-500">
+            <Link to="/login" className="text-brand-600 hover:underline">Back to login</Link>
           </p>
         </div>
       </div>

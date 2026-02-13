@@ -2,6 +2,7 @@
 Users Router — User management and invitations (admin only).
 """
 
+import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException
@@ -221,6 +222,11 @@ async def create_invitation(
     # Use first CORS origin as base URL for invite link, or a placeholder
     base = settings.cors_origin_list[0] if settings.cors_origin_list else "https://amazonmcp-frontend-production.up.railway.app"
     invite_link = f"{base}/register?token={token}"
+
+    # Send invite email via Resend (non-blocking; does not fail the request if email fails)
+    from app.services.email_service import send_invite_email
+    inviter_name = current.name or current.email
+    asyncio.create_task(asyncio.to_thread(send_invite_email, inv.email, invite_link, inviter_name))
 
     return InvitationResponse(
         id=str(inv.id),

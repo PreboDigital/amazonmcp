@@ -720,6 +720,11 @@ async def list_account_links(
     """
     cred = await _get_credential(db, credential_id)
     access = await _get_access_requested_account(db, cred)
+    if not access:
+        raise HTTPException(
+            status_code=400,
+            detail="Discover accounts on the Dashboard and select an active profile in the header for account links.",
+        )
     client = await _make_client(cred, db)
     try:
         result = await client.query_account_links(access_requested_account=access)
@@ -728,8 +733,7 @@ async def list_account_links(
     except Exception as e:
         logger.error(f"Account links failed: {e}")
         err = safe_error_detail(e, "Failed to fetch account links.")
-        if "profile" in str(e).lower() or "account" in str(e).lower():
-            err += " Ensure you have discovered accounts and selected an active profile."
+        err += " This feature may require a Manager account or may not be available for your account type."
         raise HTTPException(status_code=502, detail=err)
 
 
@@ -878,6 +882,11 @@ async def list_user_invitations(
     """List user invitations for the advertising account. Per doc: supports accessRequestedAccount."""
     cred = await _get_credential(db, credential_id)
     access = await _get_access_requested_account(db, cred)
+    if not access:
+        raise HTTPException(
+            status_code=400,
+            detail="Discover accounts on the Dashboard and select an active profile in the header for user invitations.",
+        )
     client = await _make_client(cred, db)
     try:
         result = await client.list_user_invitations(
@@ -888,7 +897,7 @@ async def list_user_invitations(
     except Exception as e:
         logger.error(f"List invitations failed: {e}")
         err = safe_error_detail(e, "Failed to list user invitations.")
-        err += " User invitations may require a Manager account. Select an active profile and try again."
+        err += " User invitations typically require a Manager account; advertiser accounts may not support this."
         raise HTTPException(status_code=502, detail=err)
 
 

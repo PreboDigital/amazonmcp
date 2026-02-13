@@ -1,28 +1,52 @@
-import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useState, useEffect } from 'react'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { Zap, Loader2 } from 'lucide-react'
 import { useAuth } from '../lib/AuthContext'
 
-export default function Login() {
-  const { login } = useAuth()
+export default function ResetPassword() {
+  const { resetPassword } = useAuth()
   const navigate = useNavigate()
-  const [email, setEmail] = useState('')
+  const [searchParams] = useSearchParams()
+  const tokenFromUrl = searchParams.get('token') || ''
+
+  const [token, setToken] = useState(tokenFromUrl)
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    if (tokenFromUrl) setToken(tokenFromUrl)
+  }, [tokenFromUrl])
 
   async function handleSubmit(e) {
     e.preventDefault()
     setError('')
     setLoading(true)
     try {
-      await login(email, password)
+      await resetPassword(token, password)
       navigate('/', { replace: true })
     } catch (err) {
-      setError(err.message || 'Invalid email or password')
+      setError(err.message || 'Failed to reset password')
     } finally {
       setLoading(false)
     }
+  }
+
+  if (!token) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 px-4">
+        <div className="card p-8 max-w-md text-center">
+          <Zap className="w-12 h-12 text-brand-600 mx-auto mb-4" />
+          <h1 className="text-lg font-semibold text-slate-800 mb-2">Invalid reset link</h1>
+          <p className="text-slate-600 text-sm mb-6">
+            This password reset link is invalid or has expired. Please request a new one.
+          </p>
+          <Link to="/forgot-password" className="btn-primary">
+            Request new link
+          </Link>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -34,8 +58,8 @@ export default function Login() {
               <Zap className="w-8 h-8 text-brand-600" />
             </div>
             <div>
-              <h1 className="text-xl font-semibold text-slate-800">Amazon Ads Optimizer</h1>
-              <p className="text-sm text-slate-500">Sign in to your account</p>
+              <h1 className="text-xl font-semibold text-slate-800">Set new password</h1>
+              <p className="text-sm text-slate-500">Enter your new password below</p>
             </div>
           </div>
 
@@ -46,19 +70,7 @@ export default function Login() {
               </div>
             )}
             <div>
-              <label className="label">Email</label>
-              <input
-                type="email"
-                className="input"
-                placeholder="you@example.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                autoComplete="email"
-              />
-            </div>
-            <div>
-              <label className="label">Password</label>
+              <label className="label">New password</label>
               <input
                 type="password"
                 className="input"
@@ -66,8 +78,10 @@ export default function Login() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
-                autoComplete="current-password"
+                minLength={8}
+                autoComplete="new-password"
               />
+              <p className="mt-1 text-xs text-slate-500">At least 8 characters</p>
             </div>
             <button
               type="submit"
@@ -77,16 +91,13 @@ export default function Login() {
               {loading ? (
                 <Loader2 className="w-5 h-5 animate-spin" />
               ) : (
-                'Sign in'
+                'Reset password'
               )}
             </button>
           </form>
 
-          <p className="mt-6 text-center text-sm text-slate-500 space-y-1">
-            <span className="block">
-              <Link to="/forgot-password" className="text-brand-600 hover:underline">Forgot password?</Link>
-            </span>
-            <span className="block">Need an account? Ask an admin for an invitation link.</span>
+          <p className="mt-6 text-center text-sm text-slate-500">
+            <Link to="/login" className="text-brand-600 hover:underline">Back to login</Link>
           </p>
         </div>
       </div>

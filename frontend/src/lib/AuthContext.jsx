@@ -34,6 +34,13 @@ export function AuthProvider({ children }) {
     return res.user
   }, [setToken])
 
+  const resetPassword = useCallback(async (token, password) => {
+    const res = await authApi.resetPassword(token, password)
+    setToken(res.access_token)
+    setUser(res.user)
+    return res.user
+  }, [setToken])
+
   const logout = useCallback(() => {
     setToken(null)
   }, [setToken])
@@ -81,6 +88,7 @@ export function AuthProvider({ children }) {
     token,
     login,
     register,
+    resetPassword,
     logout,
     checkAuth,
     isAdmin: user?.role === 'admin',
