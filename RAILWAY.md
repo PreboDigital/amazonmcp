@@ -193,6 +193,11 @@ app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="static")
 
 4. **Verify connection**: Hit `GET /api/health` — it returns `"database": "connected"` if the DB is reachable.
 
+5. **Healthcheck failures**: If deploy fails with "Healthcheck failed", check **Deploy logs** (not Build logs) for the actual error. Common causes:
+   - Missing required vars: `ENVIRONMENT=production` requires `SECRET_KEY`, `API_KEY`, `ENCRYPTION_KEY`
+   - Database connection timeout or SSL issues
+   - Healthcheck timeout extended to 120s in `railway.toml`; you can also set `RAILWAY_HEALTHCHECK_TIMEOUT_SEC=300` in Railway Variables for slow cold starts
+
 ---
 
 ## Summary Checklist

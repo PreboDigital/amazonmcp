@@ -49,9 +49,13 @@ async def _bootstrap_first_admin():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting Amazon Ads Optimizer...")
-    await init_db()
-    await _bootstrap_first_admin()
-    logger.info("Database initialized — all tables ready.")
+    try:
+        await init_db()
+        await _bootstrap_first_admin()
+        logger.info("Database initialized — all tables ready.")
+    except Exception as e:
+        logger.error(f"Startup failed (DB/init): {e}", exc_info=True)
+        # Still yield so app can serve /api/health (degraded) and logs are visible
     yield
     logger.info("Shutting down...")
 

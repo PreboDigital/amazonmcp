@@ -18,13 +18,14 @@ settings = get_settings()
 def _get_connect_args():
     """Enable SSL for Railway Postgres (uses rlwy.net proxy with SSL)."""
     url = settings.database_url
+    args = {"timeout": 30}  # Fail fast if DB unreachable
     if "rlwy.net" in url:
         # Railway Postgres requires SSL; use context that accepts self-signed certs
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        return {"ssl": ctx}
-    return {}
+        args["ssl"] = ctx
+    return args
 
 
 engine = create_async_engine(
