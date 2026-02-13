@@ -189,4 +189,46 @@ def extract_ad_asin_sku(ad_data: dict) -> tuple[Optional[str], Optional[str]]:
                     break
             if asin:
                 break
+    # Deep scan: creative.products[].productId, creative.product.asin, etc.
+    if not asin and not sku:
+        for container in (creative.get("products"), creative.get("product"), [creative]):
+            if isinstance(container, dict):
+                container = [container]
+            if not isinstance(container, list):
+                continue
+            for item in container:
+                if not isinstance(item, dict):
+                    continue
+                for k in ("asin", "productId", "product_id"):
+                    v = item.get(k)
+                    if v and _looks_like_asin(str(v)):
+                        asin = asin or str(v)
+                        break
+                if asin:
+                    break
+            if asin:
+                break
     return (asin, sku)
+
+
+def extract_ad_display_name(ad_data: dict, asin: Optional[str] = None, sku: Optional[str] = None) -> Optional[str]:
+    """
+    Extract human-readable display name for an ad.
+    Product ads often lack name/headline; use ASIN/SKU when available.
+    """
+    if not ad_data or not isinstance(ad_data, dict):
+        return None
+    if "ad" in ad_data and isinstance(ad_data["ad"], dict):
+        ad_data = ad_data["ad"]
+    name = ad_data.get("name") or ad_data.get("adName")
+    if name and _is_keyword_like(str(name)):
+        return str(name)
+    creative = ad_data.get("creative") or ad_data.get("productAd") or {}
+    headline = creative.get("headline") or creative.get("brandName")
+    if headline and _is_keyword_like(str(headline)):
+        return str(headline)
+    if asin:
+        return f"ASIN: {asin}"
+    if sku:
+        return f"SKU: {sku}"
+    return None

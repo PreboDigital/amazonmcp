@@ -383,7 +383,8 @@ export default function Layout({ children }) {
 
       {/* Main content */}
       <main className="flex-1 overflow-y-auto lg:pt-0 pt-14 pb-20 lg:pb-0">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-4">
+          <SyncStatusBanner />
           {children}
         </div>
       </main>

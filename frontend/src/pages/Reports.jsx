@@ -40,6 +40,7 @@ import {
 import clsx from 'clsx'
 import { reports } from '../lib/api'
 import { useAccount } from '../lib/AccountContext'
+import { useSync } from '../lib/SyncContext'
 import { FileSearch, Database, AlertCircle, Trash2, History } from 'lucide-react'
 import DateRangePicker from '../components/DateRangePicker'
 
@@ -925,11 +926,17 @@ export default function Reports() {
   // Currency (driven by backend, based on active account's marketplace)
   const [currencyCode, setCurrencyCode] = useState('USD')
 
-  // Search terms
-  const [stSyncing, setStSyncing] = useState(false)
+  // Search terms (sync state from SyncContext for persistence across navigation)
+  const {
+    reportSearchTermsSync,
+    startReportSearchTermsSync,
+    dismissReportSearchTermsSync,
+    reportGenerateSync,
+    startReportGenerateSync,
+  } = useSync()
+  const stSyncing = reportSearchTermsSync.status === 'running'
+  const stError = reportSearchTermsSync.error
   const [stData, setStData] = useState(null)
-  const [stError, setStError] = useState(null)
-  const [stPendingId, setStPendingId] = useState(null)
   const [stFilter, setStFilter] = useState('all') // all | converting | non_converting
 
   const [reportHistory, setReportHistory] = useState([])
@@ -1043,37 +1050,20 @@ export default function Reports() {
     finally { setDeletingReportId(null) }
   }
 
-  async function syncSearchTerms() {
-    if (stSyncing) return
-    setStSyncing(true)
-    setStError(null)
-    try {
-      const result = await reports.searchTermSync(activeAccountId, {
-        pendingReportId: stPendingId || undefined,
-      })
-      if (result.status === 'completed') {
-        setStPendingId(null)
-        await loadSearchTerms()
-      } else if (result.status === 'pending' && result._pending_report_id) {
-        setStPendingId(result._pending_report_id)
-        setStError(`Report is processing at Amazon (ID: ${result._pending_report_id.slice(0, 8)}...). Search term reports can take 5-10 minutes. Click "Sync Search Terms" again to check status.`)
-      } else if (result.status === 'error') {
-        setStError(result.message || 'Failed to sync search terms')
-      }
-    } catch (err) {
-      setStError(err.message || 'Failed to sync search terms')
-    } finally {
-      setStSyncing(false)
-    }
+  function syncSearchTerms() {
+    startReportSearchTermsSync(activeAccountId, reportSearchTermsSync.pendingReportId)
   }
 
-  // Pending report state
-  const [reportPending, setReportPending] = useState(false)
+  // Refresh search terms when sync completes (persists across navigation)
+  useEffect(() => {
+    if (reportSearchTermsSync.status === 'completed' && reportSearchTermsSync.credentialId === activeAccountId) {
+      loadSearchTerms()
+    }
+  }, [reportSearchTermsSync.status, reportSearchTermsSync.credentialId, activeAccountId])
 
   async function generateReport() {
     setGenerating(true)
     setError(null)
-    setReportPending(false)
     const opts = (dateRange.preset === 'custom' || !dateRange.preset) && dateRange.start && dateRange.end
       ? { startDate: dateRange.start, endDate: dateRange.end, compare }
       : { preset: dateRange.preset || 'this_month', compare }
@@ -1085,9 +1075,13 @@ export default function Reports() {
       if (data?.daily_trend?.length) {
         setTrendData(data.daily_trend)
       }
-      // Check if report is still pending at Amazon
+      // If report still pending at Amazon, start background polling (persists across navigation)
       if (data?.report_pending) {
-        setReportPending(true)
+        startReportGenerateSync(activeAccountId, opts, (updatedData) => {
+          setReportData(updatedData)
+          if (updatedData?.currency_code) setCurrencyCode(updatedData.currency_code)
+          if (updatedData?.daily_trend?.length) setTrendData(updatedData.daily_trend)
+        })
       }
     } catch (err) {
       setError(err.message || 'Failed to generate report')
@@ -1607,7 +1601,7 @@ export default function Reports() {
         filter={stFilter}
         onSync={syncSearchTerms}
         onFilterChange={setStFilter}
-        onDismissError={() => setStError(null)}
+        onDismissError={dismissReportSearchTermsSync}
         currencyCode={currencyCode}
         key={activeAccount?.id || activeAccountId}
       />

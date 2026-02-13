@@ -1,5 +1,6 @@
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { AccountProvider } from './lib/AccountContext'
+import { SyncProvider } from './lib/SyncContext'
 import { AuthProvider, useAuth } from './lib/AuthContext'
 import { NotificationProvider } from './lib/NotificationContext'
 import ToastContainer from './components/ToastContainer'
@@ -51,6 +52,7 @@ export default function App() {
             <ProtectedRoute>
               <NotificationProvider>
                 <AccountProvider>
+                  <SyncProvider>
                   <Layout>
                   <Routes>
                     <Route path="/" element={<Dashboard />} />
@@ -68,6 +70,7 @@ export default function App() {
                   </Routes>
                 </Layout>
                 <ToastContainer />
+                  </SyncProvider>
               </AccountProvider>
             </NotificationProvider>
             </ProtectedRoute>

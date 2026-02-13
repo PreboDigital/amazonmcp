@@ -25,7 +25,7 @@ from app.models import (
 from app.services.token_service import get_mcp_client_with_fresh_token
 from app.services.reporting_service import get_date_range, DATE_PRESETS
 from app.services.product_image_service import get_product_image_url
-from app.utils import parse_uuid, safe_error_detail, utcnow, extract_target_expression, extract_ad_asin_sku
+from app.utils import parse_uuid, safe_error_detail, utcnow, extract_target_expression, extract_ad_asin_sku, extract_ad_display_name
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -1273,6 +1273,11 @@ async def list_ads(
             asin_val = asin_val or ra
             sku_val = sku_val or rs
         ad_name_val = a.ad_name or ((a.raw_data or {}).get("creative") or {}).get("headline") if a.raw_data else a.ad_name
+        if not ad_name_val:
+            ad_name_val = (f"ASIN: {asin_val}" if asin_val else None) or (f"SKU: {sku_val}" if sku_val else None)
+        if not ad_name_val and a.raw_data:
+            ra, rs = extract_ad_asin_sku(a.raw_data)
+            ad_name_val = extract_ad_display_name(a.raw_data, ra, rs)
         d = {
             "id": str(a.id),
             "amazon_ad_id": a.amazon_ad_id,
@@ -1722,7 +1727,7 @@ async def run_full_sync(
                 if not ad_asin and not ad_sku and ad_data and not _logged_ad_debug:
                     logger.warning(f"Ad ASIN extraction failed: keys={list(ad_data.keys())}, creative keys={list((ad_data.get('creative') or {}).keys())}, sample={str(ad_data)[:600]}")
                     _logged_ad_debug = True
-                ad_name = ad_data.get("name") or ad_data.get("adName") or (ad_data.get("creative") or {}).get("headline")
+                ad_name = extract_ad_display_name(ad_data, ad_asin, ad_sku) or ad_data.get("name") or ad_data.get("adName") or (ad_data.get("creative") or {}).get("headline")
                 if ad:
                     ad.ad_name = ad_name or ad.ad_name
                     ad.ad_type = ad_data.get("adType") or ad_data.get("type") or ad.ad_type
