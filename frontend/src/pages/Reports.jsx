@@ -1266,7 +1266,7 @@ export default function Reports() {
           {period ? (
             <span className="text-slate-500 flex items-center gap-1.5 font-medium">
               <Calendar size={13} className="text-brand-500" />
-              {period.label || preset.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}:
+              {period.label || (period.preset || 'custom').replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}:
               <span className="text-slate-700">{formatDateRange(period.start_date, period.end_date)}</span>
             </span>
           ) : (

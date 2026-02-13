@@ -24,6 +24,7 @@ import {
   UserPlus,
   ChevronDown,
   ChevronUp,
+  Radio,
 } from 'lucide-react'
 import StatusBadge from '../components/StatusBadge'
 import EmptyState from '../components/EmptyState'
@@ -80,6 +81,9 @@ export default function Settings() {
   const [accountBillingExpanded, setAccountBillingExpanded] = useState(true)
   const [termsExpanded, setTermsExpanded] = useState(false)
   const [invitationsExpanded, setInvitationsExpanded] = useState(false)
+  const [streamSubs, setStreamSubs] = useState([])
+  const [streamSubsLoading, setStreamSubsLoading] = useState(false)
+  const [streamSubsExpanded, setStreamSubsExpanded] = useState(false)
 
   useEffect(() => {
     loadCredentials()
@@ -128,6 +132,15 @@ export default function Settings() {
       setInvitationsError(err.message || 'Failed to load invitations')
       setInvitations([])
     } finally { setInvitationsLoading(false) }
+  }
+
+  async function loadStreamSubscriptions() {
+    setStreamSubsLoading(true)
+    try {
+      const data = await accounts.streamSubscriptions()
+      setStreamSubs(data?.subscriptions || [])
+    } catch { setStreamSubs([]) }
+    finally { setStreamSubsLoading(false) }
   }
 
   async function sendInvite(e) {
@@ -776,6 +789,31 @@ export default function Settings() {
                     </ul>
                   ) : (
                     <p className="text-xs text-slate-400">No invitations. Invite users to share access to your advertising account.</p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Stream Subscriptions (ADSP) */}
+            <div className="pt-4 border-t border-slate-100">
+              <button onClick={() => { setStreamSubsExpanded(e => !e); if (!streamSubsExpanded && streamSubs.length === 0) loadStreamSubscriptions() }} className="flex items-center gap-2 text-xs font-semibold text-slate-600 uppercase tracking-wide hover:text-slate-800">
+                <Radio size={14} /> ADSP Stream subscriptions
+                {streamSubsExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+              </button>
+              {streamSubsExpanded && (
+                <div className="mt-3 space-y-2">
+                  <button onClick={loadStreamSubscriptions} disabled={streamSubsLoading} className="btn-secondary text-xs">
+                    {streamSubsLoading ? <Loader2 size={12} className="animate-spin" /> : <Radio size={12} />} Load subscriptions
+                  </button>
+                  {streamSubs.length > 0 ? (
+                    <ul className="text-xs text-slate-600 space-y-1">
+                      {streamSubs.slice(0, 5).map((s, i) => (
+                        <li key={i}>{typeof s === 'object' ? (s.name || s.subscriptionId || s.id || JSON.stringify(s).slice(0, 50)) : String(s)}</li>
+                      ))}
+                      {streamSubs.length > 5 && <li className="text-slate-400">+{streamSubs.length - 5} more</li>}
+                    </ul>
+                  ) : streamSubsLoading ? null : (
+                    <p className="text-xs text-slate-400">No ADSP stream subscriptions. Enable ADSP to use purchase/traffic overview streams.</p>
                   )}
                 </div>
               )}

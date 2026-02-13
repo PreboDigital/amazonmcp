@@ -110,6 +110,14 @@ export const accounts = {
       body: JSON.stringify(payload),
     }),
   // User invitations
+  streamSubscriptions: (credentialId, opts = {}) => {
+    const params = new URLSearchParams()
+    if (credentialId) params.set('credential_id', credentialId)
+    if (opts.maxResults) params.set('max_results', opts.maxResults)
+    if (opts.nextToken) params.set('next_token', opts.nextToken)
+    const qs = params.toString()
+    return request(`/accounts/stream-subscriptions${qs ? `?${qs}` : ''}`)
+  },
   invitations: {
     list: (credentialId, opts = {}) => {
       const params = new URLSearchParams()

@@ -949,10 +949,38 @@ async def update_user_invitation(
         raise HTTPException(status_code=502, detail=safe_error_detail(e, "Failed to update user invitation."))
 
 
+# ── Stream Subscriptions (ADSP) ────────────────────────────────────────
+
+
+@router.get("/stream-subscriptions")
+async def list_stream_subscriptions(
+    credential_id: Optional[str] = Query(None),
+    max_results: int = Query(50, ge=1, le=100),
+    next_token: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """List ADSP stream subscriptions (purchase/traffic overview)."""
+    cred = await _get_credential(db, credential_id)
+    client = await _make_client(cred, db)
+    try:
+        result = await client.list_stream_subscriptions(
+            max_results=max_results, next_token=next_token
+        )
+        subs = _extract_list(result, ["streamSubscriptions", "subscriptions", "result", "results", "items"])
+        return {"subscriptions": subs, "count": len(subs), "next_token": result.get("nextToken")}
+    except Exception as e:
+        logger.error(f"List stream subscriptions failed: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail=safe_error_detail(e, "Failed to list stream subscriptions. ADSP may not be enabled."),
+        )
+
+
 # ── Invoices ────────────────────────────────────────────────────────────
 
 
 @router.get("/invoices")
+async def list_invoices(
     credential_id: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):

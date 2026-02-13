@@ -951,13 +951,20 @@ class AmazonAdsMCP:
         max_results: int = 50,
         next_token: str = None,
     ) -> dict:
-        """List stream subscriptions."""
-        body = {"maxResults": max_results}
+        """
+        List stream subscriptions.
+        Per stream doc: body has accessRequestedAccount only;
+        queryParameters has nextToken and maxResults.
+        """
+        body = {}
         if access_requested_account:
             body["accessRequestedAccount"] = access_requested_account
+        args = {"body": body}
+        qp = {"maxResults": max_results}
         if next_token:
-            body["nextToken"] = next_token
-        return await self.call_tool("stream_subscriptions-list_subscription", {"body": body})
+            qp["nextToken"] = next_token
+        args["queryParameters"] = qp
+        return await self.call_tool("stream_subscriptions-list_subscription", args)
 
     async def retrieve_stream_subscription(
         self,
