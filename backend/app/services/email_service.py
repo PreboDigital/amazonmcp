@@ -83,3 +83,65 @@ def send_password_reset_email(to_email: str, reset_link: str) -> bool:
     except Exception as e:
         logger.exception(f"Failed to send password reset email to {to_email}: {e}")
         return False
+
+
+def send_sync_complete_email(
+    to_email: str,
+    success: bool,
+    stats: Optional[dict] = None,
+    error_message: Optional[str] = None,
+    account_name: Optional[str] = None,
+) -> bool:
+    """Send campaign sync completion email. Returns True if sent, False if skipped."""
+    from app.config import get_settings
+    settings = get_settings()
+    if not settings.resend_api_key or not settings.from_email:
+        logger.info("Resend not configured; skipping sync complete email")
+        return False
+
+    try:
+        import resend
+        resend.api_key = settings.resend_api_key
+
+        if success:
+            subject = "Campaign sync completed — Amazon Ads Optimizer"
+            stats_str = ""
+            if stats:
+                stats_str = (
+                    f"<p><strong>Synced:</strong> {stats.get('campaigns', 0)} campaigns, "
+                    f"{stats.get('ad_groups', 0)} ad groups, "
+                    f"{stats.get('targets', 0)} targets, "
+                    f"{stats.get('ads', 0)} ads</p>"
+                )
+            account_str = f" for {account_name}" if account_name else ""
+            html = f"""
+            <p>Hello,</p>
+            <p>Your campaign sync{account_str} has completed successfully.</p>
+            {stats_str}
+            <p>You can now view your updated campaigns in the Campaign Manager.</p>
+            <p>— Amazon Ads Optimizer</p>
+            """
+        else:
+            subject = "Campaign sync failed — Amazon Ads Optimizer"
+            err = error_message or "An unknown error occurred."
+            account_str = f" for {account_name}" if account_name else ""
+            html = f"""
+            <p>Hello,</p>
+            <p>Your campaign sync{account_str} failed.</p>
+            <p><strong>Error:</strong> {err}</p>
+            <p>Please check your credentials and try again, or contact support if the issue persists.</p>
+            <p>— Amazon Ads Optimizer</p>
+            """
+
+        params = {
+            "from": settings.from_email,
+            "to": [to_email],
+            "subject": subject,
+            "html": html,
+        }
+        resend.Emails.send(params)
+        logger.info(f"Sync complete email sent to {to_email} (success={success})")
+        return True
+    except Exception as e:
+        logger.exception(f"Failed to send sync complete email to {to_email}: {e}")
+        return False

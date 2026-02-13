@@ -34,6 +34,7 @@ import {
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useAccount } from '../lib/AccountContext'
+import { useNotifications } from '../lib/NotificationContext'
 import { campaignManager, accounts } from '../lib/api'
 import StatusBadge from '../components/StatusBadge'
 import EmptyState from '../components/EmptyState'
@@ -379,6 +380,7 @@ export default function CampaignManager() {
   const [loading, setLoading] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [syncStep, setSyncStep] = useState('') // progress text during sync
+  const [syncProgressPct, setSyncProgressPct] = useState(0)
   const [searchTerm, setSearchTerm] = useState('')
   const [stateFilter, setStateFilter] = useState('')
   const [campaignTypeFilter, setCampaignTypeFilter] = useState('')
@@ -558,27 +560,83 @@ export default function CampaignManager() {
     loadCampaigns(p)
   }
 
-  // ── Sync ────────────────────────────────────────────────────────
+  // ── Sync (background with progress, browser + app notifications) ─
+  const {
+    success: notifySuccess,
+    error: notifyError,
+    requestBrowserNotificationPermission,
+    showBrowserNotification,
+  } = useNotifications()
+
+  const syncAbortRef = useRef(false)
+
   async function handleSync() {
+    syncAbortRef.current = false
     setSyncing(true)
-    setSyncStep('Pulling campaigns from Amazon Ads (SP, SB, SD)...')
+    setSyncStep('Starting sync...')
+    setSyncProgressPct(0)
     setError(null)
+
+    // Request browser notification permission so user can navigate away
+    const hasBrowserNotif = await requestBrowserNotificationPermission()
+
     try {
-      const result = await campaignManager.sync(activeAccountId)
-      const s = result.stats
-      setSyncStep('')
-      setSuccessMsg(`Synced: ${s.campaigns} campaigns, ${s.ad_groups} ad groups, ${s.targets} targets, ${s.ads} ads`)
-      setTimeout(() => setSuccessMsg(null), 8000)
-      await loadStats()
-      await loadCampaigns(1)
+      const { job_id } = await campaignManager.syncStart(activeAccountId)
+      const pollInterval = 2000
+
+      const poll = async () => {
+        if (syncAbortRef.current) return
+        const status = await campaignManager.syncStatus(job_id)
+        if (syncAbortRef.current) return
+        setSyncStep(status.step || status.status)
+        setSyncProgressPct(status.progress_pct ?? 0)
+
+        if (status.status === 'completed') {
+          const s = status.stats || {}
+          setSyncStep('')
+          setSuccessMsg(`Synced: ${s.campaigns || 0} campaigns, ${s.ad_groups || 0} ad groups, ${s.targets || 0} targets, ${s.ads || 0} ads`)
+          setTimeout(() => setSuccessMsg(null), 8000)
+          notifySuccess('Campaign sync complete', `Synced ${s.campaigns || 0} campaigns, ${s.ad_groups || 0} ad groups, ${s.targets || 0} targets, ${s.ads || 0} ads`)
+          if (hasBrowserNotif) {
+            showBrowserNotification('Campaign sync complete', {
+              body: `Synced ${s.campaigns || 0} campaigns, ${s.ad_groups || 0} ad groups.`,
+            })
+          }
+          await loadStats()
+          await loadCampaigns(1)
+          setSyncing(false)
+          return
+        }
+
+        if (status.status === 'failed') {
+          setSyncStep('')
+          setError(status.error_message || 'Sync failed')
+          notifyError('Campaign sync failed', status.error_message || 'Sync failed')
+          if (hasBrowserNotif) {
+            showBrowserNotification('Campaign sync failed', { body: status.error_message || 'Sync failed' })
+          }
+          setSyncing(false)
+          return
+        }
+
+        setTimeout(poll, pollInterval)
+      }
+      poll()
     } catch (err) {
       setSyncStep('')
       setError(err.message)
-    } finally {
+      notifyError('Sync failed', err.message)
+      if (hasBrowserNotif) {
+        showBrowserNotification('Campaign sync failed', { body: err.message })
+      }
       setSyncing(false)
-      setSyncStep('')
     }
   }
+
+  // Cleanup poll on unmount (user navigates away)
+  useEffect(() => {
+    return () => { syncAbortRef.current = true }
+  }, [])
 
   // ── Campaign actions ────────────────────────────────────────────
   function handleEditCampaign(campaign) {
@@ -1187,10 +1245,16 @@ export default function CampaignManager() {
         <div className="card bg-blue-50 border-blue-200 px-5 py-4">
           <div className="flex items-center gap-3">
             <Loader2 size={18} className="animate-spin text-blue-600 shrink-0" />
-            <div className="flex-1">
+            <div className="flex-1 min-w-0">
               <p className="text-sm font-medium text-blue-900">Syncing data from Amazon Ads...</p>
               <p className="text-xs text-blue-600 mt-0.5">{syncStep}</p>
-              <p className="text-[10px] text-blue-400 mt-1">This may take several minutes for large accounts. Each entity type (campaigns, ad groups, targets, ads) is fetched with full pagination.</p>
+              <div className="mt-2 h-1.5 bg-blue-100 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-blue-500 transition-all duration-300"
+                  style={{ width: `${syncProgressPct}%` }}
+                />
+              </div>
+              <p className="text-[10px] text-blue-400 mt-1.5">You can navigate away — you&apos;ll get a browser notification and email when sync completes.</p>
             </div>
           </div>
         </div>

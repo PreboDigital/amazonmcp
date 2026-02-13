@@ -1,6 +1,8 @@
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { AccountProvider } from './lib/AccountContext'
 import { AuthProvider, useAuth } from './lib/AuthContext'
+import { NotificationProvider } from './lib/NotificationContext'
+import ToastContainer from './components/ToastContainer'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
 import CampaignManager from './pages/CampaignManager'
@@ -47,8 +49,9 @@ export default function App() {
           path="/*"
           element={
             <ProtectedRoute>
-              <AccountProvider>
-                <Layout>
+              <NotificationProvider>
+                <AccountProvider>
+                  <Layout>
                   <Routes>
                     <Route path="/" element={<Dashboard />} />
                     <Route path="/campaigns" element={<CampaignManager />} />
@@ -64,7 +67,9 @@ export default function App() {
                     <Route path="*" element={<Navigate to="/" replace />} />
                   </Routes>
                 </Layout>
+                <ToastContainer />
               </AccountProvider>
+            </NotificationProvider>
             </ProtectedRoute>
           }
         />

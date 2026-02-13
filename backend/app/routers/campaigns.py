@@ -4,21 +4,23 @@ Maps directly to the Amazon Ads MCP Campaign Management API.
 All mutations flow through the approval queue unless `skip_approval` is set.
 """
 
+import asyncio
 import logging
 import uuid as uuid_mod
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Callable, Awaitable
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_, and_
 
-from app.database import get_db
+from app.database import get_db, async_session
+from app.auth import get_current_user
 from app.models import (
-    Credential, Campaign, AdGroup, Target, Ad, AdAssociation,
+    Account, Credential, Campaign, AdGroup, Target, Ad, AdAssociation,
     ActivityLog, PendingChange, CampaignPerformanceDaily, SearchTermPerformance,
-    AppSettings,
+    AppSettings, SyncJob, User,
 )
 from app.services.token_service import get_mcp_client_with_fresh_token
 from app.services.reporting_service import get_date_range, DATE_PRESETS
@@ -1476,16 +1478,54 @@ async def delete_ad(
 #  SYNC — Pull fresh data from MCP into local cache
 # ══════════════════════════════════════════════════════════════════════
 
-async def run_full_sync(db: AsyncSession, credential_id: Optional[str] = None) -> dict:
+async def _update_sync_job(
+    db: AsyncSession,
+    job_id: uuid_mod.UUID,
+    step: str,
+    progress_pct: int,
+    stats: Optional[dict] = None,
+    status: Optional[str] = None,
+    error_message: Optional[str] = None,
+    completed_at: Optional[datetime] = None,
+) -> None:
+    """Update SyncJob progress. Used by background sync task."""
+    result = await db.execute(select(SyncJob).where(SyncJob.id == job_id))
+    job = result.scalar_one_or_none()
+    if job:
+        job.step = step
+        job.progress_pct = progress_pct
+        if stats is not None:
+            job.stats = stats
+        if status:
+            job.status = status
+        if error_message is not None:
+            job.error_message = error_message
+        if completed_at is not None:
+            job.completed_at = completed_at
+        await db.flush()
+
+
+async def run_full_sync(
+    db: AsyncSession,
+    credential_id: Optional[str] = None,
+    job_id: Optional[uuid_mod.UUID] = None,
+    on_progress: Optional[Callable[[str, int, dict], Awaitable[None]]] = None,
+) -> dict:
     """
-    Run full campaign/ad group/target/ad sync. Used by both POST /sync and cron.
+    Run full campaign/ad group/target/ad sync. Used by POST /sync, cron, and background job.
+    When job_id and on_progress are provided, updates SyncJob after each step.
     """
     cred = await _get_credential(db, credential_id)
     client = await _make_client(cred, db)
     stats = {"campaigns": 0, "ad_groups": 0, "targets": 0, "ads": 0}
 
+    async def _progress(step: str, pct: int, s: dict) -> None:
+        if on_progress:
+            await on_progress(step, pct, s)
+
     try:
         # 1. Sync campaigns
+        await _progress("Pulling campaigns from Amazon Ads (SP, SB, SD)...", 10, stats)
         raw_campaigns = await client.query_campaigns()
         campaign_list = _extract_list(raw_campaigns, ["campaigns", "result", "results"])
         for camp_data in campaign_list:
@@ -1531,6 +1571,7 @@ async def run_full_sync(db: AsyncSession, credential_id: Optional[str] = None) -
                 db.add(campaign)
             stats["campaigns"] += 1
 
+        await _progress("Syncing ad groups...", 35, stats)
         # 2. Sync ad groups (SP, SB, SD)
         raw_groups = await client.query_ad_groups(all_products=True)
         group_list = _extract_list(raw_groups, ["adGroups", "result", "results"])
@@ -1581,6 +1622,7 @@ async def run_full_sync(db: AsyncSession, credential_id: Optional[str] = None) -
                 db.add(ad_group)
             stats["ad_groups"] += 1
 
+        await _progress("Syncing targets (keywords, product targets)...", 60, stats)
         # 3. Sync targets (keywords/product targets for SP, SB, SD)
         raw_targets = await client.query_targets(all_products=True)
         target_list = _extract_list(raw_targets, ["targets", "result", "results"])
@@ -1643,6 +1685,7 @@ async def run_full_sync(db: AsyncSession, credential_id: Optional[str] = None) -
                 db.add(target)
             stats["targets"] += 1
 
+        await _progress("Syncing ads...", 85, stats)
         # 4. Sync ads
         try:
             raw_ads = await client.query_ads(all_products=True)
@@ -1702,6 +1745,7 @@ async def run_full_sync(db: AsyncSession, credential_id: Optional[str] = None) -
         except Exception as e:
             logger.warning(f"Ad sync failed (non-critical): {e}")
 
+        await _progress("Finishing...", 100, stats)
         db.add(ActivityLog(
             credential_id=cred.id,
             action="full_sync",
@@ -1719,16 +1763,165 @@ async def run_full_sync(db: AsyncSession, credential_id: Optional[str] = None) -
         raise HTTPException(status_code=502, detail=safe_error_detail(e, "Campaign operation failed. Please try again."))
 
 
+async def _run_sync_background(
+    job_id: uuid_mod.UUID,
+    credential_id: Optional[str],
+    user_email: Optional[str],
+    account_name: Optional[str],
+) -> None:
+    """Run sync in background, update SyncJob progress, send email on completion."""
+    from app.services.email_service import send_sync_complete_email
+
+    async def on_progress(step: str, pct: int, s: dict) -> None:
+        """Update SyncJob in a separate session so polling sees progress without committing sync data."""
+        async with async_session() as job_db:
+            await _update_sync_job(job_db, job_id, step, pct, stats=s)
+            await job_db.commit()
+
+    async with async_session() as db:
+        try:
+            result = await run_full_sync(db, credential_id, job_id=job_id, on_progress=on_progress)
+            await db.commit()
+
+            # Mark completed
+            await _update_sync_job(
+                db, job_id, "Completed", 100,
+                stats=result.get("stats"),
+                status="completed",
+                completed_at=utcnow(),
+            )
+            await db.commit()
+
+            # Send email
+            if user_email:
+                asyncio.create_task(asyncio.to_thread(
+                    send_sync_complete_email,
+                    user_email,
+                    success=True,
+                    stats=result.get("stats"),
+                    account_name=account_name,
+                ))
+        except Exception as e:
+            logger.exception(f"Background sync failed: {e}")
+            err_msg = safe_error_detail(e, "Campaign sync failed.")
+            try:
+                await _update_sync_job(
+                    db, job_id, "Failed", 0,
+                    status="failed",
+                    error_message=err_msg,
+                    completed_at=utcnow(),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+            if user_email:
+                asyncio.create_task(asyncio.to_thread(
+                    send_sync_complete_email,
+                    user_email,
+                    success=False,
+                    error_message=err_msg,
+                    account_name=account_name,
+                ))
+
+
 @router.post("/sync")
 async def sync_all(
     credential_id: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Full sync: Pull campaigns, ad groups, targets, and ads from MCP
-    and cache them in the local database.
+    Full sync (blocking): Pull campaigns, ad groups, targets, and ads from MCP.
+    Used by cron and programmatic calls. For UI with progress tracking, use POST /sync/start.
     """
     return await run_full_sync(db, credential_id)
+
+
+@router.post("/sync/start")
+async def sync_start(
+    credential_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """
+    Start campaign sync in background. Returns job_id immediately.
+    Poll GET /sync/{job_id} for progress. Email sent on completion.
+    """
+    cred = await _get_credential(db, credential_id)
+    job = SyncJob(
+        credential_id=cred.id,
+        user_id=user.id,
+        status="running",
+        step="Starting...",
+        progress_pct=0,
+    )
+    db.add(job)
+    await db.flush()
+
+    # Get account name for email
+    account_name = None
+    acc_result = await db.execute(
+        select(Account).where(Account.credential_id == cred.id).limit(1)
+    )
+    acc = acc_result.scalar_one_or_none()
+    if acc:
+        account_name = acc.account_name or acc.amazon_account_id
+
+    asyncio.create_task(_run_sync_background(
+        job.id, credential_id, user.email, account_name,
+    ))
+    return {"job_id": str(job.id), "status": "started"}
+
+
+@router.get("/sync/{job_id}")
+async def sync_status(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Poll for sync job progress."""
+    jid = parse_uuid(job_id, "job_id")
+    result = await db.execute(select(SyncJob).where(SyncJob.id == jid))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Sync job not found")
+    return {
+        "job_id": str(job.id),
+        "status": job.status,
+        "step": job.step,
+        "progress_pct": job.progress_pct or 0,
+        "stats": job.stats,
+        "error_message": job.error_message,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+    }
+
+
+@router.get("/sync/latest")
+async def sync_latest(
+    credential_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the latest sync job for the credential."""
+    cred = await _get_credential(db, credential_id)
+    result = await db.execute(
+        select(SyncJob)
+        .where(SyncJob.credential_id == cred.id)
+        .order_by(SyncJob.created_at.desc())
+        .limit(1)
+    )
+    job = result.scalar_one_or_none()
+    if not job:
+        return {"job": None}
+    return {
+        "job": {
+            "job_id": str(job.id),
+            "status": job.status,
+            "step": job.step,
+            "progress_pct": job.progress_pct or 0,
+            "stats": job.stats,
+            "error_message": job.error_message,
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+            "created_at": job.created_at.isoformat() if job.created_at else None,
+        }
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════

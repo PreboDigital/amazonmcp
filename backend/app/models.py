@@ -1022,6 +1022,32 @@ class PasswordResetToken(Base):
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  SYNC JOBS — Campaign sync progress tracking for long-running syncs
+# ══════════════════════════════════════════════════════════════════════
+
+class SyncJob(Base):
+    """Tracks campaign sync progress. Enables polling, browser notifications, and email alerts."""
+    __tablename__ = "sync_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    credential_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("credentials.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="running")  # running, completed, failed
+    step: Mapped[str] = mapped_column(String(128), nullable=True)  # e.g. "Syncing campaigns...", "Syncing ad groups..."
+    progress_pct: Mapped[int] = mapped_column(Integer, default=0)  # 0-100
+    stats: Mapped[dict] = mapped_column(JSON, nullable=True)  # {campaigns, ad_groups, targets, ads}
+    error_message: Mapped[str] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    completed_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_sync_jobs_credential_id", "credential_id"),
+        Index("ix_sync_jobs_status", "status"),
+        Index("ix_sync_jobs_created_at", "created_at"),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  APP SETTINGS — Application-wide settings (LLM configuration, etc.)
 # ══════════════════════════════════════════════════════════════════════
 

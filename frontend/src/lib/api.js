@@ -391,9 +391,14 @@ export const campaignManager = {
   stats: (credentialId) =>
     request(`/campaigns/stats${credentialId ? `?credential_id=${credentialId}` : ''}`),
 
-  // Sync
+  // Sync (blocking — use syncStart + syncStatus for progress tracking)
   sync: (credentialId) =>
     request(`/campaigns/sync${credentialId ? `?credential_id=${credentialId}` : ''}`, { method: 'POST' }),
+  syncStart: (credentialId) =>
+    request(`/campaigns/sync/start${credentialId ? `?credential_id=${credentialId}` : ''}`, { method: 'POST' }),
+  syncStatus: (jobId) => request(`/campaigns/sync/${jobId}`),
+  syncLatest: (credentialId) =>
+    request(`/campaigns/sync/latest${credentialId ? `?credential_id=${credentialId}` : ''}`),
 
   // Campaigns CRUD
   listCampaigns: (credentialId, opts = {}) => {
