@@ -945,6 +945,8 @@ export default function Reports() {
   const [deletingReportId, setDeletingReportId] = useState(null)
 
   const isInitialMount = useRef(true)
+  const mountedRef = useRef(true)
+  useEffect(() => () => { mountedRef.current = false }, [])
 
   // Load initial data on mount / account change
   // Use activeAccount?.id so we refetch when switching between profiles under the same credential
@@ -1078,6 +1080,7 @@ export default function Reports() {
       // If report still pending at Amazon, start background polling (persists across navigation)
       if (data?.report_pending) {
         startReportGenerateSync(activeAccountId, opts, (updatedData) => {
+          if (!mountedRef.current) return
           setReportData(updatedData)
           if (updatedData?.currency_code) setCurrencyCode(updatedData.currency_code)
           if (updatedData?.daily_trend?.length) setTrendData(updatedData.daily_trend)
