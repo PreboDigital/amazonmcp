@@ -1290,8 +1290,8 @@ export default function Reports() {
         </div>
       )}
 
-      {/* Report still processing at Amazon */}
-      {reportPending && (
+      {/* Report still processing at Amazon (persistent via SyncContext) */}
+      {reportGenerateSync.status === 'running' && (
         <div className="card bg-amber-50 border-amber-200 p-4 flex items-center gap-3">
           <Loader2 size={16} className="text-amber-500 shrink-0 animate-spin" />
           <div className="flex-1">

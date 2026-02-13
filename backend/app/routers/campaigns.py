@@ -1921,28 +1921,6 @@ async def sync_start(
     return {"job_id": str(job.id), "status": "started"}
 
 
-@router.get("/sync/{job_id}")
-async def sync_status(
-    job_id: str,
-    db: AsyncSession = Depends(get_db),
-):
-    """Poll for sync job progress."""
-    jid = parse_uuid(job_id, "job_id")
-    result = await db.execute(select(SyncJob).where(SyncJob.id == jid))
-    job = result.scalar_one_or_none()
-    if not job:
-        raise HTTPException(status_code=404, detail="Sync job not found")
-    return {
-        "job_id": str(job.id),
-        "status": job.status,
-        "step": job.step,
-        "progress_pct": job.progress_pct or 0,
-        "stats": job.stats,
-        "error_message": job.error_message,
-        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
-    }
-
-
 @router.get("/sync/latest")
 async def sync_latest(
     credential_id: Optional[str] = Query(None),
@@ -1970,6 +1948,28 @@ async def sync_latest(
             "completed_at": job.completed_at.isoformat() if job.completed_at else None,
             "created_at": job.created_at.isoformat() if job.created_at else None,
         }
+    }
+
+
+@router.get("/sync/{job_id}")
+async def sync_status(
+    job_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Poll for sync job progress."""
+    jid = parse_uuid(job_id, "job_id")
+    result = await db.execute(select(SyncJob).where(SyncJob.id == jid))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Sync job not found")
+    return {
+        "job_id": str(job.id),
+        "status": job.status,
+        "step": job.step,
+        "progress_pct": job.progress_pct or 0,
+        "stats": job.stats,
+        "error_message": job.error_message,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
     }
 
 
