@@ -91,6 +91,13 @@ def extract_target_expression(tgt_data: dict) -> Optional[str]:
         # themeTarget has matchType (e.g. KEYWORDS_CLOSE_MATCH) — use as fallback label
         if detail_key == "themeTarget" and detail_val.get("matchType"):
             return f"Theme: {detail_val['matchType']}"
+        # productCategoryTarget: productCategoryRefinement.productCategoryRefinement.productCategoryId (nested)
+        if detail_key == "productCategoryTarget":
+            cat_id = _extract_product_category_id(detail_val)
+            if cat_id:
+                return f"Category: {cat_id}"
+            if detail_val.get("matchType"):
+                return f"Category: {detail_val['matchType']}"
         # productTarget / category may have resolvedExpression
         resolved = detail_val.get("resolvedExpression") or detail_val.get("productCategoryResolved")
         if resolved and isinstance(resolved, str):
@@ -130,6 +137,20 @@ def extract_target_expression(tgt_data: dict) -> Optional[str]:
         if v and isinstance(v, str):
             return v
 
+    return None
+
+
+def _extract_product_category_id(obj: dict, depth: int = 0) -> Optional[str]:
+    """Recursively find productCategoryId in productCategoryTarget nested structure."""
+    if not obj or not isinstance(obj, dict) or depth > 5:
+        return None
+    if "productCategoryId" in obj and obj["productCategoryId"]:
+        return str(obj["productCategoryId"])
+    for v in obj.values():
+        if isinstance(v, dict):
+            found = _extract_product_category_id(v, depth + 1)
+            if found:
+                return found
     return None
 
 
@@ -208,6 +229,36 @@ def extract_ad_asin_sku(ad_data: dict) -> tuple[Optional[str], Optional[str]]:
                     break
             if asin:
                 break
+    # productAd at top level (some MCP formats)
+    product_ad = ad_data.get("productAd")
+    if isinstance(product_ad, dict) and not asin:
+        for k in ("asin", "productId", "asins"):
+            v = product_ad.get(k)
+            if isinstance(v, list) and v:
+                v = v[0]
+            if v and _looks_like_asin(str(v)):
+                asin = str(v)
+                break
+    # Recursive scan for ASIN-like values (handles unknown MCP nesting)
+    if not asin and not sku:
+
+        def _find_asin(obj, depth: int = 0) -> Optional[str]:
+            if depth > 6:
+                return None
+            if isinstance(obj, dict):
+                for key in ("asin", "productId", "product_id"):
+                    v = obj.get(key)
+                    if v and _looks_like_asin(str(v)):
+                        return str(v)
+                for v in obj.values():
+                    found = _find_asin(v, depth + 1)
+                    if found:
+                        return found
+            elif isinstance(obj, list) and obj:
+                return _find_asin(obj[0], depth + 1)
+            return None
+
+        asin = _find_asin(ad_data)
     return (asin, sku)
 
 
