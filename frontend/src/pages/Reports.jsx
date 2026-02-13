@@ -40,7 +40,7 @@ import {
 import clsx from 'clsx'
 import { reports } from '../lib/api'
 import { useAccount } from '../lib/AccountContext'
-import { FileSearch, Database, AlertCircle } from 'lucide-react'
+import { FileSearch, Database, AlertCircle, Trash2, History } from 'lucide-react'
 import DateRangePicker from '../components/DateRangePicker'
 
 
@@ -932,6 +932,11 @@ export default function Reports() {
   const [stPendingId, setStPendingId] = useState(null)
   const [stFilter, setStFilter] = useState('all') // all | converting | non_converting
 
+  const [reportHistory, setReportHistory] = useState([])
+  const [reportHistoryLoading, setReportHistoryLoading] = useState(false)
+  const [reportHistoryExpanded, setReportHistoryExpanded] = useState(false)
+  const [deletingReportId, setDeletingReportId] = useState(null)
+
   const isInitialMount = useRef(true)
 
   // Load initial data on mount / account change
@@ -1018,6 +1023,24 @@ export default function Reports() {
       const data = await reports.searchTermsSummary(activeAccountId)
       setStData(data)
     } catch (err) { /* ignore — may not have data yet */ }
+  }
+
+  async function loadReportHistory() {
+    setReportHistoryLoading(true)
+    try {
+      const data = await reports.history(activeAccountId, 20)
+      setReportHistory(data || [])
+    } catch { setReportHistory([]) }
+    finally { setReportHistoryLoading(false) }
+  }
+
+  async function deleteReport(id) {
+    setDeletingReportId(id)
+    try {
+      await reports.delete(id, activeAccountId)
+      setReportHistory(prev => prev.filter(r => r.id !== id))
+    } catch (err) { setError(err.message) }
+    finally { setDeletingReportId(null) }
   }
 
   async function syncSearchTerms() {
@@ -1657,6 +1680,59 @@ export default function Reports() {
           />
         </div>
       )}
+
+      {/* ── Report History ─────────────────────────────────────────── */}
+      <div className="card overflow-hidden">
+        <button
+          onClick={() => {
+            setReportHistoryExpanded(e => !e)
+            if (!reportHistoryExpanded && reportHistory.length === 0) loadReportHistory()
+          }}
+          className="w-full px-5 py-4 flex items-center justify-between hover:bg-slate-50 transition-colors"
+        >
+          <div className="flex items-center gap-2">
+            <History size={18} className="text-slate-500" />
+            <h3 className="text-sm font-semibold text-slate-900">Report History</h3>
+          </div>
+          <span className="text-xs text-slate-400">{reportHistory.length} saved</span>
+        </button>
+        {reportHistoryExpanded && (
+          <div className="px-5 pb-4 border-t border-slate-100">
+            {reportHistoryLoading ? (
+              <div className="py-8 flex justify-center"><Loader2 size={24} className="animate-spin text-slate-400" /></div>
+            ) : reportHistory.length === 0 ? (
+              <p className="py-6 text-sm text-slate-500 text-center">No report history yet. Generate reports to see them here.</p>
+            ) : (
+              <ul className="divide-y divide-slate-100">
+                {reportHistory.map((r) => (
+                  <li key={r.id} className="py-3 flex items-center justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-medium text-slate-800">{r.date_range_start} – {r.date_range_end}</p>
+                      <p className="text-xs text-slate-500">{r.report_type} · {r.status} · {new Date(r.created_at).toLocaleString()}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => reports.detail(r.id).then(d => setReportData(d?.report_data || d))}
+                        className="text-xs text-brand-600 hover:underline font-medium"
+                      >
+                        View
+                      </button>
+                      <button
+                        onClick={() => deleteReport(r.id)}
+                        disabled={deletingReportId === r.id}
+                        className="p-1.5 rounded text-slate-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-50"
+                        title="Delete report"
+                      >
+                        {deletingReportId === r.id ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   )
 }

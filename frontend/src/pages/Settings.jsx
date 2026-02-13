@@ -17,10 +17,17 @@ import {
   Zap,
   Brain,
   Search,
+  Building2,
+  Link2,
+  Receipt,
+  FileText,
+  UserPlus,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react'
 import StatusBadge from '../components/StatusBadge'
 import EmptyState from '../components/EmptyState'
-import { credentials, settingsApi } from '../lib/api'
+import { credentials, accounts, settingsApi } from '../lib/api'
 import { useAccount } from '../lib/AccountContext'
 
 export default function Settings() {
@@ -54,9 +61,103 @@ export default function Settings() {
   const [apiKeysSaving, setApiKeysSaving] = useState(false)
   const [apiKeyForm, setApiKeyForm] = useState({ openai_api_key: '', anthropic_api_key: '', paapi_access_key: '', paapi_secret_key: '', paapi_partner_tag: '' })
 
+  const [accountLinks, setAccountLinks] = useState([])
+  const [accountInvoices, setAccountInvoices] = useState([])
+  const [accountLinksLoading, setAccountLinksLoading] = useState(false)
+  const [accountInvoicesLoading, setAccountInvoicesLoading] = useState(false)
+  const [accountLinksError, setAccountLinksError] = useState(null)
+  const [accountInvoicesError, setAccountInvoicesError] = useState(null)
+  const [accountSettingsForm, setAccountSettingsForm] = useState({ display_name: '', currency_code: '', timezone: '' })
+  const [accountSettingsSaving, setAccountSettingsSaving] = useState(false)
+  const [termsToken, setTermsToken] = useState(null)
+  const [termsTokenLoading, setTermsTokenLoading] = useState(false)
+  const [termsTokenStatus, setTermsTokenStatus] = useState(null)
+  const [invitations, setInvitations] = useState([])
+  const [invitationsLoading, setInvitationsLoading] = useState(false)
+  const [invitationsError, setInvitationsError] = useState(null)
+  const [inviteForm, setInviteForm] = useState({ email: '', role: '' })
+  const [inviteSending, setInviteSending] = useState(false)
+  const [accountBillingExpanded, setAccountBillingExpanded] = useState(true)
+  const [termsExpanded, setTermsExpanded] = useState(false)
+  const [invitationsExpanded, setInvitationsExpanded] = useState(false)
+
   useEffect(() => {
     loadCredentials()
   }, [])
+
+  async function loadAccountLinks() {
+    setAccountLinksLoading(true)
+    setAccountLinksError(null)
+    try {
+      const data = await accounts.links()
+      setAccountLinks(data?.links || [])
+    } catch (err) {
+      setAccountLinksError(err.message || 'Failed to load account links')
+      setAccountLinks([])
+    } finally { setAccountLinksLoading(false) }
+  }
+
+  async function loadAccountInvoices() {
+    setAccountInvoicesLoading(true)
+    setAccountInvoicesError(null)
+    try {
+      const data = await accounts.invoices()
+      setAccountInvoices(data?.invoices || [])
+    } catch (err) {
+      setAccountInvoicesError(err.message || 'Failed to load invoices')
+      setAccountInvoices([])
+    } finally { setAccountInvoicesLoading(false) }
+  }
+
+  async function createTermsToken() {
+    setTermsTokenLoading(true)
+    try {
+      const data = await accounts.createTermsToken('ADSP')
+      setTermsToken(data?.termsToken || data?.token || data)
+    } catch (err) { setError(err.message) }
+    finally { setTermsTokenLoading(false) }
+  }
+
+  async function loadInvitations() {
+    setInvitationsLoading(true)
+    setInvitationsError(null)
+    try {
+      const data = await accounts.invitations.list()
+      setInvitations(data?.invitations || [])
+    } catch (err) {
+      setInvitationsError(err.message || 'Failed to load invitations')
+      setInvitations([])
+    } finally { setInvitationsLoading(false) }
+  }
+
+  async function sendInvite(e) {
+    e?.preventDefault?.()
+    if (!inviteForm.email?.trim()) return
+    setInviteSending(true)
+    setError(null)
+    try {
+      await accounts.invitations.create({ email: inviteForm.email.trim(), role: inviteForm.role || undefined })
+      setInviteForm({ email: '', role: '' })
+      await loadInvitations()
+    } catch (err) { setError(err.message) }
+    finally { setInviteSending(false) }
+  }
+
+  async function saveAccountSettings(e) {
+    e?.preventDefault?.()
+    const payload = {}
+    if (accountSettingsForm.display_name) payload.display_name = accountSettingsForm.display_name
+    if (accountSettingsForm.currency_code) payload.currency_code = accountSettingsForm.currency_code
+    if (accountSettingsForm.timezone) payload.timezone = accountSettingsForm.timezone
+    if (Object.keys(payload).length === 0) return
+    setAccountSettingsSaving(true)
+    setError(null)
+    try {
+      await accounts.updateSettings(payload)
+      setAccountSettingsForm({ display_name: '', currency_code: '', timezone: '' })
+    } catch (err) { setError(err.message) }
+    finally { setAccountSettingsSaving(false) }
+  }
 
   useEffect(() => {
     loadLlmSettings()
@@ -518,6 +619,170 @@ export default function Settings() {
           ))}
         </div>
       )}
+
+      {/* Account & Billing */}
+      <div className="card overflow-hidden">
+        <button
+          onClick={() => setAccountBillingExpanded(e => !e)}
+          className="w-full px-5 py-4 flex items-center justify-between hover:bg-slate-50 transition-colors"
+        >
+          <div className="flex items-center gap-2">
+            <Building2 size={18} className="text-brand-600" />
+            <h3 className="text-sm font-semibold text-slate-900">Account & Billing</h3>
+          </div>
+          {accountBillingExpanded ? <ChevronUp size={16} className="text-slate-400" /> : <ChevronDown size={16} className="text-slate-400" />}
+        </button>
+        {accountBillingExpanded && (
+          <div className="px-5 pb-5 border-t border-slate-100 space-y-5">
+            <p className="text-xs text-slate-500 pt-4">
+              Manage your active advertising account settings, billing, terms, and user invitations.
+            </p>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <h4 className="text-xs font-semibold text-slate-600 uppercase tracking-wide mb-2">Account links</h4>
+                <button onClick={loadAccountLinks} disabled={accountLinksLoading} className="btn-secondary text-xs mb-2">
+                  {accountLinksLoading ? <Loader2 size={12} className="animate-spin" /> : <Link2 size={12} />} Load links
+                </button>
+                {accountLinksError && <p className="text-xs text-red-600 mb-2">{accountLinksError}</p>}
+                {accountLinks.length > 0 ? (
+                  <ul className="text-xs text-slate-600 space-y-1.5">
+                    {accountLinks.slice(0, 5).map((l, i) => (
+                      <li key={i} className="flex items-start gap-2">
+                        {typeof l === 'object' ? (
+                          <span className="text-slate-700">
+                            {l.displayName || l.accountName || l.advertiserAccountId || l.relationshipType || JSON.stringify(l).slice(0, 80)}
+                            {Object.keys(l).length > 1 && '…'}
+                          </span>
+                        ) : (
+                          <span>{String(l)}</span>
+                        )}
+                      </li>
+                    ))}
+                    {accountLinks.length > 5 && <li className="text-slate-400">+{accountLinks.length - 5} more</li>}
+                  </ul>
+                ) : accountLinksLoading ? null : (
+                  <p className="text-xs text-slate-400">No linked accounts or click Load</p>
+                )}
+              </div>
+              <div>
+                <h4 className="text-xs font-semibold text-slate-600 uppercase tracking-wide mb-2">Invoices</h4>
+                <button onClick={loadAccountInvoices} disabled={accountInvoicesLoading} className="btn-secondary text-xs mb-2">
+                  {accountInvoicesLoading ? <Loader2 size={12} className="animate-spin" /> : <Receipt size={12} />} Load invoices
+                </button>
+                {accountInvoicesError && <p className="text-xs text-red-600 mb-2">{accountInvoicesError}</p>}
+                {accountInvoices.length > 0 ? (
+                  <ul className="text-xs text-slate-600 space-y-1.5">
+                    {accountInvoices.slice(0, 5).map((inv, i) => (
+                      <li key={i}>
+                        {typeof inv === 'object' ? (
+                          <span className="text-slate-700">
+                            {inv.invoiceId || inv.id || inv.period || inv.amount ? (
+                              <>{(inv.period || inv.invoiceId || '').slice(0, 30)} {inv.amount != null ? `· ${inv.amount}` : ''}</>
+                            ) : (
+                              JSON.stringify(inv).slice(0, 60) + '…'
+                            )}
+                          </span>
+                        ) : (
+                          String(inv)
+                        )}
+                      </li>
+                    ))}
+                    {accountInvoices.length > 5 && <li className="text-slate-400">+{accountInvoices.length - 5} more</li>}
+                  </ul>
+                ) : accountInvoicesLoading ? null : (
+                  <p className="text-xs text-slate-400">No invoices or click Load</p>
+                )}
+              </div>
+            </div>
+
+            <form onSubmit={saveAccountSettings} className="space-y-3 pt-4 border-t border-slate-100">
+              <h4 className="text-xs font-semibold text-slate-600 uppercase tracking-wide">Account settings</h4>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="label text-xs">Display name</label>
+                  <input type="text" className="input text-sm" placeholder="Account name" value={accountSettingsForm.display_name} onChange={e => setAccountSettingsForm(f => ({ ...f, display_name: e.target.value }))} />
+                </div>
+                <div>
+                  <label className="label text-xs">Currency</label>
+                  <input type="text" className="input text-sm" placeholder="USD" value={accountSettingsForm.currency_code} onChange={e => setAccountSettingsForm(f => ({ ...f, currency_code: e.target.value }))} />
+                </div>
+                <div>
+                  <label className="label text-xs">Timezone</label>
+                  <input type="text" className="input text-sm" placeholder="America/New_York" value={accountSettingsForm.timezone} onChange={e => setAccountSettingsForm(f => ({ ...f, timezone: e.target.value }))} />
+                </div>
+              </div>
+              <button type="submit" disabled={accountSettingsSaving || (!accountSettingsForm.display_name && !accountSettingsForm.currency_code && !accountSettingsForm.timezone)} className="btn-primary text-sm">
+                {accountSettingsSaving ? <Loader2 size={14} className="animate-spin" /> : null} Update account
+              </button>
+            </form>
+
+            {/* Terms Token (ADSP) */}
+            <div className="pt-4 border-t border-slate-100">
+              <button onClick={() => setTermsExpanded(e => !e)} className="flex items-center gap-2 text-xs font-semibold text-slate-600 uppercase tracking-wide hover:text-slate-800">
+                <FileText size={14} /> Advertising terms (ADSP)
+                {termsExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+              </button>
+              {termsExpanded && (
+                <div className="mt-3 p-3 bg-slate-50 rounded-lg space-y-2">
+                  <p className="text-xs text-slate-500">Create a terms token for ADSP (Amazon DSP) advertising terms acceptance.</p>
+                  <div className="flex items-center gap-2">
+                    <button onClick={createTermsToken} disabled={termsTokenLoading} className="btn-secondary text-xs">
+                      {termsTokenLoading ? <Loader2 size={12} className="animate-spin" /> : <FileText size={12} />} Create terms token
+                    </button>
+                    {termsToken && (
+                      <code className="text-xs font-mono bg-white px-2 py-1 rounded border border-slate-200 text-slate-700 truncate max-w-[200px]" title={termsToken}>
+                        {termsToken}
+                      </code>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* User Invitations */}
+            <div className="pt-4 border-t border-slate-100">
+              <button onClick={() => { setInvitationsExpanded(e => !e); if (!invitationsExpanded && invitations.length === 0) loadInvitations() }} className="flex items-center gap-2 text-xs font-semibold text-slate-600 uppercase tracking-wide hover:text-slate-800">
+                <UserPlus size={14} /> User invitations
+                {invitationsExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+              </button>
+              {invitationsExpanded && (
+                <div className="mt-3 space-y-3">
+                  <form onSubmit={sendInvite} className="flex flex-wrap items-end gap-2">
+                    <div>
+                      <label className="label text-[10px]">Email</label>
+                      <input type="email" className="input text-sm w-48" placeholder="user@example.com" value={inviteForm.email} onChange={e => setInviteForm(f => ({ ...f, email: e.target.value }))} required />
+                    </div>
+                    <div>
+                      <label className="label text-[10px]">Role (optional)</label>
+                      <input type="text" className="input text-sm w-24" placeholder="user" value={inviteForm.role} onChange={e => setInviteForm(f => ({ ...f, role: e.target.value }))} />
+                    </div>
+                    <button type="submit" disabled={inviteSending || !inviteForm.email?.trim()} className="btn-primary text-xs">
+                      {inviteSending ? <Loader2 size={12} className="animate-spin" /> : <UserPlus size={12} />} Invite
+                    </button>
+                  </form>
+                  {invitationsError && <p className="text-xs text-red-600">{invitationsError}</p>}
+                  {invitationsLoading ? (
+                    <div className="flex items-center gap-2 text-xs text-slate-500"><Loader2 size={12} className="animate-spin" /> Loading invitations...</div>
+                  ) : invitations.length > 0 ? (
+                    <ul className="text-xs text-slate-600 space-y-1">
+                      {invitations.slice(0, 10).map((inv, i) => (
+                        <li key={i} className="flex items-center justify-between py-1">
+                          <span>{inv.email || inv.invitationId || JSON.stringify(inv).slice(0, 40)}</span>
+                          <span className="text-slate-400">{inv.status || inv.state || ''}</span>
+                        </li>
+                      ))}
+                      {invitations.length > 10 && <li className="text-slate-400">+{invitations.length - 10} more</li>}
+                    </ul>
+                  ) : (
+                    <p className="text-xs text-slate-400">No invitations. Invite users to share access to your advertising account.</p>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* API Keys for AI */}
       <div className="card p-5">

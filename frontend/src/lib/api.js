@@ -83,6 +83,59 @@ export const accounts = {
     request(`/accounts/stored${credentialId ? `?credential_id=${credentialId}` : ''}`),
   setActive: (accountId) =>
     request(`/accounts/set-active/${accountId}`, { method: 'POST' }),
+  links: (credentialId) =>
+    request(`/accounts/links${credentialId ? `?credential_id=${credentialId}` : ''}`),
+  invoices: (credentialId) =>
+    request(`/accounts/invoices${credentialId ? `?credential_id=${credentialId}` : ''}`),
+  updateSettings: (payload, credentialId) =>
+    request(`/accounts/settings${credentialId ? `?credential_id=${credentialId}` : ''}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  // Terms token (ADSP terms acceptance)
+  createTermsToken: (termsType = 'ADSP', credentialId) =>
+    request(`/accounts/terms-token${credentialId ? `?credential_id=${credentialId}` : ''}`, {
+      method: 'POST',
+      body: JSON.stringify({ terms_type: termsType }),
+    }),
+  getTermsTokenStatus: (termsToken, credentialId) =>
+    request(`/accounts/terms-token/status${credentialId ? `?credential_id=${credentialId}` : ''}`, {
+      method: 'POST',
+      body: JSON.stringify({ terms_token: termsToken }),
+    }),
+  // Update advertiser account directly
+  updateAdvertiser: (payload, credentialId) =>
+    request(`/accounts/advertiser${credentialId ? `?credential_id=${credentialId}` : ''}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+  // User invitations
+  invitations: {
+    list: (credentialId, opts = {}) => {
+      const params = new URLSearchParams()
+      if (credentialId) params.set('credential_id', credentialId)
+      if (opts.maxResults) params.set('max_results', opts.maxResults)
+      if (opts.nextToken) params.set('next_token', opts.nextToken)
+      const qs = params.toString()
+      return request(`/accounts/invitations${qs ? `?${qs}` : ''}`)
+    },
+    create: (payload, credentialId) =>
+      request(`/accounts/invitations${credentialId ? `?credential_id=${credentialId}` : ''}`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+    get: (id, credentialId) =>
+      request(`/accounts/invitations/${id}${credentialId ? `?credential_id=${credentialId}` : ''}`),
+    redeem: (id, credentialId) =>
+      request(`/accounts/invitations/${id}/redeem${credentialId ? `?credential_id=${credentialId}` : ''}`, {
+        method: 'POST',
+      }),
+    update: (id, action, credentialId) =>
+      request(`/accounts/invitations/${id}${credentialId ? `?credential_id=${credentialId}` : ''}`, {
+        method: 'PUT',
+        body: JSON.stringify({ action }),
+      }),
+  },
   campaigns: (credentialId) =>
     request(`/accounts/campaigns${credentialId ? `?credential_id=${credentialId}` : ''}`),
   adGroups: (credentialId) =>
@@ -271,6 +324,10 @@ export const reports = {
   history: (credentialId, limit = 20) =>
     request(`/reports/history?limit=${limit}${credentialId ? `&credential_id=${credentialId}` : ''}`),
   detail: (id) => request(`/reports/history/${id}`),
+  delete: (id, credentialId) =>
+    request(`/reports/history/${id}${credentialId ? `?credential_id=${credentialId}` : ''}`, {
+      method: 'DELETE',
+    }),
   // Search term reports
   searchTermSync: (credentialId, opts = {}) => request('/reports/search-terms/sync', {
     method: 'POST',
@@ -402,6 +459,25 @@ export const campaignManager = {
   deleteAd: (amazonAdId, credentialId, skipApproval = false) =>
     request(`/campaigns/ads/${amazonAdId}?skip_approval=${skipApproval}${credentialId ? `&credential_id=${credentialId}` : ''}`, {
       method: 'DELETE',
+    }),
+
+  // Add country to SP Manual campaign (multi-marketplace expansion)
+  addCountry: (campaignId, countries, credentialId, skipApproval = false) =>
+    request(`/campaigns/add-country${credentialId ? `?credential_id=${credentialId}` : ''}`, {
+      method: 'POST',
+      body: JSON.stringify({ campaign_id: campaignId, countries, skip_approval: skipApproval }),
+    }),
+
+  // Singleshot: create SP AUTO campaign across multiple marketplaces in one call
+  createSingleshot: (data, credentialId, skipApproval = false) =>
+    request(`/campaigns/singleshot${credentialId ? `?credential_id=${credentialId}` : ''}`, {
+      method: 'POST',
+      body: JSON.stringify({
+        campaign_name: data.campaign_name,
+        country_budgets: data.country_budgets,
+        asins_by_country: data.asins_by_country || {},
+        skip_approval: skipApproval,
+      }),
     }),
 }
 

@@ -1,13 +1,8 @@
-# Railway deployment config for amazonmcp
-# Set Root Directory to "backend" in Railway if using backend-only deploy.
-
-[build]
-builder = "nixpacks"
+# Railway deployment config — use with Root Directory = empty (unified deploy)
+# Railway auto-detects Dockerfile at root and uses it for the build.
 
 [deploy]
-# Railway sets PORT automatically
-startCommand = "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"
 healthcheckPath = "/api/health"
-healthcheckTimeout = 30
+healthcheckTimeout = 120
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3

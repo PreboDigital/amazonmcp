@@ -734,6 +734,25 @@ async def report_history(
     ]
 
 
+@router.delete("/history/{report_id}")
+async def delete_report(
+    report_id: str,
+    credential_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a report from history. Removes the stored report record."""
+    cred = await _get_cred(db, credential_id)
+    result = await db.execute(select(Report).where(Report.id == parse_uuid(report_id, "report_id")))
+    report = result.scalar_one_or_none()
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    if report.credential_id != cred.id:
+        raise HTTPException(status_code=403, detail="Report does not belong to your account.")
+    await db.delete(report)
+    await db.flush()
+    return {"status": "deleted", "id": report_id}
+
+
 @router.get("/history/{report_id}")
 async def get_report_detail(report_id: str, db: AsyncSession = Depends(get_db)):
     """Retrieve a previously generated report with full data."""

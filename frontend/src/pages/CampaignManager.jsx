@@ -29,9 +29,11 @@ import {
   Calendar,
   Columns3,
   Settings,
+  Globe,
+  Rocket,
 } from 'lucide-react'
 import { useAccount } from '../lib/AccountContext'
-import { campaignManager } from '../lib/api'
+import { campaignManager, accounts } from '../lib/api'
 import StatusBadge from '../components/StatusBadge'
 import EmptyState from '../components/EmptyState'
 import DateRangePicker, { getPresetRange } from '../components/DateRangePicker'
@@ -205,6 +207,148 @@ function ConfirmModal({ title, message, onConfirm, onClose, confirming, skipAppr
 }
 
 
+// ── Add Country Modal ───────────────────────────────────────────────
+const COUNTRY_OPTIONS = [
+  { code: 'US', label: 'United States' }, { code: 'CA', label: 'Canada' }, { code: 'MX', label: 'Mexico' }, { code: 'BR', label: 'Brazil' },
+  { code: 'GB', label: 'United Kingdom' }, { code: 'DE', label: 'Germany' }, { code: 'FR', label: 'France' }, { code: 'IT', label: 'Italy' },
+  { code: 'ES', label: 'Spain' }, { code: 'NL', label: 'Netherlands' }, { code: 'SE', label: 'Sweden' }, { code: 'PL', label: 'Poland' },
+  { code: 'JP', label: 'Japan' }, { code: 'AU', label: 'Australia' }, { code: 'IN', label: 'India' }, { code: 'AE', label: 'UAE' },
+]
+function AddCountryModal({ campaign, onSave, onClose, saving }) {
+  const [countries, setCountries] = useState([{ countryCode: 'GB', dailyBudget: 10 }])
+  const [skipApproval, setSkipApproval] = useState(true)
+  const addRow = () => setCountries(c => [...c, { countryCode: 'GB', dailyBudget: 10 }])
+  const removeRow = (i) => setCountries(c => c.filter((_, idx) => idx !== i))
+  const updateRow = (i, key, val) => setCountries(c => {
+    const next = [...c]
+    next[i] = { ...next[i], [key]: key === 'dailyBudget' ? parseFloat(val) || 0 : val }
+    return next
+  })
+  const handleSubmit = () => {
+    const payload = countries.map(({ countryCode, dailyBudget }) => ({ countryCode, dailyBudget }))
+    onSave(payload, skipApproval)
+  }
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+      <div className="bg-white rounded-xl shadow-2xl border border-slate-200 w-full max-w-lg mx-4">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+          <h3 className="text-base font-semibold text-slate-900">Add countries to campaign</h3>
+          <button onClick={onClose} className="p-1 rounded-lg hover:bg-slate-100 text-slate-400"><X size={18} /></button>
+        </div>
+        <div className="px-5 py-4 space-y-4">
+          <p className="text-sm text-slate-600">{campaign?.campaign_name} — SP Manual only</p>
+          {countries.map((row, i) => (
+            <div key={i} className="flex gap-2 items-center">
+              <select
+                value={row.countryCode}
+                onChange={e => updateRow(i, 'countryCode', e.target.value)}
+                className="input flex-1"
+              >
+                {COUNTRY_OPTIONS.map(o => <option key={o.code} value={o.code}>{o.label}</option>)}
+              </select>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={row.dailyBudget}
+                onChange={e => updateRow(i, 'dailyBudget', e.target.value)}
+                placeholder="Daily budget"
+                className="input w-28"
+              />
+              <button onClick={() => removeRow(i)} className="p-1.5 text-red-500 hover:bg-red-50 rounded" disabled={countries.length <= 1}><Trash2 size={14} /></button>
+            </div>
+          ))}
+          <button onClick={addRow} className="text-sm text-brand-600 hover:underline flex items-center gap-1"><Plus size={14} /> Add another country</button>
+          <label className="flex items-center gap-2 cursor-pointer pt-2 border-t border-slate-100">
+            <input type="checkbox" checked={skipApproval} onChange={e => setSkipApproval(e.target.checked)} className="rounded border-slate-300 text-brand-600" />
+            <span className="text-sm text-slate-600">Apply directly to Amazon (skip approval queue)</span>
+          </label>
+        </div>
+        <div className="flex justify-end gap-2 px-5 py-3 border-t border-slate-100 bg-slate-50 rounded-b-xl">
+          <button onClick={onClose} className="btn-ghost text-sm">Cancel</button>
+          <button onClick={handleSubmit} disabled={saving} className="btn-primary text-sm">
+            {saving ? <><Loader2 size={14} className="animate-spin" /> Adding...</> : <><Globe size={14} /> Add countries</>}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Singleshot Modal ─────────────────────────────────────────────────
+function SingleshotModal({ products = [], onSave, onClose, saving }) {
+  const [name, setName] = useState('')
+  const [countryBudgets, setCountryBudgets] = useState([{ countryCode: 'US', dailyBudget: 25 }])
+  const [asinsByCountry, setAsinsByCountry] = useState({ US: [] })
+  const [skipApproval, setSkipApproval] = useState(true)
+  const addCountry = () => setCountryBudgets(c => [...c, { countryCode: 'GB', dailyBudget: 25 }])
+  const removeCountry = (i) => setCountryBudgets(c => c.filter((_, idx) => idx !== i))
+  const updateCountry = (i, key, val) => setCountryBudgets(c => {
+    const next = [...c]
+    next[i] = { ...next[i], [key]: key === 'dailyBudget' ? parseFloat(val) || 0 : val }
+    return next
+  })
+  const handleSubmit = () => {
+    const asins = {}
+    countryBudgets.forEach(({ countryCode }) => { asins[countryCode] = asinsByCountry[countryCode] || [] })
+    onSave({ campaign_name: name, country_budgets: countryBudgets, asins_by_country: asins }, skipApproval)
+  }
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+      <div className="bg-white rounded-xl shadow-2xl border border-slate-200 w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 sticky top-0 bg-white">
+          <h3 className="text-base font-semibold text-slate-900">Quick launch AUTO campaign</h3>
+          <button onClick={onClose} className="p-1 rounded-lg hover:bg-slate-100 text-slate-400"><X size={18} /></button>
+        </div>
+        <div className="px-5 py-4 space-y-4">
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wide mb-1.5">Campaign name</label>
+            <input value={name} onChange={e => setName(e.target.value)} placeholder="My AUTO Campaign" className="input" />
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wide mb-1.5">Country budgets</label>
+            {countryBudgets.map((row, i) => (
+              <div key={i} className="flex gap-2 items-center mt-2">
+                <select value={row.countryCode} onChange={e => updateCountry(i, 'countryCode', e.target.value)} className="input flex-1">
+                  {COUNTRY_OPTIONS.map(o => <option key={o.code} value={o.code}>{o.label}</option>)}
+                </select>
+                <input type="number" min="0" step="0.01" value={row.dailyBudget} onChange={e => updateCountry(i, 'dailyBudget', e.target.value)} className="input w-28" />
+                <button onClick={() => removeCountry(i)} className="p-1.5 text-red-500 hover:bg-red-50 rounded" disabled={countryBudgets.length <= 1}><Trash2 size={14} /></button>
+              </div>
+            ))}
+            <button onClick={addCountry} className="text-sm text-brand-600 hover:underline mt-2 flex items-center gap-1"><Plus size={14} /> Add country</button>
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wide mb-1.5">ASINs per country (optional)</label>
+            <p className="text-xs text-slate-500 mb-2">Enter ASINs separated by comma, e.g. B08N5WRWNW, B09XYZ</p>
+            {countryBudgets.map(({ countryCode }) => (
+              <div key={countryCode} className="flex gap-2 items-center mt-1">
+                <span className="text-sm text-slate-600 w-8">{countryCode}</span>
+                <input
+                  value={(asinsByCountry[countryCode] || []).join(', ')}
+                  onChange={e => setAsinsByCountry(a => ({ ...a, [countryCode]: e.target.value.split(',').map(s => s.trim()).filter(Boolean) }))}
+                  placeholder="ASINs"
+                  className="input flex-1"
+                />
+              </div>
+            ))}
+          </div>
+          <label className="flex items-center gap-2 cursor-pointer pt-2 border-t border-slate-100">
+            <input type="checkbox" checked={skipApproval} onChange={e => setSkipApproval(e.target.checked)} className="rounded border-slate-300 text-brand-600" />
+            <span className="text-sm text-slate-600">Apply directly to Amazon (skip approval queue)</span>
+          </label>
+        </div>
+        <div className="flex justify-end gap-2 px-5 py-3 border-t border-slate-100 bg-slate-50 rounded-b-xl sticky bottom-0">
+          <button onClick={onClose} className="btn-ghost text-sm">Cancel</button>
+          <button onClick={handleSubmit} disabled={saving || !name.trim()} className="btn-primary text-sm">
+            {saving ? <><Loader2 size={14} className="animate-spin" /> Creating...</> : <><Rocket size={14} /> Create campaign</>}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ══════════════════════════════════════════════════════════════════════
 //  MAIN CAMPAIGN MANAGER PAGE
 // ══════════════════════════════════════════════════════════════════════
@@ -269,6 +413,9 @@ export default function CampaignManager() {
   // Modals
   const [editModal, setEditModal] = useState(null) // { title, fields, onSave }
   const [confirmModal, setConfirmModal] = useState(null) // { title, message, onConfirm }
+  const [addCountryModal, setAddCountryModal] = useState(null) // campaign
+  const [singleshotModal, setSingleshotModal] = useState(false)
+  const [products, setProducts] = useState([])
   const [modalSaving, setModalSaving] = useState(false)
 
   // ── Load data based on current view ─────────────────────────────
@@ -547,6 +694,45 @@ export default function CampaignManager() {
         }
       },
     })
+  }
+
+  async function handleAddCountrySave(countries, skipApproval) {
+    if (!addCountryModal) return
+    setModalSaving(true)
+    try {
+      await campaignManager.addCountry(addCountryModal.amazon_campaign_id, countries, activeAccountId, skipApproval)
+      setSuccessMsg(skipApproval ? 'Countries added directly on Amazon' : 'Add country sent to approval queue')
+      setTimeout(() => setSuccessMsg(null), 4000)
+      setAddCountryModal(null)
+      loadCampaigns()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setModalSaving(false)
+    }
+  }
+
+  async function handleSingleshotSave(data, skipApproval) {
+    setModalSaving(true)
+    try {
+      await campaignManager.createSingleshot(data, activeAccountId, skipApproval)
+      setSuccessMsg(skipApproval ? 'Campaign created directly on Amazon' : 'Campaign creation sent to approval queue')
+      setTimeout(() => setSuccessMsg(null), 4000)
+      setSingleshotModal(false)
+      loadCampaigns()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setModalSaving(false)
+    }
+  }
+
+  async function openSingleshotModal() {
+    try {
+      const data = await accounts.products(activeAccountId)
+      setProducts(data.products || [])
+    } catch { /* ignore */ }
+    setSingleshotModal(true)
   }
 
   // ── Ad Group actions ────────────────────────────────────────────
@@ -1192,6 +1378,14 @@ export default function CampaignManager() {
                 {totalCampaigns} campaigns
               </div>
             )}
+            {view === 'campaigns' && (
+              <button
+                onClick={openSingleshotModal}
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium rounded-lg border border-brand-200 bg-brand-50 text-brand-700 hover:bg-brand-100 transition-colors"
+              >
+                <Rocket size={14} /> Quick launch AUTO
+              </button>
+            )}
             {campaigns.length > 0 && (
               <div className="relative">
                 <button
@@ -1412,6 +1606,15 @@ export default function CampaignManager() {
                     >
                       <DollarSign size={14} />
                     </button>
+                    {(c.campaign_type || '').includes('PRODUCTS') && (c.targeting_type || '').toLowerCase() === 'manual' && (
+                      <button
+                        onClick={() => setAddCountryModal(c)}
+                        className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-brand-600 transition-colors"
+                        title="Add countries"
+                      >
+                        <Globe size={14} />
+                      </button>
+                    )}
                     {(c.state || '').toLowerCase() === 'enabled' ? (
                       <button
                         onClick={() => handleChangeState(c, 'paused')}
@@ -1879,13 +2082,29 @@ export default function CampaignManager() {
 
       {/* Modals */}
       {editModal && (
-        <QuickEditModal
+          <QuickEditModal
           title={editModal.title}
           fields={editModal.fields}
           onSave={editModal.onSave}
           onClose={() => setEditModal(null)}
           saving={modalSaving}
           skipApprovalOption={editModal.skipApprovalOption}
+        />
+      )}
+      {addCountryModal && (
+        <AddCountryModal
+          campaign={addCountryModal}
+          onSave={handleAddCountrySave}
+          onClose={() => setAddCountryModal(null)}
+          saving={modalSaving}
+        />
+      )}
+      {singleshotModal && (
+        <SingleshotModal
+          products={products}
+          onSave={handleSingleshotSave}
+          onClose={() => setSingleshotModal(false)}
+          saving={modalSaving}
         />
       )}
       {confirmModal && (

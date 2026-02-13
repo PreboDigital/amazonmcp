@@ -2,14 +2,17 @@
 Amazon Ads Optimizer — FastAPI Backend
 Connects to the official Amazon Ads MCP Server for campaign optimization.
 All data persisted to PostgreSQL.
+Serves frontend static files when present (unified deploy = no CORS).
 """
 
 import logging
+from pathlib import Path
 from contextlib import asynccontextmanager
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import Response, FileResponse
 from fastapi import Depends, FastAPI
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.database import init_db, check_db_connection
@@ -141,3 +144,19 @@ async def health_check():
         "service": "Amazon Ads Optimizer",
         "database": "connected" if db_ok else "disconnected",
     }
+
+
+# Static files + SPA fallback (when backend/static exists = unified deploy, no CORS)
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+if STATIC_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str):
+        """Serve SPA for non-API routes. API routes registered above."""
+        if full_path.startswith("api") or full_path == "api":
+            return Response(status_code=404)
+        file_path = STATIC_DIR / full_path
+        if file_path.is_file():
+            return FileResponse(file_path)
+        return FileResponse(STATIC_DIR / "index.html")

@@ -329,10 +329,103 @@ async def create_campaign(
         return {"status": "pending_approval", "change_id": str(change.id)}
 
 
+class AddCountryRequest(BaseModel):
+    campaign_id: str = Field(..., description="Amazon campaign ID (SP Manual only)")
+    countries: list[dict] = Field(
+        ...,
+        description="List of {countryCode, dailyBudget} for each country to add",
+        min_length=1,
+    )
+    skip_approval: bool = False
+
+
+class SingleshotCampaignRequest(BaseModel):
+    campaign_name: str = Field(..., description="Campaign name")
+    country_budgets: list[dict] = Field(
+        ...,
+        description="List of {countryCode, dailyBudget} per marketplace",
+        min_length=1,
+    )
+    asins_by_country: dict = Field(
+        default_factory=dict,
+        description="Map of countryCode -> list of ASINs (e.g. {\"US\": [\"B08N5WRWNW\"], \"GB\": [\"B08N5WRWNW\"]})",
+    )
+    skip_approval: bool = False
+
+
 class CampaignUpdateRequest(BaseModel):
     amazon_campaign_id: str
     updates: dict = Field(..., description="Fields to update (name, state, budget, etc.)")
     skip_approval: bool = False
+
+
+@router.post("/add-country")
+async def add_country_to_campaign(
+    req: AddCountryRequest,
+    credential_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Add countries to an existing SP Manual campaign with country-specific budget caps."""
+    cred = await _get_credential(db, credential_id)
+    campaign_payload = {"campaignId": req.campaign_id, "countryBudgets": req.countries}
+    if req.skip_approval:
+        client = await _make_client(cred, db)
+        try:
+            result = await client.add_country_campaign([campaign_payload])
+            db.add(ActivityLog(
+                credential_id=cred.id, action="campaign_country_added",
+                category="campaigns", description=f"Added countries to campaign {req.campaign_id}",
+                entity_type="campaign", entity_id=req.campaign_id, details={"countries": req.countries, "result": result},
+            ))
+            await db.flush()
+            return {"status": "updated", "result": result}
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=safe_error_detail(e, "Add country failed."))
+    existing = await db.execute(select(Campaign).where(Campaign.credential_id == cred.id, Campaign.amazon_campaign_id == req.campaign_id))
+    campaign = existing.scalar_one_or_none()
+    change = PendingChange(
+        credential_id=cred.id, profile_id=cred.profile_id, change_type="campaign_add_country",
+        entity_type="campaign", entity_id=req.campaign_id, entity_name=campaign.campaign_name if campaign else req.campaign_id,
+        campaign_id=req.campaign_id, proposed_value=str(req.countries), change_detail={"countries": req.countries},
+        mcp_payload={"tool": "campaign_management-add_country_campaign", "arguments": {"body": {"campaigns": [campaign_payload]}}},
+        source="manual",
+    )
+    db.add(change)
+    await db.flush()
+    return {"status": "pending_approval", "change_id": str(change.id)}
+
+
+@router.post("/singleshot")
+async def create_singleshot_campaign(
+    req: SingleshotCampaignRequest,
+    credential_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a complete SP AUTO campaign across multiple marketplaces in one operation."""
+    cred = await _get_credential(db, credential_id)
+    oneshot = {"name": req.campaign_name, "countryBudgets": req.country_budgets, "asinsByCountry": req.asins_by_country or {}}
+    if req.skip_approval:
+        client = await _make_client(cred, db)
+        try:
+            result = await client.create_singleshot_campaign([oneshot])
+            db.add(ActivityLog(
+                credential_id=cred.id, action="singleshot_campaign_created",
+                category="campaigns", description=f"Created singleshot campaign: {req.campaign_name}",
+                entity_type="campaign", details={"result": result},
+            ))
+            await db.flush()
+            return {"status": "created", "result": result}
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=safe_error_detail(e, "Singleshot campaign creation failed."))
+    change = PendingChange(
+        credential_id=cred.id, profile_id=cred.profile_id, change_type="campaign_create",
+        entity_type="campaign", entity_name=req.campaign_name, proposed_value=str(oneshot), change_detail=oneshot,
+        mcp_payload={"tool": "campaign_management-create_singleshot_sp_campaign", "arguments": {"body": {"oneshotCampaigns": [oneshot]}}},
+        source="manual",
+    )
+    db.add(change)
+    await db.flush()
+    return {"status": "pending_approval", "change_id": str(change.id)}
 
 
 @router.put("/{amazon_campaign_id}")

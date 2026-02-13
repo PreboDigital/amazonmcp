@@ -220,6 +220,111 @@ class AmazonAdsMCP:
             body["nextToken"] = next_token
         return await self.call_tool("account_management-query_account_link", {"body": body})
 
+    async def update_account_name(self, advertiser_accounts: list[dict]) -> dict:
+        """Update the display name of advertiser accounts."""
+        return await self.call_tool(
+            "account_management-update_account_name",
+            {"body": {"advertiserAccounts": advertiser_accounts}},
+        )
+
+    async def update_account_currency(self, advertiser_accounts: list[dict]) -> dict:
+        """Update the currency code of advertiser accounts."""
+        return await self.call_tool(
+            "account_management-update_account_currency",
+            {"body": {"advertiserAccounts": advertiser_accounts}},
+        )
+
+    async def update_account_timezone(self, advertiser_accounts: list[dict]) -> dict:
+        """Update the timezone of advertiser accounts."""
+        return await self.call_tool(
+            "account_management-update_account_timezone",
+            {"body": {"advertiserAccounts": advertiser_accounts}},
+        )
+
+    async def create_terms_token(self, terms_type: str = "ADSP") -> dict:
+        """Create a new UUID terms token for the customer to accept advertising terms."""
+        return await self.call_tool(
+            "account_management-create_terms_token",
+            {"body": {"termsType": terms_type}},
+        )
+
+    async def get_terms_token(self, terms_token: str) -> dict:
+        """Get the terms token status for the customer."""
+        return await self.call_tool(
+            "account_management-get_terms_token",
+            {"body": {"termsToken": terms_token}},
+        )
+
+    async def update_advertiser_account(self, advertiser_accounts: list[dict]) -> dict:
+        """Update advertiser account details."""
+        return await self.call_tool(
+            "account_management-update_advertiser_account",
+            {"body": {"advertiserAccounts": advertiser_accounts}},
+        )
+
+    async def list_user_invitations(
+        self,
+        max_results: int = 50,
+        next_token: str = None,
+        access_requested_account: dict = None,
+    ) -> dict:
+        """List all user invitations for an advertising account."""
+        body = {"maxResults": max_results}
+        if next_token:
+            body["nextToken"] = next_token
+        if access_requested_account:
+            body["accessRequestedAccount"] = access_requested_account
+        return await self.call_tool("account_management-list_user_invitations", {"body": body})
+
+    async def create_user_invitations(
+        self,
+        user_invitation_requests: list[dict],
+        notify_invited_users: bool = True,
+        access_requested_account: dict = None,
+    ) -> dict:
+        """Create user invitations for advertising accounts."""
+        body = {
+            "userInvitationRequests": user_invitation_requests,
+            "notifyInvitedUsers": notify_invited_users,
+        }
+        if access_requested_account:
+            body["accessRequestedAccount"] = access_requested_account
+        return await self.call_tool("account_management-create_user_invitations", {"body": body})
+
+    async def get_user_invitation(
+        self,
+        invitation_id: str,
+        access_requested_account: dict = None,
+    ) -> dict:
+        """Get details of a specific user invitation by ID."""
+        body = {"invitationId": invitation_id}
+        if access_requested_account:
+            body["accessRequestedAccount"] = access_requested_account
+        return await self.call_tool("account_management-get_user_invitation", {"body": body})
+
+    async def redeem_user_invitation(
+        self,
+        invitation_id: str,
+        access_requested_account: dict = None,
+    ) -> dict:
+        """Redeem a user invitation to gain access to an advertising account."""
+        body = {"invitationId": invitation_id}
+        if access_requested_account:
+            body["accessRequestedAccount"] = access_requested_account
+        return await self.call_tool("account_management-redeem_user_invitation", {"body": body})
+
+    async def update_user_invitations(
+        self,
+        updates: list[dict],
+        notify_invited_users: bool = False,
+        access_requested_account: dict = None,
+    ) -> dict:
+        """Update user invitations (revoke, resend, etc.)."""
+        body = {"updates": updates, "notifyInvitedUsers": notify_invited_users}
+        if access_requested_account:
+            body["accessRequestedAccount"] = access_requested_account
+        return await self.call_tool("account_management-update_user_invitations", {"body": body})
+
     async def query_campaigns(
         self,
         filters: dict = None,
@@ -800,6 +905,92 @@ class AmazonAdsMCP:
     async def list_invoices(self, params: dict = None) -> dict:
         body = params or {}
         return await self.call_tool("billing-list_invoices", {"body": body})
+
+    # ── Stream Subscriptions (ADSP) ─────────────────────────────────────
+
+    async def create_stream_subscription(
+        self,
+        stream_subscriptions: list[dict],
+        access_requested_account: dict = None,
+    ) -> dict:
+        """Create a new stream subscription (generic)."""
+        body = {"streamSubscriptions": stream_subscriptions}
+        if access_requested_account:
+            body["accessRequestedAccount"] = access_requested_account
+        return await self.call_tool("stream_subscriptions-create_subscription", {"body": body})
+
+    async def create_adsp_purchase_overview_subscription(
+        self,
+        stream_subscriptions: list[dict],
+        access_requested_account: dict = None,
+    ) -> dict:
+        """Create an ADSP purchase overview stream subscription."""
+        body = {"streamSubscriptions": stream_subscriptions}
+        if access_requested_account:
+            body["accessRequestedAccount"] = access_requested_account
+        return await self.call_tool(
+            "stream_subscriptions-create_adsp_purchase_overview_subsc", {"body": body}
+        )
+
+    async def create_adsp_traffic_overview_subscription(
+        self,
+        stream_subscriptions: list[dict],
+        access_requested_account: dict = None,
+    ) -> dict:
+        """Create an ADSP traffic overview stream subscription."""
+        body = {"streamSubscriptions": stream_subscriptions}
+        if access_requested_account:
+            body["accessRequestedAccount"] = access_requested_account
+        return await self.call_tool(
+            "stream_subscriptions-create_adsp_traffic_overview_subscript", {"body": body}
+        )
+
+    async def list_stream_subscriptions(
+        self,
+        access_requested_account: dict = None,
+        max_results: int = 50,
+        next_token: str = None,
+    ) -> dict:
+        """List stream subscriptions."""
+        body = {"maxResults": max_results}
+        if access_requested_account:
+            body["accessRequestedAccount"] = access_requested_account
+        if next_token:
+            body["nextToken"] = next_token
+        return await self.call_tool("stream_subscriptions-list_subscription", {"body": body})
+
+    async def retrieve_stream_subscription(
+        self,
+        stream_subscription_ids: list[str],
+        access_requested_account: dict = None,
+    ) -> dict:
+        """Retrieve specific stream subscriptions by ID."""
+        body = {"streamSubscriptionIds": stream_subscription_ids}
+        if access_requested_account:
+            body["accessRequestedAccount"] = access_requested_account
+        return await self.call_tool("stream_subscriptions-retrieve_subscription", {"body": body})
+
+    async def delete_stream_subscription(
+        self,
+        stream_subscription_ids: list[str],
+        access_requested_account: dict = None,
+    ) -> dict:
+        """Archive stream subscriptions."""
+        body = {"streamSubscriptionIds": stream_subscription_ids}
+        if access_requested_account:
+            body["accessRequestedAccount"] = access_requested_account
+        return await self.call_tool("stream_subscriptions-delete_subscription", {"body": body})
+
+    async def update_stream_subscription(
+        self,
+        stream_subscriptions: list[dict],
+        access_requested_account: dict = None,
+    ) -> dict:
+        """Update existing stream subscriptions."""
+        body = {"streamSubscriptions": stream_subscriptions}
+        if access_requested_account:
+            body["accessRequestedAccount"] = access_requested_account
+        return await self.call_tool("stream_subscriptions-update_subscription", {"body": body})
 
     # ── Helpers ───────────────────────────────────────────────────────
 

@@ -4,8 +4,8 @@
 
 | Service | URL |
 |---------|-----|
-| **Frontend** | https://amazonmcp-frontend-production.up.railway.app |
-| **Backend** | https://amazonmcp-backend-production.up.railway.app (or your backend service URL) |
+| **App (unified)** | https://amazonmcp-backend-production.up.railway.app |
+| **Frontend (legacy)** | https://amazonmcp-frontend-production.up.railway.app — **deprecated** when using unified deploy |
 
 **Local development:**
 - Frontend: http://localhost:5173 (Vite proxy → backend)
@@ -13,20 +13,42 @@
 
 ---
 
+## Fix CORS: Use Unified Deployment (Recommended)
+
+**Problem:** Separate frontend + backend causes CORS errors when the frontend calls the API across origins.
+
+**Solution:** Serve frontend and API from the **same origin** (single backend service). No CORS.
+
+### Unified Deploy Steps
+
+1. **Backend service** — Railway Dashboard → your backend service → Settings
+2. **Root Directory**: Clear it (leave empty) — so Railway uses the repo root
+3. **Build**: Railway auto-detects the root `Dockerfile` and builds frontend + backend together
+4. **Result**: One URL serves both app and API. Use `https://amazonmcp-backend-production.up.railway.app`
+5. **Frontend service**: You can **pause or delete** it — the backend now serves the frontend
+
+### What the unified Dockerfile does
+
+- Builds the Vite frontend (no `VITE_API_BASE_URL` needed — uses relative `/api`)
+- Copies `frontend/dist` into `backend/static`
+- Runs FastAPI; serves `/api/*` and static files from same origin
+
+---
+
 ## Services to Create
 
 | Service | Type | Purpose |
 |---------|------|---------|
-| **Web** | Backend | FastAPI API (campaigns, reports, sync, AI) |
+| **Web** | Backend (unified) | FastAPI API + frontend static — **single service** |
 | **PostgreSQL** | Database | Railway plugin — stores credentials, campaigns, reports |
-| **Frontend** | Static (optional) | Build Vite app and serve from backend, or deploy separately |
+| **Frontend** | Static (optional) | Only if you want a separate frontend deploy (not recommended — CORS) |
 
-### Recommended: Single Web Service + PostgreSQL
+### Recommended: Single Web Service + PostgreSQL (Unified)
 
 1. **Add PostgreSQL** — Railway Dashboard → New → Database → PostgreSQL
-2. **Add Web Service** — New → GitHub Repo → `PreboDigital/amazonmcp`
-3. **Root Directory**: `backend` (so Railway builds the Python app)
-4. **Build**: Auto-detected from `requirements.txt` + `nixpacks.toml`
+2. **Add Web Service** — New → GitHub Repo → your repo
+3. **Root Directory**: **empty** (repo root) — so the root `Dockerfile` is used
+4. **Build**: Railway uses the root `Dockerfile` (frontend + backend)
 
 ---
 
@@ -154,27 +176,17 @@ curl -X POST "https://qstash.upstash.io/v2/schedules" \
 
 ## Build Configuration
 
-**Root Directory**: `backend`
+### Unified (recommended — no CORS)
 
-Railway will use `backend/nixpacks.toml` and `backend/Procfile` to build and run. No extra config needed.
+- **Root Directory**: empty (repo root)
+- **Builder**: Dockerfile (auto-detected)
+- **No** `VITE_API_BASE_URL` — frontend uses relative `/api`
 
-**Frontend** (Root Directory: `frontend`): Set `VITE_API_BASE_URL=https://amazonmcp-backend-production.up.railway.app/api` in Railway Variables so the frontend calls the backend.
+### Separate frontend + backend (legacy — CORS issues)
 
----
-
-## Frontend Build & Serve from Backend (Optional)
-
-To serve the frontend from the same service:
-
-1. Add static file serving in `app/main.py`:
-
-```python
-from fastapi.staticfiles import StaticFiles
-# After all routers:
-app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="static")
-```
-
-2. Build frontend during deploy and set `VITE_API_BASE_URL` to `/api` (relative).
+- **Backend** Root Directory: `backend` — uses nixpacks
+- **Frontend** Root Directory: `frontend` — set `VITE_API_BASE_URL=https://amazonmcp-backend-production.up.railway.app/api`
+- CORS must be configured; preflight can fail on some proxies
 
 ---
 
@@ -206,9 +218,9 @@ app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="static")
 ## Summary Checklist
 
 - [ ] Add PostgreSQL plugin
-- [ ] Add Backend service (Root: `backend`), Frontend service (Root: `frontend`)
-- [ ] **Backend** vars: DATABASE_URL (use `${{Postgres.DATABASE_URL}}`), SECRET_KEY, API_KEY, ENCRYPTION_KEY, CORS_ORIGINS
-- [ ] **Frontend** vars: VITE_API_BASE_URL=https://amazonmcp-backend-production.up.railway.app/api
+- [ ] Add Backend service — **Root Directory: empty** (unified deploy)
+- [ ] **Backend** vars: DATABASE_URL (`${{Postgres.DATABASE_URL}}`), SECRET_KEY, API_KEY, ENCRYPTION_KEY, FIRST_ADMIN_EMAIL, FIRST_ADMIN_PASSWORD
+- [ ] Do **not** set VITE_API_BASE_URL (unified deploy uses relative `/api`)
 - [ ] Set CRON_SECRET for scheduled jobs
 - [ ] Add Resend + Upstash Redis vars if using
 - [ ] Create QStash schedules for sync, reports, search-terms

@@ -10,6 +10,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from app.database import get_db
@@ -683,6 +684,288 @@ async def list_products(
         "products": list(by_asin.values()),
         "count": len(by_asin),
     }
+
+
+@router.get("/links")
+async def list_account_links(
+    credential_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Query account links. Manager Account users see linked advertiser accounts;
+    advertiser account users see linked Manager Accounts.
+    """
+    cred = await _get_credential(db, credential_id)
+    client = await _make_client(cred, db)
+    try:
+        result = await client.query_account_links()
+        links = _extract_list(result, ["accountLinks", "links", "result", "results", "items"])
+        return {"links": links, "count": len(links)}
+    except Exception as e:
+        logger.error(f"Account links failed: {e}")
+        raise HTTPException(status_code=502, detail=safe_error_detail(e, "Failed to fetch account links."))
+
+
+class AccountSettingsUpdate(BaseModel):
+    display_name: Optional[str] = None
+    currency_code: Optional[str] = None
+    timezone: Optional[str] = None
+
+
+@router.put("/settings")
+async def update_account_settings(
+    payload: AccountSettingsUpdate,
+    credential_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Update the active account's display name, currency, or timezone.
+    Requires an active profile to be set.
+    """
+    cred = await _get_credential(db, credential_id)
+    if not cred.profile_id:
+        raise HTTPException(
+            status_code=400,
+            detail="No active account selected. Discover accounts and set an active profile first.",
+        )
+    result = await db.execute(
+        select(Account).where(
+            Account.credential_id == cred.id,
+            Account.profile_id == cred.profile_id,
+        )
+    )
+    active_account = result.scalar_one_or_none()
+    if not active_account or not active_account.raw_data:
+        raise HTTPException(status_code=404, detail="Active account not found or missing advertiser ID.")
+    adv_id = active_account.raw_data.get("advertiserAccountId")
+    if not adv_id:
+        raise HTTPException(status_code=400, detail="Advertiser account ID not available.")
+    client = await _make_client(cred, db)
+    base = {"advertiserAccountId": adv_id}
+    try:
+        if payload.display_name is not None:
+            await client.update_account_name([{**base, "displayName": payload.display_name}])
+            active_account.account_name = payload.display_name
+        if payload.currency_code is not None:
+            await client.update_account_currency([{**base, "currencyCode": payload.currency_code}])
+        if payload.timezone is not None:
+            await client.update_account_timezone([{**base, "timezone": payload.timezone}])
+        active_account.updated_at = utcnow()
+        db.add(active_account)
+        await db.flush()
+        return {"status": "updated", "display_name": payload.display_name, "currency_code": payload.currency_code, "timezone": payload.timezone}
+    except Exception as e:
+        logger.error(f"Account settings update failed: {e}")
+        raise HTTPException(status_code=502, detail=safe_error_detail(e, "Failed to update account settings."))
+
+
+# ── Terms Token ────────────────────────────────────────────────────────
+
+
+class CreateTermsTokenRequest(BaseModel):
+    terms_type: str = "ADSP"
+
+
+@router.post("/terms-token")
+async def create_terms_token(
+    payload: CreateTermsTokenRequest,
+    credential_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a new terms token for advertising terms acceptance (e.g. ADSP)."""
+    cred = await _get_credential(db, credential_id)
+    client = await _make_client(cred, db)
+    try:
+        result = await client.create_terms_token(terms_type=payload.terms_type)
+        return result
+    except Exception as e:
+        logger.error(f"Create terms token failed: {e}")
+        raise HTTPException(status_code=502, detail=safe_error_detail(e, "Failed to create terms token."))
+
+
+class GetTermsTokenRequest(BaseModel):
+    terms_token: str
+
+
+@router.post("/terms-token/status")
+async def get_terms_token_status(
+    payload: GetTermsTokenRequest,
+    credential_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the status of a terms token."""
+    cred = await _get_credential(db, credential_id)
+    client = await _make_client(cred, db)
+    try:
+        result = await client.get_terms_token(terms_token=payload.terms_token)
+        return result
+    except Exception as e:
+        logger.error(f"Get terms token failed: {e}")
+        raise HTTPException(status_code=502, detail=safe_error_detail(e, "Failed to get terms token status."))
+
+
+# ── Update Advertiser Account ──────────────────────────────────────────
+
+
+class UpdateAdvertiserRequest(BaseModel):
+    advertiser_account_id: str
+    display_name: Optional[str] = None
+    currency_code: Optional[str] = None
+    timezone: Optional[str] = None
+
+
+@router.put("/advertiser")
+async def update_advertiser_account(
+    payload: UpdateAdvertiserRequest,
+    credential_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update advertiser account (display name, currency, timezone)."""
+    cred = await _get_credential(db, credential_id)
+    client = await _make_client(cred, db)
+    acct = {"advertiserAccountId": payload.advertiser_account_id}
+    if payload.display_name is not None:
+        acct["displayName"] = payload.display_name
+    if payload.currency_code is not None:
+        acct["currencyCode"] = payload.currency_code
+    if payload.timezone is not None:
+        acct["timezone"] = payload.timezone
+    try:
+        result = await client.update_advertiser_account([acct])
+        return {"status": "updated", "result": result}
+    except Exception as e:
+        logger.error(f"Update advertiser failed: {e}")
+        raise HTTPException(status_code=502, detail=safe_error_detail(e, "Failed to update advertiser account."))
+
+
+# ── User Invitations ───────────────────────────────────────────────────
+
+
+@router.get("/invitations")
+async def list_user_invitations(
+    credential_id: Optional[str] = Query(None),
+    max_results: int = Query(50, ge=1, le=100),
+    next_token: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """List user invitations for the advertising account."""
+    cred = await _get_credential(db, credential_id)
+    client = await _make_client(cred, db)
+    try:
+        result = await client.list_user_invitations(max_results=max_results, next_token=next_token)
+        invitations = _extract_list(result, ["userInvitations", "invitations", "result", "results", "items"])
+        return {"invitations": invitations, "count": len(invitations), "next_token": result.get("nextToken")}
+    except Exception as e:
+        logger.error(f"List invitations failed: {e}")
+        raise HTTPException(status_code=502, detail=safe_error_detail(e, "Failed to list user invitations."))
+
+
+class CreateInvitationRequest(BaseModel):
+    email: str
+    role: Optional[str] = None
+    permissions: Optional[list[str]] = None
+
+
+@router.post("/invitations")
+async def create_user_invitation(
+    payload: CreateInvitationRequest,
+    credential_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a user invitation for the advertising account."""
+    cred = await _get_credential(db, credential_id)
+    client = await _make_client(cred, db)
+    req = {"email": payload.email}
+    if payload.role:
+        req["role"] = payload.role
+    if payload.permissions:
+        req["permissions"] = payload.permissions
+    try:
+        result = await client.create_user_invitations(user_invitation_requests=[req])
+        return result
+    except Exception as e:
+        logger.error(f"Create invitation failed: {e}")
+        raise HTTPException(status_code=502, detail=safe_error_detail(e, "Failed to create user invitation."))
+
+
+@router.get("/invitations/{invitation_id}")
+async def get_user_invitation(
+    invitation_id: str,
+    credential_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get details of a specific user invitation."""
+    cred = await _get_credential(db, credential_id)
+    client = await _make_client(cred, db)
+    try:
+        result = await client.get_user_invitation(invitation_id=invitation_id)
+        return result
+    except Exception as e:
+        logger.error(f"Get invitation failed: {e}")
+        raise HTTPException(status_code=502, detail=safe_error_detail(e, "Failed to get user invitation."))
+
+
+class RedeemInvitationRequest(BaseModel):
+    invitation_id: str
+
+
+@router.post("/invitations/{invitation_id}/redeem")
+async def redeem_user_invitation(
+    invitation_id: str,
+    credential_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Redeem a user invitation to gain access to the advertising account."""
+    cred = await _get_credential(db, credential_id)
+    client = await _make_client(cred, db)
+    try:
+        result = await client.redeem_user_invitation(invitation_id=invitation_id)
+        return result
+    except Exception as e:
+        logger.error(f"Redeem invitation failed: {e}")
+        raise HTTPException(status_code=502, detail=safe_error_detail(e, "Failed to redeem user invitation."))
+
+
+class UpdateInvitationRequest(BaseModel):
+    action: str  # e.g. "REVOKE", "RESEND"
+
+
+@router.put("/invitations/{invitation_id}")
+async def update_user_invitation(
+    invitation_id: str,
+    payload: UpdateInvitationRequest,
+    credential_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update a user invitation (revoke, resend)."""
+    cred = await _get_credential(db, credential_id)
+    client = await _make_client(cred, db)
+    updates = [{"invitationId": invitation_id, "action": payload.action}]
+    try:
+        result = await client.update_user_invitations(updates=updates)
+        return result
+    except Exception as e:
+        logger.error(f"Update invitation failed: {e}")
+        raise HTTPException(status_code=502, detail=safe_error_detail(e, "Failed to update user invitation."))
+
+
+# ── Invoices ────────────────────────────────────────────────────────────
+
+
+@router.get("/invoices")
+    credential_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """List billing invoices for the advertising account."""
+    cred = await _get_credential(db, credential_id)
+    client = await _make_client(cred, db)
+    try:
+        result = await client.list_invoices()
+        invoices = _extract_list(result, ["invoices", "result", "results", "items"])
+        return {"invoices": invoices, "count": len(invoices)}
+    except Exception as e:
+        logger.error(f"Invoices failed: {e}")
+        raise HTTPException(status_code=502, detail=safe_error_detail(e, "Failed to fetch invoices."))
 
 
 @router.get("/tools")
