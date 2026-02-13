@@ -354,7 +354,7 @@ function SingleshotModal({ products = [], onSave, onClose, saving }) {
 // ══════════════════════════════════════════════════════════════════════
 
 export default function CampaignManager() {
-  const { activeAccountId } = useAccount()
+  const { activeAccountId, activeAccount } = useAccount()
 
   // Navigation state: which level are we viewing?
   const [view, setView] = useState('campaigns') // campaigns | ad-groups | targets | ads
@@ -1126,6 +1126,11 @@ export default function CampaignManager() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Campaign Manager</h1>
+          <p className="mt-1 text-sm text-slate-500">
+            {activeAccount
+              ? <>Managing <span className="font-medium text-slate-700">{activeAccount.account_name || activeAccount.name}</span> &middot; {activeAccount.marketplace || activeAccount.region?.toUpperCase()}</>
+              : 'Select an account in the header to view campaigns'}
+          </p>
           <div className="mt-1"><Breadcrumb /></div>
         </div>
         <div className="flex items-center gap-2">

@@ -902,9 +902,37 @@ class AmazonAdsMCP:
             logger.error(f"Search term report creation failed: {resp.status_code} - {error_text}")
             raise MCPError(f"Search term report API error ({resp.status_code}): {error_text}")
 
-    async def list_invoices(self, params: dict = None) -> dict:
-        body = params or {}
-        return await self.call_tool("billing-list_invoices", {"body": body})
+    async def list_invoices(
+        self,
+        access_requested_account: dict = None,
+        invoice_statuses: list[str] = None,
+        start_date: str = None,
+        end_date: str = None,
+        count: int = None,
+        cursor: str = None,
+    ) -> dict:
+        """
+        List billing invoices. Per billing doc: body has accessRequestedAccount;
+        queryParameters has invoiceStatuses, startDate, endDate, count, cursor.
+        """
+        body = {}
+        if access_requested_account:
+            body["accessRequestedAccount"] = access_requested_account
+        args = {"body": body}
+        qp = {}
+        if invoice_statuses is not None:
+            qp["invoiceStatuses"] = invoice_statuses
+        if start_date is not None:
+            qp["startDate"] = start_date
+        if end_date is not None:
+            qp["endDate"] = end_date
+        if count is not None:
+            qp["count"] = count
+        if cursor is not None:
+            qp["cursor"] = cursor
+        if qp:
+            args["queryParameters"] = qp
+        return await self.call_tool("billing-list_invoices", args)
 
     # ── Stream Subscriptions (ADSP) ─────────────────────────────────────
 

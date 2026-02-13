@@ -28,11 +28,12 @@ import {
 } from 'lucide-react'
 import StatusBadge from '../components/StatusBadge'
 import EmptyState from '../components/EmptyState'
+import { Link } from 'react-router-dom'
 import { credentials, accounts, settingsApi } from '../lib/api'
 import { useAccount } from '../lib/AccountContext'
 
 export default function Settings() {
-  const { refreshAccounts } = useAccount()
+  const { refreshAccounts, activeAccountId, activeAccount } = useAccount()
   const [creds, setCreds] = useState([])
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
@@ -89,11 +90,13 @@ export default function Settings() {
     loadCredentials()
   }, [])
 
+  const credId = activeAccountId || null
+
   async function loadAccountLinks() {
     setAccountLinksLoading(true)
     setAccountLinksError(null)
     try {
-      const data = await accounts.links()
+      const data = await accounts.links(credId)
       setAccountLinks(data?.links || [])
     } catch (err) {
       setAccountLinksError(err.message || 'Failed to load account links')
@@ -105,7 +108,7 @@ export default function Settings() {
     setAccountInvoicesLoading(true)
     setAccountInvoicesError(null)
     try {
-      const data = await accounts.invoices()
+      const data = await accounts.invoices(credId)
       setAccountInvoices(data?.invoices || [])
     } catch (err) {
       setAccountInvoicesError(err.message || 'Failed to load invoices')
@@ -116,7 +119,7 @@ export default function Settings() {
   async function createTermsToken() {
     setTermsTokenLoading(true)
     try {
-      const data = await accounts.createTermsToken('ADSP')
+      const data = await accounts.createTermsToken('ADSP', credId)
       setTermsToken(data?.termsToken || data?.token || data)
     } catch (err) { setError(err.message) }
     finally { setTermsTokenLoading(false) }
@@ -126,7 +129,7 @@ export default function Settings() {
     setInvitationsLoading(true)
     setInvitationsError(null)
     try {
-      const data = await accounts.invitations.list()
+      const data = await accounts.invitations.list(credId)
       setInvitations(data?.invitations || [])
     } catch (err) {
       setInvitationsError(err.message || 'Failed to load invitations')
@@ -137,7 +140,7 @@ export default function Settings() {
   async function loadStreamSubscriptions() {
     setStreamSubsLoading(true)
     try {
-      const data = await accounts.streamSubscriptions()
+      const data = await accounts.streamSubscriptions(credId)
       setStreamSubs(data?.subscriptions || [])
     } catch { setStreamSubs([]) }
     finally { setStreamSubsLoading(false) }
@@ -149,7 +152,7 @@ export default function Settings() {
     setInviteSending(true)
     setError(null)
     try {
-      await accounts.invitations.create({ email: inviteForm.email.trim(), role: inviteForm.role || undefined })
+      await accounts.invitations.create({ email: inviteForm.email.trim(), role: inviteForm.role || undefined }, credId)
       setInviteForm({ email: '', role: '' })
       await loadInvitations()
     } catch (err) { setError(err.message) }
@@ -166,7 +169,7 @@ export default function Settings() {
     setAccountSettingsSaving(true)
     setError(null)
     try {
-      await accounts.updateSettings(payload)
+      await accounts.updateSettings(payload, credId)
       setAccountSettingsForm({ display_name: '', currency_code: '', timezone: '' })
     } catch (err) { setError(err.message) }
     finally { setAccountSettingsSaving(false) }
@@ -647,6 +650,11 @@ export default function Settings() {
         </button>
         {accountBillingExpanded && (
           <div className="px-5 pb-5 border-t border-slate-100 space-y-5">
+            {!activeAccount?.profile_id && creds.length > 0 && (
+              <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
+                <strong>Tip:</strong> <Link to="/" className="text-amber-700 font-medium underline hover:text-amber-900">Discover accounts</Link> on the Dashboard and select an active profile in the header for account links, invoices, and user invitations to work correctly.
+              </div>
+            )}
             <p className="text-xs text-slate-500 pt-4">
               Manage your active advertising account settings, billing, terms, and user invitations.
             </p>

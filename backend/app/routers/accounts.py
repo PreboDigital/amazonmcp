@@ -58,6 +58,28 @@ def _extract_list(data, keys=None) -> list:
     return []
 
 
+async def _get_access_requested_account(db: AsyncSession, cred: Credential) -> Optional[dict]:
+    """
+    Resolve accessRequestedAccount for MCP calls when credential has an active profile.
+    Per Amazon docs: use accessRequestedAccount (singular) for account_management, billing, stream.
+    """
+    if not cred.profile_id:
+        return None
+    result = await db.execute(
+        select(Account).where(
+            Account.credential_id == cred.id,
+            Account.profile_id == cred.profile_id,
+        )
+    )
+    acc = result.scalar_one_or_none()
+    if not acc or not acc.raw_data:
+        return None
+    adv_id = acc.raw_data.get("advertiserAccountId")
+    if not adv_id:
+        return None
+    return {"advertiserAccountId": adv_id}
+
+
 @router.get("/discover")
 async def discover_accounts(
     credential_id: Optional[str] = Query(None),
@@ -694,16 +716,21 @@ async def list_account_links(
     """
     Query account links. Manager Account users see linked advertiser accounts;
     advertiser account users see linked Manager Accounts.
+    Per account-management doc: body includes accessRequestedAccount when scoping.
     """
     cred = await _get_credential(db, credential_id)
+    access = await _get_access_requested_account(db, cred)
     client = await _make_client(cred, db)
     try:
-        result = await client.query_account_links()
+        result = await client.query_account_links(access_requested_account=access)
         links = _extract_list(result, ["accountLinks", "links", "result", "results", "items"])
         return {"links": links, "count": len(links)}
     except Exception as e:
         logger.error(f"Account links failed: {e}")
-        raise HTTPException(status_code=502, detail=safe_error_detail(e, "Failed to fetch account links."))
+        err = safe_error_detail(e, "Failed to fetch account links.")
+        if "profile" in str(e).lower() or "account" in str(e).lower():
+            err += " Ensure you have discovered accounts and selected an active profile."
+        raise HTTPException(status_code=502, detail=err)
 
 
 class AccountSettingsUpdate(BaseModel):
@@ -848,16 +875,21 @@ async def list_user_invitations(
     next_token: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """List user invitations for the advertising account."""
+    """List user invitations for the advertising account. Per doc: supports accessRequestedAccount."""
     cred = await _get_credential(db, credential_id)
+    access = await _get_access_requested_account(db, cred)
     client = await _make_client(cred, db)
     try:
-        result = await client.list_user_invitations(max_results=max_results, next_token=next_token)
+        result = await client.list_user_invitations(
+            max_results=max_results, next_token=next_token, access_requested_account=access
+        )
         invitations = _extract_list(result, ["userInvitations", "invitations", "result", "results", "items"])
         return {"invitations": invitations, "count": len(invitations), "next_token": result.get("nextToken")}
     except Exception as e:
         logger.error(f"List invitations failed: {e}")
-        raise HTTPException(status_code=502, detail=safe_error_detail(e, "Failed to list user invitations."))
+        err = safe_error_detail(e, "Failed to list user invitations.")
+        err += " User invitations may require a Manager account. Select an active profile and try again."
+        raise HTTPException(status_code=502, detail=err)
 
 
 class CreateInvitationRequest(BaseModel):
@@ -872,8 +904,9 @@ async def create_user_invitation(
     credential_id: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a user invitation for the advertising account."""
+    """Create a user invitation for the advertising account. Per doc: supports accessRequestedAccount."""
     cred = await _get_credential(db, credential_id)
+    access = await _get_access_requested_account(db, cred)
     client = await _make_client(cred, db)
     req = {"email": payload.email}
     if payload.role:
@@ -881,7 +914,9 @@ async def create_user_invitation(
     if payload.permissions:
         req["permissions"] = payload.permissions
     try:
-        result = await client.create_user_invitations(user_invitation_requests=[req])
+        result = await client.create_user_invitations(
+            user_invitation_requests=[req], access_requested_account=access
+        )
         return result
     except Exception as e:
         logger.error(f"Create invitation failed: {e}")
@@ -896,9 +931,10 @@ async def get_user_invitation(
 ):
     """Get details of a specific user invitation."""
     cred = await _get_credential(db, credential_id)
+    access = await _get_access_requested_account(db, cred)
     client = await _make_client(cred, db)
     try:
-        result = await client.get_user_invitation(invitation_id=invitation_id)
+        result = await client.get_user_invitation(invitation_id=invitation_id, access_requested_account=access)
         return result
     except Exception as e:
         logger.error(f"Get invitation failed: {e}")
@@ -917,9 +953,10 @@ async def redeem_user_invitation(
 ):
     """Redeem a user invitation to gain access to the advertising account."""
     cred = await _get_credential(db, credential_id)
+    access = await _get_access_requested_account(db, cred)
     client = await _make_client(cred, db)
     try:
-        result = await client.redeem_user_invitation(invitation_id=invitation_id)
+        result = await client.redeem_user_invitation(invitation_id=invitation_id, access_requested_account=access)
         return result
     except Exception as e:
         logger.error(f"Redeem invitation failed: {e}")
@@ -939,10 +976,11 @@ async def update_user_invitation(
 ):
     """Update a user invitation (revoke, resend)."""
     cred = await _get_credential(db, credential_id)
+    access = await _get_access_requested_account(db, cred)
     client = await _make_client(cred, db)
     updates = [{"invitationId": invitation_id, "action": payload.action}]
     try:
-        result = await client.update_user_invitations(updates=updates)
+        result = await client.update_user_invitations(updates=updates, access_requested_account=access)
         return result
     except Exception as e:
         logger.error(f"Update invitation failed: {e}")
@@ -959,12 +997,15 @@ async def list_stream_subscriptions(
     next_token: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """List ADSP stream subscriptions (purchase/traffic overview)."""
+    """List ADSP stream subscriptions. Per stream doc: body has accessRequestedAccount."""
     cred = await _get_credential(db, credential_id)
+    access = await _get_access_requested_account(db, cred)
     client = await _make_client(cred, db)
     try:
         result = await client.list_stream_subscriptions(
-            max_results=max_results, next_token=next_token
+            access_requested_account=access,
+            max_results=max_results,
+            next_token=next_token,
         )
         subs = _extract_list(result, ["streamSubscriptions", "subscriptions", "result", "results", "items"])
         return {"subscriptions": subs, "count": len(subs), "next_token": result.get("nextToken")}
@@ -984,16 +1025,19 @@ async def list_invoices(
     credential_id: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """List billing invoices for the advertising account."""
+    """List billing invoices. Per billing doc: body has accessRequestedAccount."""
     cred = await _get_credential(db, credential_id)
+    access = await _get_access_requested_account(db, cred)
     client = await _make_client(cred, db)
     try:
-        result = await client.list_invoices()
+        result = await client.list_invoices(access_requested_account=access)
         invoices = _extract_list(result, ["invoices", "result", "results", "items"])
         return {"invoices": invoices, "count": len(invoices)}
     except Exception as e:
         logger.error(f"Invoices failed: {e}")
-        raise HTTPException(status_code=502, detail=safe_error_detail(e, "Failed to fetch invoices."))
+        err = safe_error_detail(e, "Failed to fetch invoices.")
+        err += " Select an active profile and ensure billing is enabled for your account."
+        raise HTTPException(status_code=502, detail=err)
 
 
 @router.get("/tools")

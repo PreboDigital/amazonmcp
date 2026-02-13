@@ -77,6 +77,8 @@ app = FastAPI(
 # CORS: allow production frontend + localhost
 CORS_ORIGINS = [
     "https://amazonmcp-frontend-production.up.railway.app",
+    "https://amazonmcp-production.up.railway.app",
+    "https://amazonmcp-backend-production.up.railway.app",
     "http://localhost:5173",
     "http://localhost:3000",
 ]
@@ -153,9 +155,11 @@ if STATIC_DIR.exists():
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str):
-        """Serve SPA for non-API routes. API routes registered above."""
-        if full_path.startswith("api") or full_path == "api":
-            return Response(status_code=404)
+        """Serve SPA for non-API routes. API routes are registered above and take precedence."""
+        # Never serve index.html for /api/* — those are handled by API routers
+        path_without_query = full_path.split("?")[0]
+        if path_without_query.startswith("api/") or path_without_query == "api":
+            return Response(status_code=404, content="Not Found")
         file_path = STATIC_DIR / full_path
         if file_path.is_file():
             return FileResponse(file_path)

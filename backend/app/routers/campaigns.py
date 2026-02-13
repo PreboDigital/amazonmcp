@@ -38,7 +38,10 @@ async def _get_credential(db: AsyncSession, cred_id: Optional[str] = None) -> Cr
         result = await db.execute(select(Credential).where(Credential.is_default == True))
     cred = result.scalar_one_or_none()
     if not cred:
-        raise HTTPException(status_code=404, detail="No credential found.")
+        raise HTTPException(
+            status_code=404,
+            detail="No credential found. Add API credentials in Settings and discover accounts on the Dashboard.",
+        )
     return cred
 
 
