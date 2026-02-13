@@ -96,6 +96,8 @@ UPSTASH_REDIS_REST_TOKEN=xxx
 
 ```env
 CRON_SECRET=<generate with: python -c "import secrets; print(secrets.token_hex(24))">
+# Required for in-app schedule creation — your app's public URL (e.g. https://amazonmcp-production.up.railway.app)
+PUBLIC_URL=https://your-app.up.railway.app
 ```
 
 ---
@@ -113,7 +115,7 @@ Use [Upstash QStash](https://upstash.com/docs/qstash) to schedule HTTP calls to 
 
 **Recommended:** Use the **Data Sync** page in the app. Admins can add schedules directly:
 - Set `QSTASH_TOKEN` and `CRON_SECRET` in Railway Variables
-- Railway provides `RAILWAY_PUBLIC_DOMAIN` automatically; or set `PUBLIC_URL` if your app uses a custom domain
+- **Set `PUBLIC_URL`** to your app's public URL (e.g. `https://amazonmcp-production.up.railway.app`) — required for schedule creation; Railway's `RAILWAY_PUBLIC_DOMAIN` may not always be available
 - Go to Data Sync → Add schedule (job + frequency)
 
 ### 3. Create Schedules (curl / alternative)

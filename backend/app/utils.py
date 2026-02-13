@@ -46,20 +46,35 @@ def utcnow() -> datetime:
 def extract_target_expression(tgt_data: dict) -> Optional[str]:
     """
     Extract human-readable keyword/expression from Amazon Ads target data.
-    Handles: keywordText (SP), targetDetails.keyword, expression (product targets).
+    Handles multiple MCP/API response formats: keywordText, targetDetails, expression arrays, etc.
     """
+    if not tgt_data or not isinstance(tgt_data, dict):
+        return None
+    # Unwrap if MCP nests target inside "target" key
+    if "target" in tgt_data and isinstance(tgt_data["target"], dict):
+        tgt_data = tgt_data["target"]
     target_details = tgt_data.get("targetDetails") or {}
-    expr = (
-        tgt_data.get("keywordText")
-        or tgt_data.get("expression")
-        or tgt_data.get("keyword")
-        or target_details.get("keyword")
-        or target_details.get("expression")
-    )
-    if expr and isinstance(expr, str):
-        return expr
+    # Try all known field names (SP v3, common model, Marketing Stream, MCP variants)
+    for key in (
+        "keywordText", "keyword", "expression", "text", "value",
+        "targetingClause", "targetingExpression", "resolvedTargetingExpression",
+    ):
+        val = tgt_data.get(key) or target_details.get(key)
+        if val and isinstance(val, str) and not val.isdigit():
+            return val
+    # Nested: keywordTarget.keyword, productTarget.asin, etc.
+    for nest in ("keywordTarget", "productTarget", "targeting"):
+        nested = tgt_data.get(nest) or target_details.get(nest)
+        if isinstance(nested, dict):
+            for k in ("keyword", "expression", "value", "asin"):
+                v = nested.get(k)
+                if v and isinstance(v, str) and not v.isdigit():
+                    return v
+    # expression as list
+    expr = tgt_data.get("expression") or target_details.get("expression")
     if isinstance(expr, list) and expr:
         return str(expr[0]) if len(expr) == 1 else " | ".join(str(x) for x in expr)
+    # expressions array with {type, value}
     expressions = tgt_data.get("expressions") or tgt_data.get("expression")
     if isinstance(expressions, list):
         parts = []
@@ -68,35 +83,50 @@ def extract_target_expression(tgt_data: dict) -> Optional[str]:
                 val = ex.get("value") or ex.get("targeting")
                 if isinstance(val, dict):
                     val = val.get("value")
-                if val:
+                if val and str(val) and not str(val).isdigit():
                     parts.append(str(val))
-            elif ex:
+            elif ex and str(ex) and not str(ex).isdigit():
                 parts.append(str(ex))
         if parts:
             return " | ".join(parts)
-    resolved = target_details.get("resolvedExpression") or target_details.get("productCategoryResolved") or target_details.get("productBrandResolved")
-    if resolved:
-        return str(resolved)
+    # Resolved human-readable
+    for k in ("resolvedExpression", "productCategoryResolved", "productBrandResolved"):
+        v = target_details.get(k)
+        if v and isinstance(v, str):
+            return v
     return None
 
 
 def extract_ad_asin_sku(ad_data: dict) -> tuple[Optional[str], Optional[str]]:
     """
     Extract ASIN and SKU from Amazon Ads ad data.
-    Handles: creative.products[].productIdType + productId, flat asin/sku.
+    Handles: creative.products[], flat asin/sku, productAd.asin, etc.
     """
+    if not ad_data or not isinstance(ad_data, dict):
+        return (None, None)
+    # Unwrap if MCP nests ad inside "ad" key
+    if "ad" in ad_data and isinstance(ad_data["ad"], dict):
+        ad_data = ad_data["ad"]
     asin = ad_data.get("asin")
     sku = ad_data.get("sku")
-    creative = ad_data.get("creative") or {}
+    creative = ad_data.get("creative") or ad_data.get("productAd") or {}
+    # creative.asin (some SP formats)
+    if not asin and creative.get("asin"):
+        asin = creative.get("asin")
+    # creative.asins (SB format - array)
+    asins = creative.get("asins")
+    if isinstance(asins, list) and asins and not asin:
+        asin = str(asins[0])
     products = creative.get("products") or creative.get("product") or []
     if isinstance(products, dict):
         products = [products]
     for p in products:
         if not isinstance(p, dict):
             continue
-        pid = p.get("productId")
-        ptype = (p.get("productIdType") or "").upper()
+        pid = p.get("productId") or p.get("product_id")
+        ptype = (p.get("productIdType") or p.get("product_id_type") or "").upper()
         if pid:
+            pid = str(pid)
             if ptype == "ASIN" or (not ptype and len(pid) == 10 and pid.isalnum()):
                 asin = asin or pid
             elif ptype == "SKU":

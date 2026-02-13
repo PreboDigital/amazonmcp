@@ -100,10 +100,13 @@ class Settings(BaseSettings):
         import os
         url = (self.public_url or os.environ.get("PUBLIC_URL", "")).strip()
         if not url and os.environ.get("RAILWAY_PUBLIC_DOMAIN"):
-            domain = os.environ["RAILWAY_PUBLIC_DOMAIN"]
-            url = f"https://{domain}" if not domain.startswith("http") else domain
+            domain = os.environ["RAILWAY_PUBLIC_DOMAIN"].strip()
+            url = f"https://{domain}" if domain and not domain.startswith(("http://", "https://")) else domain
         if not url:
             url = "http://localhost:8000"
+        # QStash requires http:// or https:// - ensure we always have a valid scheme
+        if url and not url.startswith(("http://", "https://")):
+            url = "https://" + url.lstrip("/")
         return url.rstrip("/")
 
 

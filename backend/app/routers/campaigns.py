@@ -1626,6 +1626,7 @@ async def run_full_sync(
         # 3. Sync targets (keywords/product targets for SP, SB, SD)
         raw_targets = await client.query_targets(all_products=True)
         target_list = _extract_list(raw_targets, ["targets", "result", "results"])
+        _logged_target_debug = False
         for tgt_data in target_list:
             amazon_id = tgt_data.get("targetId") or tgt_data.get("id") or str(uuid_mod.uuid4())
             amz_ag_id = tgt_data.get("adGroupId")
@@ -1653,6 +1654,9 @@ async def run_full_sync(
 
             target_details = tgt_data.get("targetDetails", {})
             expression = extract_target_expression(tgt_data)
+            if not expression and tgt_data and not _logged_target_debug:
+                logger.warning(f"Target extraction failed: keys={list(tgt_data.keys())}, targetDetails={list(target_details.keys()) if target_details else []}, sample={str(tgt_data)[:600]}")
+                _logged_target_debug = True
 
             tgt_type = tgt_data.get("targetType") or tgt_data.get("type") or target_details.get("targetType")
             match_type = tgt_data.get("matchType") or target_details.get("matchType")
@@ -1687,6 +1691,7 @@ async def run_full_sync(
 
         await _progress("Syncing ads...", 85, stats)
         # 4. Sync ads
+        _logged_ad_debug = False
         try:
             raw_ads = await client.query_ads(all_products=True)
             ad_list = _extract_list(raw_ads, ["ads", "result", "results"])
@@ -1714,6 +1719,9 @@ async def run_full_sync(
                 ad = existing.scalar_one_or_none()
 
                 ad_asin, ad_sku = extract_ad_asin_sku(ad_data)
+                if not ad_asin and not ad_sku and ad_data and not _logged_ad_debug:
+                    logger.warning(f"Ad ASIN extraction failed: keys={list(ad_data.keys())}, creative keys={list((ad_data.get('creative') or {}).keys())}, sample={str(ad_data)[:600]}")
+                    _logged_ad_debug = True
                 ad_name = ad_data.get("name") or ad_data.get("adName") or (ad_data.get("creative") or {}).get("headline")
                 if ad:
                     ad.ad_name = ad_name or ad.ad_name
@@ -1822,6 +1830,41 @@ async def _run_sync_background(
                     error_message=err_msg,
                     account_name=account_name,
                 ))
+
+
+@router.get("/debug/mcp-structure")
+async def debug_mcp_structure(
+    credential_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Return sample raw_data from targets and ads to inspect MCP response structure.
+    Use this to debug extraction when keywords/ads show IDs instead of actual data.
+    """
+    cred = await _get_credential(db, credential_id)
+    # Get one target and one ad with raw_data
+    t_result = await db.execute(
+        select(Target).where(Target.credential_id == cred.id).limit(1)
+    )
+    a_result = await db.execute(
+        select(Ad).where(Ad.credential_id == cred.id).limit(1)
+    )
+    target = t_result.scalar_one_or_none()
+    ad = a_result.scalar_one_or_none()
+    return {
+        "target_sample": {
+            "expression_value": target.expression_value if target else None,
+            "raw_data_keys": list(target.raw_data.keys()) if target and target.raw_data else [],
+            "raw_data": target.raw_data if target and target.raw_data else None,
+        },
+        "ad_sample": {
+            "ad_name": ad.ad_name if ad else None,
+            "asin": ad.asin if ad else None,
+            "sku": ad.sku if ad else None,
+            "raw_data_keys": list(ad.raw_data.keys()) if ad and ad.raw_data else [],
+            "raw_data": ad.raw_data if ad and ad.raw_data else None,
+        },
+    }
 
 
 @router.post("/sync")

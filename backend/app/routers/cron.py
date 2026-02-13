@@ -288,6 +288,12 @@ async def create_schedule(
         raise HTTPException(500, "CRON_SECRET not configured")
     base_url = settings.effective_public_url
     destination = base_url.rstrip("/") + CRON_JOB_PATHS[job]
+    if not destination.startswith(("http://", "https://")):
+        raise HTTPException(
+            500,
+            f"PUBLIC_URL or RAILWAY_PUBLIC_DOMAIN must produce a URL with http:// or https://. "
+            f"Got base: {base_url!r}. Set PUBLIC_URL in Railway Variables (e.g. https://amazonmcp-production.up.railway.app)."
+        )
     # QStash v2: POST /v2/schedules/{destination} with destination URL-encoded
     encoded = quote(destination, safe="")
     base = (settings.qstash_url or "https://qstash.upstash.io").rstrip("/")
