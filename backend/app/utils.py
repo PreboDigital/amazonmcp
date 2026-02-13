@@ -133,40 +133,60 @@ def extract_target_expression(tgt_data: dict) -> Optional[str]:
     return None
 
 
+def _looks_like_asin(s: str) -> bool:
+    """True if string looks like an Amazon ASIN (10 alphanumeric chars)."""
+    return bool(s and isinstance(s, str) and len(s) == 10 and s.isalnum())
+
+
 def extract_ad_asin_sku(ad_data: dict) -> tuple[Optional[str], Optional[str]]:
     """
     Extract ASIN and SKU from Amazon Ads ad data.
-    Handles: creative.products[], flat asin/sku, productAd.asin, etc.
+    Handles: creative.products[], creative.product, flat asin/sku, MCP variants.
     """
     if not ad_data or not isinstance(ad_data, dict):
         return (None, None)
-    # Unwrap if MCP nests ad inside "ad" key
     if "ad" in ad_data and isinstance(ad_data["ad"], dict):
         ad_data = ad_data["ad"]
     asin = ad_data.get("asin")
     sku = ad_data.get("sku")
     creative = ad_data.get("creative") or ad_data.get("productAd") or {}
-    # creative.asin (some SP formats)
+    # Top-level productId (some MCP formats)
+    if not asin and _looks_like_asin(str(ad_data.get("productId", ""))):
+        asin = str(ad_data["productId"])
+    # creative.asin, creative.productId
     if not asin and creative.get("asin"):
         asin = creative.get("asin")
-    # creative.asins (SB format - array)
+    if not asin and _looks_like_asin(str(creative.get("productId", ""))):
+        asin = str(creative["productId"])
+    # creative.asins (SB - array)
     asins = creative.get("asins")
     if isinstance(asins, list) and asins and not asin:
         asin = str(asins[0])
+    # creative.products[] or creative.product (MCP: product may be singular object)
     products = creative.get("products") or creative.get("product") or []
     if isinstance(products, dict):
         products = [products]
     for p in products:
         if not isinstance(p, dict):
             continue
-        pid = p.get("productId") or p.get("product_id")
+        pid = p.get("productId") or p.get("product_id") or p.get("asin")
         ptype = (p.get("productIdType") or p.get("product_id_type") or "").upper()
         if pid:
             pid = str(pid)
-            if ptype == "ASIN" or (not ptype and len(pid) == 10 and pid.isalnum()):
+            if ptype == "ASIN" or (not ptype and _looks_like_asin(pid)):
                 asin = asin or pid
             elif ptype == "SKU":
                 sku = sku or pid
             elif not asin and not sku:
                 asin = pid
+    # Fallback: scan creative for any ASIN-like value (handles unknown MCP nesting)
+    if not asin and not sku:
+        for key in ("asin", "productId", "product_id"):
+            for obj in (creative, ad_data):
+                v = obj.get(key) if isinstance(obj, dict) else None
+                if v and _looks_like_asin(str(v)):
+                    asin = str(v)
+                    break
+            if asin:
+                break
     return (asin, sku)
