@@ -1900,11 +1900,12 @@ async def sync_start(
     db.add(job)
     await db.flush()
 
-    # Get account name for email
+    # Get account name for email — use active profile (cred.profile_id) so email matches the account actually synced
     account_name = None
-    acc_result = await db.execute(
-        select(Account).where(Account.credential_id == cred.id).limit(1)
-    )
+    q = select(Account).where(Account.credential_id == cred.id)
+    if cred.profile_id:
+        q = q.where(Account.profile_id == cred.profile_id)
+    acc_result = await db.execute(q.limit(1))
     acc = acc_result.scalar_one_or_none()
     if acc:
         account_name = acc.account_name or acc.amazon_account_id

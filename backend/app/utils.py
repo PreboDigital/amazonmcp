@@ -78,6 +78,16 @@ def extract_target_expression(tgt_data: dict) -> Optional[str]:
             v = detail_val.get(k)
             if v and isinstance(v, str) and _is_keyword_like(v):
                 return v
+        # productTarget: product.productId (ASIN) nested — MCP format
+        if detail_key == "productTarget":
+            product = detail_val.get("product")
+            if isinstance(product, dict):
+                pid = product.get("productId") or product.get("product_id")
+                ptype = (product.get("productIdType") or product.get("product_id_type") or "").upper()
+                if pid and _is_keyword_like(str(pid)):
+                    return f"ASIN: {pid}" if ptype == "ASIN" else str(pid)
+            if detail_val.get("matchType"):
+                return f"Product: {detail_val['matchType']}"
         # themeTarget has matchType (e.g. KEYWORDS_CLOSE_MATCH) — use as fallback label
         if detail_key == "themeTarget" and detail_val.get("matchType"):
             return f"Theme: {detail_val['matchType']}"
