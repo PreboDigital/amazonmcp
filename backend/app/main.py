@@ -104,7 +104,7 @@ class AddCORSHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
-app.add_middleware(AddCORSHeadersMiddleware)
+# Add CORSMiddleware first (runs second); AddCORSHeadersMiddleware last (runs first for OPTIONS)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -112,6 +112,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(AddCORSHeadersMiddleware)
 
 # ── Auth (login/register public; whoami requires JWT) ─────────────────
 app.include_router(auth.router, prefix="/api/auth")
