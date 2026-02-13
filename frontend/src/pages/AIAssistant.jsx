@@ -21,11 +21,206 @@ import {
   Shield,
   CheckCircle,
   Package,
+  Download,
+  Copy,
 } from 'lucide-react'
+import {
+  BarChart, Bar, LineChart, Line, AreaChart, Area,
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
+  PieChart as RePieChart, Pie, Cell,
+} from 'recharts'
 import { ai, accounts } from '../lib/api'
 import { useAccount } from '../lib/AccountContext'
 
-// ── Markdown renderer with table, list, heading, code, and inline support ──
+const CHART_COLORS = ['#4f46e5', '#06b6d4', '#8b5cf6', '#f59e0b', '#10b981', '#ef4444', '#ec4899']
+
+// ── AI-generated chart renderer (bar, line, area, pie) ──
+function AIChatChart({ spec }) {
+  const { type, title, data = [], xKey = 'name', yKeys = [], nameKey = 'name', valueKey = 'value' } = spec
+  if (!data?.length) return <div className="my-2 p-4 bg-slate-50 rounded-lg text-sm text-slate-500">No chart data</div>
+
+  const keys = yKeys.length ? yKeys : (valueKey ? [valueKey] : Object.keys(data[0]).filter(k => k !== xKey && typeof data[0][k] === 'number'))
+
+  if (type === 'pie') {
+    const pieData = data.map((row, i) => ({
+      name: String(row[nameKey] ?? row[xKey] ?? `Item ${i + 1}`),
+      value: Number(row[valueKey] ?? row[keys[0]] ?? 0),
+    }))
+    return (
+      <div className="my-2 rounded-lg border border-slate-200 overflow-hidden">
+        {title && <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 text-sm font-semibold text-slate-700">{title}</div>}
+        <div className="p-3" style={{ height: 260 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <RePieChart>
+              <Pie data={pieData} cx="50%" cy="50%" innerRadius={50} outerRadius={90} paddingAngle={2} dataKey="value"
+                label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}>
+                {pieData.map((_, idx) => <Cell key={idx} fill={CHART_COLORS[idx % CHART_COLORS.length]} />)}
+              </Pie>
+              <Tooltip formatter={(v) => v.toLocaleString()} />
+            </RePieChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+    )
+  }
+
+  const chartProps = { data, margin: { top: 8, right: 8, left: 8, bottom: 8 } }
+  return (
+    <div className="my-2 rounded-lg border border-slate-200 overflow-hidden">
+      {title && <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 text-sm font-semibold text-slate-700">{title}</div>}
+      <div className="p-3" style={{ height: 260 }}>
+        <ResponsiveContainer width="100%" height="100%">
+          {type === 'line' ? (
+            <LineChart {...chartProps}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <XAxis dataKey={xKey} tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} />
+              <YAxis tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} tickFormatter={v => (v >= 1000 ? `${(v/1000).toFixed(1)}k` : v)} />
+              <Tooltip />
+              <Legend iconType="circle" wrapperStyle={{ fontSize: 11 }} />
+              {keys.map((k, i) => <Line key={k} type="monotone" dataKey={k} name={k} stroke={CHART_COLORS[i % CHART_COLORS.length]} strokeWidth={2} dot={{ r: 3 }} />)}
+            </LineChart>
+          ) : type === 'area' ? (
+            <AreaChart {...chartProps}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <XAxis dataKey={xKey} tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} />
+              <YAxis tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} tickFormatter={v => (v >= 1000 ? `${(v/1000).toFixed(1)}k` : v)} />
+              <Tooltip />
+              <Legend iconType="circle" wrapperStyle={{ fontSize: 11 }} />
+              {keys.map((k, i) => <Area key={k} type="monotone" dataKey={k} name={k} stroke={CHART_COLORS[i % CHART_COLORS.length]} fill={CHART_COLORS[i % CHART_COLORS.length]} fillOpacity={0.2} strokeWidth={2} />)}
+            </AreaChart>
+          ) : (
+            <BarChart {...chartProps} layout={spec.layout === 'vertical' ? 'vertical' : 'horizontal'} margin={{ left: spec.layout === 'vertical' ? 20 : 8 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={spec.layout !== 'vertical'} vertical={false} />
+              {spec.layout === 'vertical' ? (
+                <>
+                  <XAxis type="number" tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} />
+                  <YAxis type="category" dataKey={xKey} width={100} tick={{ fontSize: 11, fill: '#64748b' }} tickLine={false} axisLine={false} />
+                </>
+              ) : (
+                <>
+                  <XAxis dataKey={xKey} tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} />
+                  <YAxis tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} tickFormatter={v => (v >= 1000 ? `${(v/1000).toFixed(1)}k` : v)} />
+                </>
+              )}
+              <Tooltip />
+              <Legend iconType="circle" wrapperStyle={{ fontSize: 11 }} />
+              {keys.map((k, i) => <Bar key={k} dataKey={k} name={k} fill={CHART_COLORS[i % CHART_COLORS.length]} radius={[0, 4, 4, 0]} barSize={20} />)}
+            </BarChart>
+          )}
+        </ResponsiveContainer>
+      </div>
+    </div>
+  )
+}
+
+// ── Escape CSV cell (wrap in quotes if contains comma, quote, or newline) ──
+function escapeCsvCell(cell) {
+  const s = String(cell ?? '').replace(/"/g, '""')
+  return /[,"\n\r]/.test(s) ? `"${s}"` : s
+}
+
+// ── Table with CSV export and clipboard copy ──
+function TableWithActions({ headerRow, bodyRows }) {
+  const [copied, setCopied] = useState(false)
+  const numCols = Math.max(headerRow.length, ...(bodyRows.map(r => r.length) || [0]), 1)
+  const paddedHeader = [...headerRow]
+  while (paddedHeader.length < numCols) paddedHeader.push('')
+
+  function toCsv() {
+    const rows = [paddedHeader, ...bodyRows.map(r => {
+      const cells = [...r]
+      while (cells.length < numCols) cells.push('')
+      return cells
+    })]
+    return rows.map(row => row.map(escapeCsvCell).join(',')).join('\n')
+  }
+
+  function handleExportCsv() {
+    const csv = toCsv()
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `ai-assistant-table-${Date.now()}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  async function handleCopy() {
+    const csv = toCsv()
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        await navigator.clipboard.writeText(csv)
+      } else {
+        const ta = document.createElement('textarea')
+        ta.value = csv
+        ta.style.position = 'fixed'
+        ta.style.opacity = '0'
+        document.body.appendChild(ta)
+        ta.select()
+        document.execCommand('copy')
+        document.body.removeChild(ta)
+      }
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      setCopied(false)
+    }
+  }
+
+  return (
+    <div className="my-2 rounded-lg border border-slate-200">
+      <div className="flex items-center justify-end gap-1 px-2 py-1.5 bg-slate-50 border-b border-slate-200 rounded-t-lg">
+        <button
+          onClick={handleCopy}
+          className="flex items-center gap-1.5 px-2 py-1 text-xs text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded transition-colors"
+          title="Copy to clipboard"
+        >
+          <Copy size={12} />
+          {copied ? 'Copied!' : 'Copy'}
+        </button>
+        <button
+          onClick={handleExportCsv}
+          className="flex items-center gap-1.5 px-2 py-1 text-xs text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded transition-colors"
+          title="Export as CSV"
+        >
+          <Download size={12} />
+          Export CSV
+        </button>
+      </div>
+      <div className="overflow-x-auto rounded-b-lg" style={{ WebkitOverflowScrolling: 'touch' }}>
+        <table className="w-max min-w-full text-xs table-auto border-collapse">
+          <thead>
+            <tr className="bg-slate-50 border-b border-slate-200">
+              {paddedHeader.map((cell, ci) => (
+                <th key={ci} className="px-3 py-2 text-left font-semibold text-slate-700 whitespace-nowrap">
+                  {renderInline(cell)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {bodyRows.map((row, ri) => {
+              const cells = [...row]
+              while (cells.length < numCols) cells.push('')
+              return (
+                <tr key={ri} className={ri % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}>
+                  {cells.map((cell, ci) => (
+                    <td key={ci} className="px-3 py-1.5 text-slate-600 whitespace-nowrap">
+                      {renderInline(cell)}
+                    </td>
+                  ))}
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+// ── Markdown renderer with table, list, heading, code, chart, and inline support ──
 function RenderMarkdown({ text }) {
   if (!text) return null
   const lines = text.split('\n')
@@ -34,6 +229,20 @@ function RenderMarkdown({ text }) {
 
   while (i < lines.length) {
     const line = lines[i]
+
+    // ── Chart block: [CHART] {...} [/CHART] ──
+    const remainder = lines.slice(i).join('\n')
+    const chartMatch = remainder.match(/^\[CHART\]\s*(\{[\s\S]*?\})\s*\[\/CHART\]/m)
+    if (chartMatch) {
+      try {
+        const chartSpec = JSON.parse(chartMatch[1])
+        elements.push(<AIChatChart key={`chart-${i}`} spec={chartSpec} />)
+        i += chartMatch[0].split('\n').length
+        continue
+      } catch {
+        /* invalid JSON, fall through */
+      }
+    }
 
     // ── Tables: detect header row like | col1 | col2 | ──
     if (/^\|(.+\|)+\s*$/.test(line.trim())) {
@@ -52,44 +261,12 @@ function RenderMarkdown({ text }) {
       if (tableRows.length > 0) {
         const headerRow = tableRows[0]
         const bodyRows = tableRows.slice(1)
-        const numCols = Math.max(headerRow.length, ...bodyRows.map(r => r.length), 1)
-        const paddedHeader = [...headerRow]
-        while (paddedHeader.length < numCols) paddedHeader.push('')
         elements.push(
-          <div key={`tbl-${i}`} className="my-2 overflow-x-auto rounded-lg border border-slate-200">
-            <table className="w-full text-xs table-fixed">
-              <colgroup>
-                <col style={{ width: 'min(200px, 30%)' }} />
-                {Array.from({ length: numCols - 1 }, (_, ci) => (
-                  <col key={ci} />
-                ))}
-              </colgroup>
-              <thead>
-                <tr className="bg-slate-50 border-b border-slate-200">
-                  {paddedHeader.map((cell, ci) => (
-                    <th key={ci} className="px-3 py-2 text-left font-semibold text-slate-700 whitespace-nowrap overflow-hidden text-ellipsis min-w-0">
-                      {renderInline(cell)}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {bodyRows.map((row, ri) => {
-                  const cells = [...row]
-                  while (cells.length < numCols) cells.push('')
-                  return (
-                    <tr key={ri} className={ri % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}>
-                      {cells.map((cell, ci) => (
-                        <td key={ci} className={`px-3 py-1.5 text-slate-600 min-w-0 overflow-hidden ${ci === 0 ? 'text-ellipsis whitespace-nowrap' : 'whitespace-nowrap'}`}>
-                          {renderInline(cell)}
-                        </td>
-                      ))}
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
+          <TableWithActions
+            key={`tbl-${i}`}
+            headerRow={headerRow}
+            bodyRows={bodyRows}
+          />
         )
       }
       continue // i already advanced past the table

@@ -73,6 +73,26 @@ Format your responses in clean, readable markdown:
 - When suggesting bid/budget changes, provide current → proposed values.
 - For trends, describe the direction and key data points.
 
+**DATA VISUALIZATION — when to use charts vs tables:**
+- Use a **bar chart** when comparing values across categories (e.g., top 5–10 campaigns by spend, top keywords by sales, spend by ad group). Prefer bar charts for rankings and comparisons.
+- Use a **line chart** or **area chart** when showing trends over time (e.g., daily spend/sales over 7–30 days, ACOS trend).
+- Use a **pie chart** when showing composition or share of whole (e.g., spend by campaign type, distribution of orders by state).
+- Use a **table** when the user needs exact numbers to copy/export, when there are many columns, or when precision matters more than visual comparison.
+- For "top N" questions with 5–15 items: consider a bar chart for quick visual comparison, plus a table if they need the numbers.
+- When in doubt, use a table — it's always useful. Add a chart when it would make the insight clearer.
+
+To render a chart, output a [CHART] block with valid JSON. The UI will render it. Format:
+[CHART]
+{"type":"bar","title":"Top Campaigns by Spend","data":[{"name":"Campaign A","spend":150,"sales":800},{"name":"Campaign B","spend":90,"sales":420}],"xKey":"name","yKeys":["spend","sales"]}
+[/CHART]
+- type: "bar" | "line" | "area" | "pie"
+- title: optional string
+- data: array of objects (use real numbers, not strings for numeric values)
+- xKey: key for category/labels (default "name")
+- yKeys: array of numeric keys for bar/line/area (e.g. ["spend","sales"])
+- For bar charts with long labels: add "layout":"vertical"
+- For pie: use "nameKey" and "valueKey" (e.g. {"type":"pie","title":"Spend by Campaign","data":[...],"nameKey":"name","valueKey":"spend"})
+
 **INLINE ACTIONS (small changes — approve in chat):**
 When you suggest 1–2 small changes that the user can approve immediately, append an [ACTIONS] block at the end.
 Use scope "inline" for: single bid change, single budget change, campaign/ad group rename, single keyword add/update/delete.
