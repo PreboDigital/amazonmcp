@@ -23,7 +23,7 @@ from app.models import (
 from app.services.token_service import get_mcp_client_with_fresh_token
 from app.services.reporting_service import get_date_range, DATE_PRESETS
 from app.services.product_image_service import get_product_image_url
-from app.utils import parse_uuid, safe_error_detail, utcnow
+from app.utils import parse_uuid, safe_error_detail, utcnow, extract_target_expression, extract_ad_asin_sku
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -998,6 +998,10 @@ async def list_targets(
 
     target_list = []
     for t in targets:
+        # Fallback: extract expression from raw_data if missing (e.g. pre-fix synced targets)
+        expr_val = t.expression_value
+        if not expr_val and getattr(t, "raw_data", None):
+            expr_val = extract_target_expression(t.raw_data)
         perf = perf_by_target.get(t.amazon_target_id, {})
         spend = perf.get("spend") if perf else (t.spend or 0)
         sales = perf.get("sales") if perf else (t.sales or 0)
@@ -1013,7 +1017,7 @@ async def list_targets(
             "amazon_campaign_id": t.amazon_campaign_id,
             "target_type": t.target_type,
             "expression_type": t.expression_type,
-            "expression_value": t.expression_value,
+            "expression_value": expr_val,
             "match_type": t.match_type,
             "state": t.state,
             "bid": t.bid,
@@ -1260,26 +1264,33 @@ async def list_ads(
     # For single-ad groups, attach ad group metrics to the ad (best available proxy for ad-level data)
     ad_list = []
     for a in ads:
+        # Fallback: extract ASIN/SKU from raw_data if missing (e.g. pre-fix synced ads)
+        asin_val, sku_val = a.asin, a.sku
+        if (not asin_val or not sku_val) and a.raw_data:
+            ra, rs = extract_ad_asin_sku(a.raw_data)
+            asin_val = asin_val or ra
+            sku_val = sku_val or rs
+        ad_name_val = a.ad_name or ((a.raw_data or {}).get("creative") or {}).get("headline") if a.raw_data else a.ad_name
         d = {
             "id": str(a.id),
             "amazon_ad_id": a.amazon_ad_id,
             "amazon_ad_group_id": a.amazon_ad_group_id,
             "amazon_campaign_id": a.amazon_campaign_id,
-            "ad_name": a.ad_name,
+            "ad_name": ad_name_val,
             "ad_type": a.ad_type,
             "state": a.state,
-            "asin": a.asin,
-            "sku": a.sku,
+            "asin": asin_val,
+            "sku": sku_val,
             "synced_at": a.synced_at.isoformat() if a.synced_at else None,
         }
         # Surface creative assets: raw_data, product URL, image URL
         if a.raw_data:
             d["raw_data"] = a.raw_data
-        if a.asin:
-            d["product_url"] = f"https://www.amazon.com/dp/{a.asin}"
+        if asin_val:
+            d["product_url"] = f"https://www.amazon.com/dp/{asin_val}"
         # Get image: raw_data extraction, then PA-API, then ASIN fallback URL
         img_url = await get_product_image_url(
-            asin=a.asin,
+            asin=asin_val,
             raw_data=a.raw_data,
             paapi_access_key=paapi_access,
             paapi_secret_key=paapi_secret,
@@ -1599,12 +1610,7 @@ async def run_full_sync(db: AsyncSession, credential_id: Optional[str] = None) -
                 bid_val = bid_val.get("value") or bid_val.get("monetaryBid", {}).get("value")
 
             target_details = tgt_data.get("targetDetails", {})
-            expression = (
-                tgt_data.get("expression") or tgt_data.get("keyword")
-                or target_details.get("expression") or target_details.get("keyword")
-            )
-            if isinstance(expression, list) and expression:
-                expression = str(expression[0]) if len(expression) == 1 else str(expression)
+            expression = extract_target_expression(tgt_data)
 
             tgt_type = tgt_data.get("targetType") or tgt_data.get("type") or target_details.get("targetType")
             match_type = tgt_data.get("matchType") or target_details.get("matchType")
@@ -1664,12 +1670,14 @@ async def run_full_sync(db: AsyncSession, credential_id: Optional[str] = None) -
                 )
                 ad = existing.scalar_one_or_none()
 
+                ad_asin, ad_sku = extract_ad_asin_sku(ad_data)
+                ad_name = ad_data.get("name") or ad_data.get("adName") or (ad_data.get("creative") or {}).get("headline")
                 if ad:
-                    ad.ad_name = ad_data.get("name") or ad_data.get("adName") or ad.ad_name
+                    ad.ad_name = ad_name or ad.ad_name
                     ad.ad_type = ad_data.get("adType") or ad_data.get("type") or ad.ad_type
                     ad.state = ad_data.get("state") or ad.state
-                    ad.asin = ad_data.get("asin") or ad.asin
-                    ad.sku = ad_data.get("sku") or ad.sku
+                    ad.asin = ad_asin or ad.asin
+                    ad.sku = ad_sku or ad.sku
                     ad.amazon_ad_group_id = str(amz_ag_id) if amz_ag_id else ad.amazon_ad_group_id
                     ad.amazon_campaign_id = str(amz_camp_id) if amz_camp_id else ad.amazon_campaign_id
                     ad.ad_group_id = local_ag.id if local_ag else ad.ad_group_id
@@ -1682,11 +1690,11 @@ async def run_full_sync(db: AsyncSession, credential_id: Optional[str] = None) -
                         amazon_ad_id=str(amazon_id),
                         amazon_ad_group_id=str(amz_ag_id) if amz_ag_id else None,
                         amazon_campaign_id=str(amz_camp_id) if amz_camp_id else None,
-                        ad_name=ad_data.get("name") or ad_data.get("adName"),
+                        ad_name=ad_name,
                         ad_type=ad_data.get("adType") or ad_data.get("type"),
                         state=ad_data.get("state"),
-                        asin=ad_data.get("asin"),
-                        sku=ad_data.get("sku"),
+                        asin=ad_asin,
+                        sku=ad_sku,
                         raw_data=ad_data,
                     )
                     db.add(ad)

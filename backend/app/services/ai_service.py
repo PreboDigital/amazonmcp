@@ -5,6 +5,7 @@ Supports configurable default LLM via app settings.
 
 import json
 import logging
+import re
 from typing import Optional
 from openai import AsyncOpenAI
 from anthropic import AsyncAnthropic
@@ -70,7 +71,25 @@ Format your responses in clean, readable markdown:
 - Use bullet points and headers for analysis and recommendations.
 - Keep tables clean and scannable — don't overload columns.
 - When suggesting bid/budget changes, provide current → proposed values.
-- For trends, describe the direction and key data points."""
+- For trends, describe the direction and key data points.
+
+**INLINE ACTIONS (small changes — approve in chat):**
+When you suggest 1–2 small changes that the user can approve immediately, append an [ACTIONS] block at the end.
+Use scope "inline" for: single bid change, single budget change, campaign/ad group rename, single keyword add/update/delete.
+Use scope "queue" for: 3+ changes, campaign creation, harvest, batch operations — these go to Approval Queue.
+
+Context includes target_id, ad_group_id, campaign_id for targets; ad_group_id, campaign_id for ad groups; campaign_id for campaigns.
+Use these EXACT IDs from the context when building mcp_payload.
+
+Format (append after your message, no extra text):
+[ACTIONS]
+{"actions":[{"scope":"inline","tool":"campaign_management-update_target_bid","arguments":{"body":{"targets":[{"targetId":"<target_id>","bid":0.5}]}},"label":"Increase bid on 'keyword' to $0.50","change_type":"bid_update","entity_name":"keyword","entity_id":"<target_id>","current_value":"$0.35","proposed_value":"$0.50"}]}
+[/ACTIONS]
+
+Valid tools for inline: campaign_management-update_target_bid, campaign_management-update_campaign_budget, campaign_management-update_campaign (name), campaign_management-update_ad_group (name), campaign_management-create_target, campaign_management-update_target (bid/state), campaign_management-delete_target, campaign_management-update_campaign_state, campaign_management-update_target (state only).
+For create_target: body.targets needs campaignId, adGroupId, expression (keyword text), expressionType KEYWORD, matchType EXACT/PHRASE/BROAD, state enabled, bid.
+For update_campaign (rename): body.campaigns needs campaignId, name.
+For update_ad_group (rename): body.adGroups needs adGroupId, name."""
 
 
 def _parse_model_id(model_id: Optional[str]) -> tuple[str, str]:
@@ -179,10 +198,28 @@ class AIService:
 
         try:
             content = await self._completion(messages, temperature=0.3, max_tokens=8000)
-            return {"message": content, "tokens_used": 0}  # Anthropic doesn't return tokens in same way
+            message, actions = self._parse_chat_response(content)
+            return {"message": message, "actions": actions, "tokens_used": 0}
         except Exception as e:
             logger.error(f"AI chat failed: {e}")
             raise
+
+    def _parse_chat_response(self, content: str) -> tuple[str, list]:
+        """Extract [ACTIONS] block from AI response. Returns (message_without_actions, actions_list)."""
+        actions = []
+        message = content
+        match = re.search(r'\[ACTIONS\]\s*(\{.*?\})\s*\[/ACTIONS\]', content, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group(1).strip())
+                actions = data.get("actions", [])
+                if isinstance(actions, list):
+                    message = content[:match.start()].strip()
+                else:
+                    actions = []
+            except json.JSONDecodeError:
+                logger.warning("Failed to parse [ACTIONS] JSON in chat response")
+        return (message, actions)
 
     async def generate_insights(self, campaign_data: dict, account_context: dict = None) -> dict:
         """

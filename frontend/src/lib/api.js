@@ -272,6 +272,13 @@ export const ai = {
     request(`/ai/conversations${credentialId ? `?credential_id=${credentialId}` : ''}`),
   conversation: (id) => request(`/ai/conversations/${id}`),
   deleteConversation: (id) => request(`/ai/conversations/${id}`, { method: 'DELETE' }),
+  applyInline: (actions, credentialId) => request('/ai/apply-inline', {
+    method: 'POST',
+    body: JSON.stringify({
+      actions,
+      credential_id: credentialId || null,
+    }),
+  }),
 }
 
 // ── Approvals ───────────────────────────────────────────────────────

@@ -23,6 +23,7 @@ from app.models import (
 from app.config import get_settings
 from app.services.ai_service import create_ai_service
 from app.services.search_term_service import get_search_term_summary
+from app.services.token_service import get_mcp_client_with_fresh_token
 from app.routers.settings import get_effective_api_keys
 from app.utils import parse_uuid, utcnow
 
@@ -66,6 +67,12 @@ class CampaignPublishRequest(BaseModel):
     credential_id: Optional[str] = None
     plan: dict  # Full plan from build-campaign
     product_asin: str  # Required for SP ads
+
+
+class ApplyInlineRequest(BaseModel):
+    """Apply one or more inline actions directly via MCP (approved in chat)."""
+    credential_id: Optional[str] = None
+    actions: list[dict]  # [{ tool, arguments, label, change_type, entity_name, ... }]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -153,6 +160,7 @@ async def _get_account_context(db: AsyncSession, cred: Credential) -> dict:
         orders = c.orders or perf.get("orders", 0)
         all_campaigns.append({
             "id": c.amazon_campaign_id,
+            "campaign_id": c.amazon_campaign_id,
             "name": c.campaign_name,
             "type": c.campaign_type,
             "targeting": c.targeting_type,
@@ -186,6 +194,7 @@ async def _get_account_context(db: AsyncSession, cred: Credential) -> dict:
 
     all_ad_groups = [
         {
+            "ad_group_id": ag.amazon_ad_group_id,
             "name": ag.ad_group_name,
             "state": ag.state,
             "default_bid": ag.default_bid,
@@ -231,6 +240,8 @@ async def _get_account_context(db: AsyncSession, cred: Credential) -> dict:
 
     def _target_dict(t, include_campaign=True):
         d = {
+            "target_id": t.amazon_target_id,
+            "ad_group_id": t.amazon_ad_group_id,
             "keyword": t.expression_value,
             "type": t.target_type,
             "match_type": t.match_type,
@@ -611,11 +622,46 @@ async def ai_chat(payload: ChatRequest, db: AsyncSession = Depends(get_db)):
         account_context=account_context,
     )
 
-    # Update conversation
+    actions = result.get("actions") or []
+    inline_actions = [a for a in actions if a.get("scope") == "inline"]
+    queue_actions = [a for a in actions if a.get("scope") == "queue"]
+    queued_count = 0
+
+    # Create PendingChanges for queue-scope actions; notify user
+    if queue_actions:
+        batch_id = str(uuid.uuid4())
+        for act in queue_actions:
+            tool = act.get("tool", "")
+            args = act.get("arguments", {})
+            if not tool or tool == "unknown":
+                continue
+            mcp_payload = {"tool": tool, "arguments": args}
+            change = PendingChange(
+                credential_id=cred.id,
+                profile_id=cred.profile_id,
+                change_type=act.get("change_type", "bid_update"),
+                entity_type=act.get("entity_type", "target"),
+                entity_id=act.get("entity_id"),
+                entity_name=act.get("entity_name"),
+                proposed_value=act.get("proposed_value"),
+                change_detail=act,
+                mcp_payload=mcp_payload,
+                source="ai_chat",
+                ai_reasoning=act.get("label"),
+                batch_id=batch_id,
+                batch_label=f"AI Chat — {len(queue_actions)} changes",
+            )
+            db.add(change)
+            queued_count += 1
+
+    # Update conversation (store actions for UI display)
     now = utcnow().isoformat()
     updated_messages = list(history)
     updated_messages.append({"role": "user", "content": payload.message, "timestamp": now})
-    updated_messages.append({"role": "assistant", "content": result["message"], "timestamp": now})
+    assistant_msg = {"role": "assistant", "content": result["message"], "timestamp": now}
+    if actions:
+        assistant_msg["actions"] = actions
+    updated_messages.append(assistant_msg)
     conversation.messages = updated_messages
     conversation.updated_at = utcnow()
 
@@ -626,14 +672,83 @@ async def ai_chat(payload: ChatRequest, db: AsyncSession = Depends(get_db)):
         description=f"AI chat: {payload.message[:80]}",
         entity_type="ai_conversation",
         entity_id=str(conversation.id),
+        details={"inline_actions": len(inline_actions), "queued_actions": queued_count} if actions else None,
     ))
 
     await db.flush()
 
-    return {
+    response = {
         "conversation_id": str(conversation.id),
         "message": result["message"],
         "tokens_used": result.get("tokens_used", 0),
+        "actions": inline_actions,
+    }
+    if queued_count > 0:
+        response["queued_count"] = queued_count
+        response["queued_message"] = f"{queued_count} change(s) sent to Approval Queue. Review and approve when ready."
+    return response
+
+
+@router.post("/apply-inline")
+async def apply_inline(payload: ApplyInlineRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Apply inline actions directly via MCP. Used when user approves small changes in chat.
+    Supports: bid updates, budget changes, campaign/ad group renames, keyword add/update/delete.
+    """
+    if not payload.actions:
+        raise HTTPException(status_code=400, detail="No actions to apply")
+
+    cred = await _get_cred(db, payload.credential_id)
+    client = await get_mcp_client_with_fresh_token(cred, db)
+
+    applied = 0
+    failed = 0
+    results = []
+
+    for act in payload.actions:
+        tool = act.get("tool", "")
+        arguments = act.get("arguments", {})
+        label = act.get("label", tool)
+
+        if not tool or tool == "unknown":
+            results.append({"label": label, "status": "skipped", "error": "Unknown tool"})
+            failed += 1
+            continue
+
+        try:
+            mcp_result = await client.call_tool(tool, arguments)
+            applied += 1
+            results.append({"label": label, "status": "applied", "result": mcp_result})
+
+            db.add(ActivityLog(
+                credential_id=cred.id,
+                action="ai_inline_applied",
+                category="ai",
+                description=f"Inline: {label}",
+                entity_type="mcp_tool",
+                entity_id=tool,
+                details={"tool": tool, "label": label},
+                status="success",
+            ))
+        except Exception as e:
+            failed += 1
+            results.append({"label": label, "status": "failed", "error": str(e)})
+            db.add(ActivityLog(
+                credential_id=cred.id,
+                action="ai_inline_failed",
+                category="ai",
+                description=f"Inline failed: {label}",
+                details={"tool": tool, "error": str(e)},
+                status="error",
+            ))
+
+    await db.flush()
+
+    return {
+        "applied": applied,
+        "failed": failed,
+        "total": len(payload.actions),
+        "results": results,
     }
 
 

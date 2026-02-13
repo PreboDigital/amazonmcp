@@ -19,7 +19,7 @@ from app.models import (
 )
 from app.mcp_client import create_mcp_client
 from app.services.token_service import get_mcp_client_with_fresh_token
-from app.utils import parse_uuid, safe_error_detail, utcnow
+from app.utils import parse_uuid, safe_error_detail, utcnow, extract_target_expression
 
 router = APIRouter()
 
@@ -571,16 +571,9 @@ async def list_targets(
             if isinstance(bid_val, dict):
                 bid_val = bid_val.get("value") or bid_val.get("monetaryBid", {}).get("value")
 
-            # Extract expression/keyword — may come from targetDetails or flat fields
+            # Extract expression/keyword — handles keywordText, targetDetails, product expressions
             target_details = tgt_data.get("targetDetails", {})
-            expression = (
-                tgt_data.get("expression")
-                or tgt_data.get("keyword")
-                or target_details.get("expression")
-                or target_details.get("keyword")
-            )
-            if isinstance(expression, list) and expression:
-                expression = str(expression[0]) if len(expression) == 1 else str(expression)
+            expression = extract_target_expression(tgt_data)
 
             # Target type may come from targetType or targetDetails
             tgt_type = (

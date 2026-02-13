@@ -305,8 +305,17 @@ export default function AIAssistant() {
     try {
       const result = await ai.chat(msg, activeAccountId, conversationId)
       setConversationId(result.conversation_id)
-      const assistantMsg = { role: 'assistant', content: result.message, timestamp: new Date().toISOString() }
+      const assistantMsg = {
+        role: 'assistant',
+        content: result.message,
+        timestamp: new Date().toISOString(),
+        actions: result.actions || [],
+      }
       setMessages(prev => [...prev, assistantMsg])
+      if (result.queued_count > 0) {
+        setSuccessMsg(result.queued_message || `${result.queued_count} change(s) sent to Approval Queue`)
+        setTimeout(() => setSuccessMsg(null), 6000)
+      }
     } catch (err) {
       setError(err.message)
       setMessages(prev => [...prev, { role: 'assistant', content: `Sorry, I encountered an error: ${err.message}`, timestamp: new Date().toISOString(), isError: true }])
@@ -393,6 +402,52 @@ export default function AIAssistant() {
       setError(err.message)
     } finally {
       setPublishLoading(false)
+    }
+  }
+
+  const [applyingAction, setApplyingAction] = useState(null) // { msgIdx, actionIdx }
+
+  async function applyInlineAction(msgIdx, actionIdx) {
+    const msg = messages[msgIdx]
+    const act = msg?.actions?.[actionIdx]
+    if (!act || act.scope !== 'inline' || !activeAccountId) return
+    setApplyingAction({ msgIdx, actionIdx })
+    setError(null)
+    try {
+      const data = await ai.applyInline([act], activeAccountId)
+      const res = data.results?.[0]
+      setMessages((prev) => {
+        const next = [...prev]
+        const m = { ...next[msgIdx], actions: [...(next[msgIdx].actions || [])] }
+        if (m.actions[actionIdx]) {
+          m.actions[actionIdx] = {
+            ...m.actions[actionIdx],
+            _status: res?.status === 'applied' ? 'applied' : 'failed',
+            _error: res?.error,
+          }
+        }
+        next[msgIdx] = m
+        return next
+      })
+      if (data.applied > 0) {
+        setSuccessMsg('Change applied successfully')
+        setTimeout(() => setSuccessMsg(null), 3000)
+      } else if (data.failed > 0) {
+        setError(res?.error || 'Failed to apply change')
+      }
+    } catch (err) {
+      setError(err.message)
+      setMessages((prev) => {
+        const next = [...prev]
+        const m = { ...next[msgIdx], actions: [...(next[msgIdx].actions || [])] }
+        if (m.actions[actionIdx]) {
+          m.actions[actionIdx] = { ...m.actions[actionIdx], _status: 'failed', _error: err.message }
+        }
+        next[msgIdx] = m
+        return next
+      })
+    } finally {
+      setApplyingAction(null)
     }
   }
 
@@ -491,10 +546,10 @@ export default function AIAssistant() {
         )}
 
         {successMsg && (
-          <div className="card bg-emerald-50 border-emerald-200 p-4 text-sm text-emerald-800 mb-4 shrink-0 flex items-center gap-2">
+          <div className="card bg-emerald-50 border-emerald-200 p-4 text-sm text-emerald-800 mb-4 shrink-0 flex items-center gap-2 flex-wrap">
             <CheckCircle size={18} />
             {successMsg}
-            {optimizeResult?.changes_created > 0 && (
+            {(optimizeResult?.changes_created > 0 || successMsg?.includes('Approval Queue')) && (
               <Link to="/approvals" className="ml-2 text-emerald-600 font-medium underline">Review in Approval Queue →</Link>
             )}
           </div>
@@ -672,7 +727,38 @@ export default function AIAssistant() {
                     {msg.role === 'user' ? (
                       <p className="text-sm">{msg.content}</p>
                     ) : (
-                      <RenderMarkdown text={msg.content} />
+                      <>
+                        <RenderMarkdown text={msg.content} />
+                        {msg.actions?.some((a) => a.scope === 'inline') && (
+                          <div className="mt-3 pt-3 border-t border-slate-100 space-y-2">
+                            {msg.actions.map((act, aIdx) => {
+                              if (act.scope !== 'inline') return null
+                              const status = act._status
+                              const isApplying = applyingAction?.msgIdx === i && applyingAction?.actionIdx === aIdx
+                              return (
+                                <div key={aIdx} className="flex items-center justify-between gap-2 flex-wrap">
+                                  <span className="text-xs text-slate-600 flex-1 min-w-0 truncate">{act.label}</span>
+                                  {status === 'applied' ? (
+                                    <span className="text-xs text-emerald-600 font-medium flex items-center gap-1">
+                                      <CheckCircle size={12} /> Applied
+                                    </span>
+                                  ) : status === 'failed' ? (
+                                    <span className="text-xs text-red-600" title={act._error}>Failed</span>
+                                  ) : (
+                                    <button
+                                      onClick={() => applyInlineAction(i, aIdx)}
+                                      disabled={isApplying || !activeAccountId}
+                                      className="text-xs px-3 py-1.5 rounded-lg bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50 transition-colors"
+                                    >
+                                      {isApplying ? <Loader2 size={12} className="animate-spin inline" /> : 'Apply'}
+                                    </button>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>
