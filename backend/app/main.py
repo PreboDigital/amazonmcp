@@ -32,7 +32,8 @@ async def _bootstrap_first_admin():
     from app.database import async_session
     async with async_session() as db:
         r = await db.execute(select(func.count()).select_from(User))
-        if r.scalar() and r.scalar() > 0:
+        count = r.scalar() or 0
+        if count > 0:
             return  # Users already exist
         admin = User(
             email=settings.first_admin_email.lower(),
