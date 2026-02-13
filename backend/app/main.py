@@ -118,7 +118,7 @@ app.add_middleware(
 app.add_middleware(AddCORSHeadersMiddleware)
 
 # ── Auth (login/register public; whoami requires JWT) ─────────────────
-app.include_router(auth.router, prefix="/api/auth")
+app.include_router(auth.router, prefix="/api")
 
 # ── Register Routers (all require auth) ──────────────────────────────
 _auth = [Depends(require_auth)]
