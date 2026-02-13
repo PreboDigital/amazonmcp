@@ -1,0 +1,9 @@
+# Frontend static site — overrides root railway.toml when Root Directory = frontend
+
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "npm start"
+healthcheckPath = "/"
+healthcheckTimeout = 30
