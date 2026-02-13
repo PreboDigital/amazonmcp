@@ -21,6 +21,7 @@ import {
 } from 'lucide-react'
 import clsx from 'clsx'
 import { useState, useRef, useEffect } from 'react'
+import SyncStatusBanner from './SyncStatusBanner'
 import { useAccount } from '../lib/AccountContext'
 import { useAuth } from '../lib/AuthContext'
 import { approvals, accounts as accountsApi } from '../lib/api'
