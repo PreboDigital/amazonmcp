@@ -37,6 +37,9 @@
 ```env
 ENVIRONMENT=production
 DATABASE_URL=${{Postgres.DATABASE_URL}}   # Auto-linked if you add Postgres plugin
+# First admin (set on first deploy; bootstrap creates when no users exist)
+FIRST_ADMIN_EMAIL=admin@yourdomain.com
+FIRST_ADMIN_PASSWORD=<strong-password>
 SECRET_KEY=<generate with: python -c "import secrets; print(secrets.token_hex(32))">
 API_KEY=<generate with: python -c "import secrets; print(secrets.token_hex(32))">
 ENCRYPTION_KEY=<generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())">
