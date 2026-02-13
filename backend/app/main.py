@@ -6,6 +6,9 @@ All data persisted to PostgreSQL.
 
 import logging
 from contextlib import asynccontextmanager
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
@@ -68,9 +71,43 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CORS: allow production frontend + localhost
+CORS_ORIGINS = [
+    "https://amazonmcp-frontend-production.up.railway.app",
+    "http://localhost:5173",
+    "http://localhost:3000",
+]
+
+
+class AddCORSHeadersMiddleware(BaseHTTPMiddleware):
+    """Ensure CORS headers on ALL responses (including errors). Runs before CORSMiddleware."""
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        if request.method == "OPTIONS":
+            origin = request.headers.get("origin", "")
+            if origin in CORS_ORIGINS or not origin:
+                return Response(
+                    status_code=200,
+                    headers={
+                        "Access-Control-Allow-Origin": origin or CORS_ORIGINS[0],
+                        "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+                        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+                        "Access-Control-Allow-Credentials": "true",
+                        "Access-Control-Max-Age": "86400",
+                    },
+                )
+        response = await call_next(request)
+        origin = request.headers.get("origin", "")
+        if origin in CORS_ORIGINS:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+        return response
+
+
+app.add_middleware(AddCORSHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origin_list,
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
