@@ -3,17 +3,29 @@
  * All data-fetching functions accept an optional credentialId to scope by account.
  */
 
-// In development, Vite proxy forwards /api to the backend.
-// In production, set VITE_API_BASE_URL to the backend's URL (e.g. https://api.example.com/api).
+// Local: Vite proxy forwards /api to localhost:8000. Leave VITE_API_BASE_URL unset.
+// Production: Set VITE_API_BASE_URL=https://amazonmcp-backend-production.up.railway.app/api
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api'
+
+// Auth token getter — set by AuthContext. Requests include Bearer token when available.
+let getAuthToken = () => localStorage.getItem('auth_token')
+
+export function setAuthTokenGetter(fn) {
+  getAuthToken = fn
+}
 
 async function request(path, options = {}) {
   const url = `${API_BASE}${path}`
+  const headers = {
+    'Content-Type': 'application/json',
+    ...options.headers,
+  }
+  const token = getAuthToken?.()
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
   const config = {
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
+    headers,
     ...options,
   }
 
@@ -39,6 +51,10 @@ async function request(path, options = {}) {
     }
 
     if (!res.ok) {
+      if (res.status === 401 && path !== '/auth/login' && path !== '/auth/register') {
+        localStorage.removeItem('auth_token')
+        window.dispatchEvent(new Event('auth:logout'))
+      }
       throw new Error(data.detail || data.message || `Request failed: ${res.status}`)
     }
 
@@ -404,6 +420,38 @@ export const settingsApi = {
       method: 'PUT',
       body: JSON.stringify(data),
     }),
+  },
+}
+
+// ── Auth ─────────────────────────────────────────────────────────────
+export const authApi = {
+  login: (email, password) =>
+    request('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    }),
+  register: (token, email, password, name) =>
+    request('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ token: token || null, email, password, name: name || null }),
+    }),
+  whoami: () => request('/auth/whoami'),
+}
+
+// ── Users (admin) ─────────────────────────────────────────────────────
+export const usersApi = {
+  list: () => request('/users'),
+  create: (data) => request('/users', { method: 'POST', body: JSON.stringify(data) }),
+  update: (id, data) => request(`/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  delete: (id) => request(`/users/${id}`, { method: 'DELETE' }),
+  invitations: {
+    list: () => request('/users/invitations'),
+    create: (email, role = 'user') =>
+      request('/users/invitations', {
+        method: 'POST',
+        body: JSON.stringify({ email, role }),
+      }),
+    revoke: (id) => request(`/users/invitations/${id}`, { method: 'DELETE' }),
   },
 }
 

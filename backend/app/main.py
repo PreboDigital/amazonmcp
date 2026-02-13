@@ -11,7 +11,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.database import init_db, check_db_connection
 from app.auth import require_auth
-from app.routers import credentials, audit, harvest, optimizer, accounts, ai, approvals, reporting, campaigns, settings as settings_router, cron
+from app.routers import (
+    credentials, audit, harvest, optimizer, accounts, ai, approvals,
+    reporting, campaigns, settings as settings_router, cron, auth, users,
+)
+from app.models import User
+from app.services.auth_service import hash_password
+from sqlalchemy import select, func
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,10 +25,32 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+async def _bootstrap_first_admin():
+    """Create first admin if FIRST_ADMIN_EMAIL and FIRST_ADMIN_PASSWORD are set and no users exist."""
+    if not settings.first_admin_email or not settings.first_admin_password:
+        return
+    from app.database import async_session
+    async with async_session() as db:
+        r = await db.execute(select(func.count()).select_from(User))
+        if r.scalar() and r.scalar() > 0:
+            return  # Users already exist
+        admin = User(
+            email=settings.first_admin_email.lower(),
+            password_hash=hash_password(settings.first_admin_password),
+            name="Admin",
+            role="admin",
+            is_active=True,
+        )
+        db.add(admin)
+        await db.commit()
+        logger.info(f"Bootstrap: created first admin user {admin.email}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting Amazon Ads Optimizer...")
     await init_db()
+    await _bootstrap_first_admin()
     logger.info("Database initialized — all tables ready.")
     yield
     logger.info("Shutting down...")
@@ -43,6 +71,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Auth (login/register public; whoami requires JWT) ─────────────────
+app.include_router(auth.router, prefix="/api/auth")
+
 # ── Register Routers (all require auth) ──────────────────────────────
 _auth = [Depends(require_auth)]
 app.include_router(credentials.router, prefix="/api/credentials", tags=["Credentials"], dependencies=_auth)
@@ -55,6 +86,7 @@ app.include_router(approvals.router, prefix="/api/approvals", tags=["Approval Qu
 app.include_router(reporting.router, prefix="/api/reports", tags=["Reports"], dependencies=_auth)
 app.include_router(campaigns.router, prefix="/api/campaigns", tags=["Campaign Management"], dependencies=_auth)
 app.include_router(settings_router.router, prefix="/api/settings", tags=["Settings"], dependencies=_auth)
+app.include_router(users.router, prefix="/api", dependencies=[Depends(require_auth)])
 app.include_router(cron.router, prefix="/api")  # No auth — uses CRON_SECRET
 
 

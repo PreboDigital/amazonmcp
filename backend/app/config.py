@@ -30,7 +30,9 @@ class Settings(BaseSettings):
         return values
     secret_key: str = "change-me-in-production"
     api_key: str = ""  # Required in production; in dev, empty = auth disabled
-    cors_origins: str = "http://localhost:5173,http://localhost:3000"
+    first_admin_email: str = ""  # Bootstrap: create first admin if no users exist
+    first_admin_password: str = ""
+    cors_origins: str = "http://localhost:5173,http://localhost:3000,https://amazonmcp-frontend-production.up.railway.app"
     encryption_key: str = ""
     openai_api_key: str = ""
     openai_model: str = "gpt-4o"

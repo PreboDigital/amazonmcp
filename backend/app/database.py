@@ -4,6 +4,7 @@ Uses PostgreSQL via asyncpg with SQLAlchemy 2 async engine.
 """
 
 import logging
+import ssl
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy import text
@@ -13,12 +14,26 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
+
+def _get_connect_args():
+    """Enable SSL for Railway Postgres (uses rlwy.net proxy with SSL)."""
+    url = settings.database_url
+    if "rlwy.net" in url:
+        # Railway Postgres requires SSL; use context that accepts self-signed certs
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return {"ssl": ctx}
+    return {}
+
+
 engine = create_async_engine(
     settings.database_url,
     echo=False,
     pool_size=5,
     max_overflow=10,
     pool_pre_ping=True,
+    connect_args=_get_connect_args(),
 )
 
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)

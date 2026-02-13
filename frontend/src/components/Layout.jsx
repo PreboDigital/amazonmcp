@@ -15,13 +15,16 @@ import {
   RefreshCw,
   Loader2,
   BarChart3,
+  Users,
+  LogOut,
 } from 'lucide-react'
 import clsx from 'clsx'
 import { useState, useRef, useEffect } from 'react'
 import { useAccount } from '../lib/AccountContext'
+import { useAuth } from '../lib/AuthContext'
 import { approvals, accounts as accountsApi } from '../lib/api'
 
-const navigation = [
+const baseNavigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'Campaigns', href: '/campaigns', icon: Zap },
   { name: 'AI Assistant', href: '/ai', icon: Brain },
@@ -215,8 +218,24 @@ function AccountSwitcher({ variant = 'sidebar' }) {
 }
 
 export default function Layout({ children }) {
+  const { user, isAdmin, logout } = useAuth()
   const { activeAccount, activeAccountId, activeProfileId } = useAccount()
   const [pendingCount, setPendingCount] = useState(0)
+  const [userMenuOpen, setUserMenuOpen] = useState(false)
+  const userMenuRef = useRef(null)
+
+  const navigation = [
+    ...baseNavigation,
+    ...(isAdmin ? [{ name: 'Users', href: '/users', icon: Users }] : []),
+  ]
+
+  useEffect(() => {
+    function onClickOutside(e) {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target)) setUserMenuOpen(false)
+    }
+    document.addEventListener('mousedown', onClickOutside)
+    return () => document.removeEventListener('mousedown', onClickOutside)
+  }, [])
 
   useEffect(() => {
     let interval
@@ -278,8 +297,44 @@ export default function Layout({ children }) {
           ))}
         </nav>
 
-        {/* Footer */}
-        <div className="p-4 border-t border-slate-700/50">
+        {/* User menu + Footer */}
+        <div className="p-4 border-t border-slate-700/50 space-y-3">
+          <div className="relative" ref={userMenuRef}>
+            <button
+              onClick={() => setUserMenuOpen(!userMenuOpen)}
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-slate-800 text-left"
+            >
+              <div className="w-8 h-8 rounded-lg bg-slate-700 flex items-center justify-center text-sm font-medium text-slate-300">
+                {(user?.name || user?.email || '?').charAt(0).toUpperCase()}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-slate-200 truncate">{user?.name || user?.email}</p>
+                <p className="text-[10px] text-slate-500 truncate">{user?.role}</p>
+              </div>
+              <ChevronDown size={14} className={clsx('shrink-0 text-slate-500 transition-transform', userMenuOpen && 'rotate-180')} />
+            </button>
+            {userMenuOpen && (
+              <div className="absolute bottom-full left-0 right-0 mb-1 rounded-lg shadow-xl border border-slate-700 bg-slate-800 overflow-hidden">
+                {isAdmin && (
+                  <NavLink
+                    to="/users"
+                    onClick={() => setUserMenuOpen(false)}
+                    className="flex items-center gap-2 px-3 py-2.5 text-sm text-slate-300 hover:bg-slate-700"
+                  >
+                    <Users size={16} />
+                    User Management
+                  </NavLink>
+                )}
+                <button
+                  onClick={() => { logout(); setUserMenuOpen(false) }}
+                  className="w-full flex items-center gap-2 px-3 py-2.5 text-sm text-slate-300 hover:bg-slate-700 hover:text-red-400"
+                >
+                  <LogOut size={16} />
+                  Sign out
+                </button>
+              </div>
+            )}
+          </div>
           <div className="flex items-center gap-2 px-2">
             <div className={clsx(
               'w-2 h-2 rounded-full',

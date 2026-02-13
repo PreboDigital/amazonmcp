@@ -1,5 +1,18 @@
 # Railway Deployment Guide — Amazon Ads Optimizer
 
+## Deployment URLs
+
+| Service | URL |
+|---------|-----|
+| **Frontend** | https://amazonmcp-frontend-production.up.railway.app |
+| **Backend** | https://amazonmcp-backend-production.up.railway.app (or your backend service URL) |
+
+**Local development:**
+- Frontend: http://localhost:5173 (Vite proxy → backend)
+- Backend: http://localhost:8000
+
+---
+
 ## Services to Create
 
 | Service | Type | Purpose |
@@ -27,7 +40,7 @@ DATABASE_URL=${{Postgres.DATABASE_URL}}   # Auto-linked if you add Postgres plug
 SECRET_KEY=<generate with: python -c "import secrets; print(secrets.token_hex(32))">
 API_KEY=<generate with: python -c "import secrets; print(secrets.token_hex(32))">
 ENCRYPTION_KEY=<generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())">
-CORS_ORIGINS=https://your-frontend.railway.app,https://your-domain.com
+CORS_ORIGINS=http://localhost:5173,http://localhost:3000,https://amazonmcp-frontend-production.up.railway.app
 ```
 
 ### Optional (AI, PA-API, Email)
@@ -142,7 +155,7 @@ curl -X POST "https://qstash.upstash.io/v2/schedules" \
 
 Railway will use `backend/nixpacks.toml` and `backend/Procfile` to build and run. No extra config needed.
 
-**Frontend**: Deploy separately to Vercel, Netlify, or Railway static. Set `VITE_API_BASE_URL=https://your-backend.railway.app/api`.
+**Frontend** (Root Directory: `frontend`): Set `VITE_API_BASE_URL=https://amazonmcp-backend-production.up.railway.app/api` in Railway Variables so the frontend calls the backend.
 
 ---
 
@@ -162,12 +175,34 @@ app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="static")
 
 ---
 
+## Database Connection (Important)
+
+1. **Use Railway's variable reference** for `DATABASE_URL`:
+   ```env
+   DATABASE_URL=${{Postgres.DATABASE_URL}}
+   ```
+   This auto-links when Postgres is in the same project. Railway provides `postgresql://`; the backend converts it to `postgresql+asyncpg://` for asyncpg.
+
+2. **SSL**: Railway Postgres uses SSL. The backend automatically enables SSL when connecting to `*.rlwy.net` hosts.
+
+3. **Fresh database = empty data**: Railway Postgres starts empty. After deploy:
+   - Tables are created automatically on first startup (`init_db`)
+   - **Credentials** must be re-added via Settings → Add Credentials
+   - **AI API keys** (OpenAI, Anthropic) must be re-entered in Settings
+   - **First admin**: Set `FIRST_ADMIN_EMAIL` and `FIRST_ADMIN_PASSWORD` to bootstrap the first user, or register via the app
+
+4. **Verify connection**: Hit `GET /api/health` — it returns `"database": "connected"` if the DB is reachable.
+
+---
+
 ## Summary Checklist
 
 - [ ] Add PostgreSQL plugin
-- [ ] Add Web service from GitHub
-- [ ] Set all required env vars (DATABASE_URL, SECRET_KEY, API_KEY, ENCRYPTION_KEY)
+- [ ] Add Backend service (Root: `backend`), Frontend service (Root: `frontend`)
+- [ ] **Backend** vars: DATABASE_URL (use `${{Postgres.DATABASE_URL}}`), SECRET_KEY, API_KEY, ENCRYPTION_KEY, CORS_ORIGINS
+- [ ] **Frontend** vars: VITE_API_BASE_URL=https://amazonmcp-backend-production.up.railway.app/api
 - [ ] Set CRON_SECRET for scheduled jobs
 - [ ] Add Resend + Upstash Redis vars if using
 - [ ] Create QStash schedules for sync, reports, search-terms
+- [ ] Add Amazon Security Profile: Allowed Origins + Return URLs (see Amazon console)
 - [ ] Apply changes and deploy

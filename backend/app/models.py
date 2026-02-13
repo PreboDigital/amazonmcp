@@ -952,6 +952,55 @@ class SearchTermPerformance(Base):
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  USERS — App users for login & access control
+# ══════════════════════════════════════════════════════════════════════
+
+class User(Base):
+    """App user for login and access control."""
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=True)
+    role: Mapped[str] = mapped_column(String(50), default="user")  # admin, user
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_login_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+    __table_args__ = (
+        Index("ix_users_email", "email"),
+        Index("ix_users_role", "role"),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  INVITATIONS — Invite new users by email
+# ══════════════════════════════════════════════════════════════════════
+
+class Invitation(Base):
+    """Invitation to register. Token is single-use, expires after 7 days."""
+    __tablename__ = "invitations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    token: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(50), default="user")
+    invited_by_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending, accepted, expired
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    accepted_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+    __table_args__ = (
+        Index("ix_invitations_token", "token"),
+        Index("ix_invitations_email", "email"),
+        Index("ix_invitations_status", "status"),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  APP SETTINGS — Application-wide settings (LLM configuration, etc.)
 # ══════════════════════════════════════════════════════════════════════
 
