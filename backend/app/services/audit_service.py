@@ -110,19 +110,18 @@ class AuditService:
                 advertiser_account_id=self.advertiser_account_id,
             )
         else:
-            # For other report types, include accessRequestedAccounts
-            if self.advertiser_account_id:
-                report_config["accessRequestedAccounts"] = [
-                    {"advertiserAccountId": self.advertiser_account_id}
-                ]
+            if report_type == "product":
+                create_result = await self.client.create_product_report(
+                    report_config, advertiser_account_id=self.advertiser_account_id
+                )
+            elif report_type == "inventory":
+                create_result = await self.client.create_inventory_report(
+                    report_config, advertiser_account_id=self.advertiser_account_id
+                )
             else:
-                report_config["accessRequestedAccounts"] = []
-            tool_map = {
-                "product": "reporting-create_product_report",
-                "inventory": "reporting-create_inventory_report",
-            }
-            tool_name = tool_map.get(report_type, "reporting-create_report")
-            create_result = await self.client.call_tool(tool_name, {"body": report_config})
+                create_result = await self.client.create_report(
+                    report_config, advertiser_account_id=self.advertiser_account_id
+                )
 
         # Extract report IDs and poll for completion
         report_ids = self._extract_report_ids(create_result)

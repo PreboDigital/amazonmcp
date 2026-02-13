@@ -194,9 +194,31 @@ class AmazonAdsMCP:
     # ── Convenience Methods ──────────────────────────────────────────
 
     async def query_accounts(self) -> dict:
+        """Query advertiser accounts. Returns global/manager accounts with DSP IDs in alternateIds."""
         return await self.call_tool("account_management-query_advertiser_account", {
             "body": {}
         })
+
+    async def query_account_links(
+        self,
+        access_requested_account: dict = None,
+        relationship_type_filter: dict = None,
+        max_results: int = 100,
+        next_token: str = None,
+    ) -> dict:
+        """
+        Query account links. Manager Account users can retrieve details about all
+        accounts linked to their Manager Accounts. Advertiser account users can
+        find all Manager Accounts linked to their advertising account.
+        """
+        body = {"maxResults": max_results}
+        if access_requested_account:
+            body["accessRequestedAccount"] = access_requested_account
+        if relationship_type_filter:
+            body["relationshipTypeFilter"] = relationship_type_filter
+        if next_token:
+            body["nextToken"] = next_token
+        return await self.call_tool("account_management-query_account_link", {"body": body})
 
     async def query_campaigns(
         self,
@@ -521,6 +543,10 @@ class AmazonAdsMCP:
     async def retrieve_report(self, report_ids: list[str]) -> dict:
         return await self.call_tool("reporting-retrieve_report", {"body": {"reportIds": report_ids}})
 
+    async def delete_report(self, report_ids: list[str]) -> dict:
+        """Delete reports by ID. Per MCP docs: reporting-delete_report."""
+        return await self.call_tool("reporting-delete_report", {"body": {"reportIds": report_ids}})
+
     async def retrieve_report_v3(self, report_id: str) -> dict:
         """Retrieve report status via the v3 Reporting API (direct HTTP call)."""
         import httpx
@@ -647,6 +673,30 @@ class AmazonAdsMCP:
                 {"advertiserAccountId": advertiser_account_id}
             ]
         return await self.call_tool("reporting-create_report", {"body": report_config})
+
+    async def create_product_report(
+        self,
+        report_config: dict,
+        advertiser_account_id: Optional[str] = None,
+    ) -> dict:
+        """Create a Product report via reporting-create_product_report."""
+        if advertiser_account_id:
+            report_config["accessRequestedAccounts"] = [
+                {"advertiserAccountId": advertiser_account_id}
+            ]
+        return await self.call_tool("reporting-create_product_report", {"body": report_config})
+
+    async def create_inventory_report(
+        self,
+        report_config: dict,
+        advertiser_account_id: Optional[str] = None,
+    ) -> dict:
+        """Create an Inventory report via reporting-create_inventory_report."""
+        if advertiser_account_id:
+            report_config["accessRequestedAccounts"] = [
+                {"advertiserAccountId": advertiser_account_id}
+            ]
+        return await self.call_tool("reporting-create_inventory_report", {"body": report_config})
 
     async def create_search_term_report(
         self,

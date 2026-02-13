@@ -636,9 +636,10 @@ async def find_encompassing_range_data(
     Note: Returns aggregated data from the matched range — best-effort fallback
     until the user generates fresh data for the exact range.
     """
+    # Use strpos for literal "__" — SQL LIKE treats _ as wildcard, so contains("__") would match incorrectly
     range_where = [
         CampaignPerformanceDaily.credential_id == credential_id,
-        CampaignPerformanceDaily.date.contains("__"),
+        func.strpos(CampaignPerformanceDaily.date, "__") > 0,
     ]
     if profile_id is not None:
         range_where.append(CampaignPerformanceDaily.profile_id == profile_id)
