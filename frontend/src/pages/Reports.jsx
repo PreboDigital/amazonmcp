@@ -566,6 +566,39 @@ const ST_COLUMNS = [
   { key: 'campaign_name', label: 'Campaign', sortable: true, minW: 'min-w-[160px]' },
 ]
 
+const ST_CSV_HEADERS = ['Search Term', 'Keyword / Target', 'Match', 'Impressions', 'Clicks', 'Spend', 'Sales', 'Orders', 'ACOS %', 'Campaign']
+
+function escapeCsvCell(val) {
+  if (val === null || val === undefined) return ''
+  const s = String(val)
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
+  return s
+}
+
+function exportSearchTermsToCsv(rows, currencyCode = 'USD') {
+  const lines = [ST_CSV_HEADERS.map(escapeCsvCell).join(',')]
+  for (const row of rows) {
+    const cells = ST_COLUMNS.map(col => {
+      const v = row[col.key]
+      if (col.key === 'cost' || col.key === 'sales') return v != null ? Number(v).toFixed(2) : ''
+      if (col.key === 'acos') return v != null ? `${Number(v).toFixed(1)}%` : ''
+      return escapeCsvCell(v ?? '')
+    })
+    lines.push(cells.join(','))
+  }
+  return lines.join('\r\n')
+}
+
+function downloadCsv(csv, filename) {
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 function SearchTermsSection({ accountId, syncing, data, error, filter, onSync, onFilterChange, onDismissError, currencyCode = 'USD' }) {
   const [stTerms, setStTerms] = useState(null)
   const [stLoading, setStLoading] = useState(false)
@@ -574,6 +607,17 @@ function SearchTermsSection({ accountId, syncing, data, error, filter, onSync, o
   const [expanded, setExpanded] = useState(true)
   const [stSearch, setStSearch] = useState('')
   const [page, setPage] = useState(0)
+  const [exportMenuOpen, setExportMenuOpen] = useState(false)
+  const exportMenuRef = useRef(null)
+
+  useEffect(() => {
+    if (!exportMenuOpen) return
+    function handleClickOutside(e) {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target)) setExportMenuOpen(false)
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [exportMenuOpen])
 
   // Load actual search term rows on first expand or filter change
   useEffect(() => {
@@ -763,6 +807,42 @@ function SearchTermsSection({ accountId, syncing, data, error, filter, onSync, o
                       {filtered.length.toLocaleString()} result{filtered.length !== 1 ? 's' : ''}
                     </span>
                   )}
+                  {stTerms && stTerms.length > 0 && (
+                    <div className="relative" ref={exportMenuRef}>
+                      <button
+                        onClick={() => setExportMenuOpen(o => !o)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 transition-colors"
+                      >
+                        <Download size={13} />
+                        Export CSV
+                        <ChevronDown size={12} className={clsx('transition-transform', exportMenuOpen && 'rotate-180')} />
+                      </button>
+                      {exportMenuOpen && (
+                        <div className="absolute right-0 top-full mt-1 py-1 bg-white border border-slate-200 rounded-lg shadow-lg z-50 min-w-[140px]">
+                          <button
+                            onClick={() => {
+                              const csv = exportSearchTermsToCsv(stTerms, currencyCode)
+                              downloadCsv(csv, `search-terms-all-${new Date().toISOString().slice(0, 10)}.csv`)
+                              setExportMenuOpen(false)
+                            }}
+                            className="w-full px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50"
+                          >
+                            Export All ({stTerms.length.toLocaleString()})
+                          </button>
+                          <button
+                            onClick={() => {
+                              const csv = exportSearchTermsToCsv(filtered, currencyCode)
+                              downloadCsv(csv, `search-terms-filtered-${new Date().toISOString().slice(0, 10)}.csv`)
+                              setExportMenuOpen(false)
+                            }}
+                            className="w-full px-3 py-2 text-left text-xs text-slate-700 hover:bg-slate-50"
+                          >
+                            Export Filtered ({filtered.length.toLocaleString()})
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -826,10 +906,10 @@ function SearchTermsSection({ accountId, syncing, data, error, filter, onSync, o
                         {paged.map((t, idx) => (
                           <tr key={`${t.search_term}-${t.keyword}-${idx}`} className="hover:bg-slate-50/50 transition-colors">
                             <td className="px-3 py-2.5 sticky left-0 bg-white z-10">
-                              <p className="text-sm font-medium text-slate-800 truncate max-w-[220px]" title={t.search_term}>{t.search_term}</p>
+                              <p className="text-sm font-medium text-slate-800 break-words">{t.search_term}</p>
                             </td>
                             <td className="px-3 py-2.5">
-                              <p className="text-xs text-slate-600 truncate max-w-[140px]" title={t.keyword}>{t.keyword || '—'}</p>
+                              <p className="text-xs text-slate-600 break-words">{t.keyword || '—'}</p>
                             </td>
                             <td className="px-3 py-2.5">
                               <span className={clsx(
@@ -859,7 +939,7 @@ function SearchTermsSection({ accountId, syncing, data, error, filter, onSync, o
                               )}
                             </td>
                             <td className="px-3 py-2.5">
-                              <p className="text-[11px] text-slate-500 truncate max-w-[160px]" title={t.campaign_name}>{t.campaign_name || '—'}</p>
+                              <p className="text-[11px] text-slate-500 break-words">{t.campaign_name || '—'}</p>
                             </td>
                           </tr>
                         ))}
