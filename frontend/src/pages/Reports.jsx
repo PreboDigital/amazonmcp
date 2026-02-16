@@ -1169,11 +1169,11 @@ export default function Reports() {
       {/* ── Page Header ─────────────────────────────────────────────── */}
       <div className="flex flex-col sm:flex-row sm:items-end gap-4 justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Reports</h1>
+          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Dashboard</h1>
           <p className="mt-1 text-sm text-slate-500">
             {activeAccount
               ? <>Analyzing <span className="font-medium text-slate-700">{activeAccount.account_name || activeAccount.name}</span> &middot; {activeAccount.marketplace || activeAccount.region?.toUpperCase()}</>
-              : 'Comprehensive campaign performance analytics'}
+              : 'Campaign performance analytics and reports'}
           </p>
         </div>
         {reportData && (

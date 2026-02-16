@@ -440,6 +440,7 @@ function OnboardingWizard({ activeAccountId, activeAccount, onComplete }) {
 
 // ── Main Dashboard ────────────────────────────────────────────────────
 export default function Dashboard() {
+  const navigate = useNavigate()
   const { activeAccount, activeAccountId, activeProfileId, accounts, refreshAccounts } = useAccount()
   const [loading, setLoading] = useState(true)
   const [snapshots, setSnapshots] = useState([])
@@ -500,11 +501,11 @@ export default function Dashboard() {
     return (
       <div className="space-y-8">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Dashboard</h1>
+          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Overview</h1>
           <p className="mt-1 text-sm text-slate-500">
             {activeAccount
               ? <>Viewing <span className="font-medium text-slate-700">{activeAccount.account_name || activeAccount.name}</span> &middot; {activeAccount.marketplace || activeAccount.region?.toUpperCase()}</>
-              : 'Campaign performance overview and optimization status'}
+              : 'Account setup and optimization status'}
           </p>
         </div>
         <OnboardingWizard
@@ -513,7 +514,7 @@ export default function Dashboard() {
           onComplete={async () => {
             await refreshAccounts()
             setShowOnboarding(false)
-            await loadDashboard()
+            navigate('/')
           }}
         />
       </div>
@@ -525,11 +526,11 @@ export default function Dashboard() {
     <div className="space-y-8">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Dashboard</h1>
+        <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Overview</h1>
         <p className="mt-1 text-sm text-slate-500">
           {activeAccount
             ? <>Viewing <span className="font-medium text-slate-700">{activeAccount.account_name || activeAccount.name}</span> &middot; {activeAccount.marketplace || activeAccount.region?.toUpperCase()}</>
-            : 'Campaign performance overview and optimization status'}
+            : 'Quick actions, metrics, and recent activity'}
         </p>
       </div>
 

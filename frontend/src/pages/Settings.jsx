@@ -664,7 +664,7 @@ export default function Settings() {
           <div className="px-5 pb-5 border-t border-slate-100 space-y-5">
             {!activeAccount?.profile_id && creds.length > 0 && (
               <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
-                <strong>Tip:</strong> <Link to="/" className="text-amber-700 font-medium underline hover:text-amber-900">Discover accounts</Link> on the Dashboard and select an active profile in the header for account links, invoices, and user invitations to work correctly.
+                <strong>Tip:</strong> <Link to="/overview" className="text-amber-700 font-medium underline hover:text-amber-900">Discover accounts</Link> on the Overview page and select an active profile in the header for account links, invoices, and user invitations to work correctly.
               </div>
             )}
             <p className="text-xs text-slate-500 pt-4">

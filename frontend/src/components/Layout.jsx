@@ -1,6 +1,7 @@
 import { NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard,
+  Activity,
   SearchCheck,
   Sparkles,
   TrendingUp,
@@ -28,9 +29,9 @@ import { approvals, accounts as accountsApi } from '../lib/api'
 
 const baseNavigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
+  { name: 'Overview', href: '/overview', icon: Activity },
   { name: 'Campaigns', href: '/campaigns', icon: Zap },
   { name: 'AI Assistant', href: '/ai', icon: Brain },
-  { name: 'Reports', href: '/reports', icon: BarChart3 },
   { name: 'Approval Queue', href: '/approvals', icon: Shield },
   { name: 'Audit & Reports', href: '/audit', icon: SearchCheck },
   { name: 'Keyword Harvester', href: '/harvester', icon: Sparkles },

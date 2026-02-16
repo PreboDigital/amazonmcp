@@ -55,12 +55,12 @@ export default function App() {
                   <SyncProvider>
                   <Layout>
                   <Routes>
-                    <Route path="/" element={<Dashboard />} />
+                    <Route path="/" element={<Reports />} />
+                    <Route path="/overview" element={<Dashboard />} />
                     <Route path="/campaigns" element={<CampaignManager />} />
                     <Route path="/ai" element={<AIAssistant />} />
                     <Route path="/approvals" element={<ApprovalQueue />} />
                     <Route path="/audit" element={<Audit />} />
-                    <Route path="/reports" element={<Reports />} />
                     <Route path="/harvester" element={<Harvester />} />
                     <Route path="/optimizer" element={<Optimizer />} />
                     <Route path="/settings" element={<Settings />} />
