@@ -864,6 +864,8 @@ async def sync_search_terms(
 async def get_search_terms(
     credential_id: Optional[str] = Query(None),
     campaign_id: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None, description="Filter by report range start (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="Filter by report range end (YYYY-MM-DD)"),
     min_clicks: int = Query(0),
     non_converting_only: bool = Query(False),
     limit: int = Query(100),
@@ -873,6 +875,7 @@ async def get_search_terms(
     """
     Query stored search term data with filters.
     Useful for viewing search terms in the UI or exporting.
+    Filters by report_date_start/end when start_date and end_date provided.
     """
     cred = await _get_cred(db, credential_id)
     logger.info("Reports search-terms: credential_id=%s profile_id=%s", str(cred.id), cred.profile_id)
@@ -882,6 +885,10 @@ async def get_search_terms(
         query = query.where(SearchTermPerformance.profile_id == cred.profile_id)
     else:
         query = query.where(SearchTermPerformance.profile_id.is_(None))
+
+    if start_date and end_date:
+        query = query.where(SearchTermPerformance.report_date_start <= end_date)
+        query = query.where(SearchTermPerformance.report_date_end >= start_date)
 
     if campaign_id:
         query = query.where(SearchTermPerformance.amazon_campaign_id == campaign_id)

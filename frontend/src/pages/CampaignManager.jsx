@@ -473,34 +473,43 @@ export default function CampaignManager() {
     setLoading(true)
     setError(null)
     try {
-      const data = await campaignManager.listAdGroups(campaignId, activeAccountId)
+      const opts = dateRange.preset === 'custom' && dateRange.start && dateRange.end
+        ? { date_from: dateRange.start, date_to: dateRange.end }
+        : { preset: dateRange.preset || 'this_month' }
+      const data = await campaignManager.listAdGroups(campaignId, activeAccountId, opts)
       setAdGroups(data.ad_groups || [])
     } catch (err) {
       setError(err.message)
     } finally {
       setLoading(false)
     }
-  }, [activeAccountId])
+  }, [activeAccountId, dateRange.preset, dateRange.start, dateRange.end])
 
   const loadTargets = useCallback(async (adGroupId) => {
     setLoading(true)
     setError(null)
     try {
-      const data = await campaignManager.listTargets(adGroupId, activeAccountId)
+      const opts = dateRange.preset === 'custom' && dateRange.start && dateRange.end
+        ? { date_from: dateRange.start, date_to: dateRange.end }
+        : { preset: dateRange.preset || 'this_month' }
+      const data = await campaignManager.listTargets(adGroupId, activeAccountId, opts)
       setTargets(data.targets || [])
     } catch (err) {
       setError(err.message)
     } finally {
       setLoading(false)
     }
-  }, [activeAccountId])
+  }, [activeAccountId, dateRange.preset, dateRange.start, dateRange.end])
 
   const loadAds = useCallback(async (adGroupId) => {
     try {
-      const data = await campaignManager.listAds(adGroupId, activeAccountId)
+      const opts = dateRange.preset === 'custom' && dateRange.start && dateRange.end
+        ? { date_from: dateRange.start, date_to: dateRange.end }
+        : { preset: dateRange.preset || 'this_month' }
+      const data = await campaignManager.listAds(adGroupId, activeAccountId, opts)
       setAds(data.ads || [])
     } catch { /* ignore */ }
-  }, [activeAccountId])
+  }, [activeAccountId, dateRange.preset, dateRange.start, dateRange.end])
 
   useEffect(() => {
     if (!activeAccountId) {
@@ -522,6 +531,15 @@ export default function CampaignManager() {
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [pickerOpen])
+
+  // Reload ad groups/targets/ads when date range changes — they use the same date filter
+  useEffect(() => {
+    if (selectedCampaign && view === 'ad-groups') loadAdGroups(selectedCampaign.amazon_campaign_id)
+    if (selectedAdGroup && (view === 'targets' || view === 'ads')) {
+      loadTargets(selectedAdGroup.amazon_ad_group_id)
+      loadAds(selectedAdGroup.amazon_ad_group_id)
+    }
+  }, [dateRange.preset, dateRange.start, dateRange.end]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Navigation helpers ──────────────────────────────────────────
   function openCampaign(campaign) {

@@ -383,6 +383,8 @@ export const reports = {
     const params = new URLSearchParams()
     if (credentialId) params.set('credential_id', credentialId)
     if (opts.campaignId) params.set('campaign_id', opts.campaignId)
+    if (opts.startDate) params.set('start_date', opts.startDate)
+    if (opts.endDate) params.set('end_date', opts.endDate)
     if (opts.minClicks) params.set('min_clicks', opts.minClicks)
     if (opts.nonConvertingOnly) params.set('non_converting_only', 'true')
     if (opts.limit) params.set('limit', opts.limit)
@@ -453,8 +455,15 @@ export const campaignManager = {
     }),
 
   // Ad Groups CRUD
-  listAdGroups: (amazonCampaignId, credentialId) =>
-    request(`/campaigns/${amazonCampaignId}/ad-groups${credentialId ? `?credential_id=${credentialId}` : ''}`),
+  listAdGroups: (amazonCampaignId, credentialId, opts = {}) => {
+    const params = new URLSearchParams()
+    if (credentialId) params.set('credential_id', credentialId)
+    if (opts.date_from) params.set('date_from', opts.date_from)
+    if (opts.date_to) params.set('date_to', opts.date_to)
+    if (opts.preset) params.set('preset', opts.preset)
+    const qs = params.toString()
+    return request(`/campaigns/${amazonCampaignId}/ad-groups${qs ? `?${qs}` : ''}`)
+  },
   createAdGroup: (amazonCampaignId, data, credentialId, skipApproval = false) =>
     request(`/campaigns/${amazonCampaignId}/ad-groups${credentialId ? `?credential_id=${credentialId}` : ''}`, {
       method: 'POST',
@@ -471,8 +480,15 @@ export const campaignManager = {
     }),
 
   // Targets CRUD
-  listTargets: (amazonAdGroupId, credentialId) =>
-    request(`/campaigns/ad-groups/${amazonAdGroupId}/targets${credentialId ? `?credential_id=${credentialId}` : ''}`),
+  listTargets: (amazonAdGroupId, credentialId, opts = {}) => {
+    const params = new URLSearchParams()
+    if (credentialId) params.set('credential_id', credentialId)
+    if (opts.date_from) params.set('date_from', opts.date_from)
+    if (opts.date_to) params.set('date_to', opts.date_to)
+    if (opts.preset) params.set('preset', opts.preset)
+    const qs = params.toString()
+    return request(`/campaigns/ad-groups/${amazonAdGroupId}/targets${qs ? `?${qs}` : ''}`)
+  },
   createTarget: (amazonAdGroupId, data, credentialId, skipApproval = false) =>
     request(`/campaigns/ad-groups/${amazonAdGroupId}/targets${credentialId ? `?credential_id=${credentialId}` : ''}`, {
       method: 'POST',
@@ -489,8 +505,15 @@ export const campaignManager = {
     }),
 
   // Ads CRUD
-  listAds: (amazonAdGroupId, credentialId) =>
-    request(`/campaigns/ad-groups/${amazonAdGroupId}/ads${credentialId ? `?credential_id=${credentialId}` : ''}`),
+  listAds: (amazonAdGroupId, credentialId, opts = {}) => {
+    const params = new URLSearchParams()
+    if (credentialId) params.set('credential_id', credentialId)
+    if (opts.date_from) params.set('date_from', opts.date_from)
+    if (opts.date_to) params.set('date_to', opts.date_to)
+    if (opts.preset) params.set('preset', opts.preset)
+    const qs = params.toString()
+    return request(`/campaigns/ad-groups/${amazonAdGroupId}/ads${qs ? `?${qs}` : ''}`)
+  },
   createAd: (amazonAdGroupId, data, credentialId, skipApproval = false) =>
     request(`/campaigns/ad-groups/${amazonAdGroupId}/ads${credentialId ? `?credential_id=${credentialId}` : ''}`, {
       method: 'POST',

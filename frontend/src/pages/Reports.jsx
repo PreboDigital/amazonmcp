@@ -599,7 +599,7 @@ function downloadCsv(csv, filename) {
   URL.revokeObjectURL(url)
 }
 
-function SearchTermsSection({ accountId, syncing, data, error, filter, onSync, onFilterChange, onDismissError, currencyCode = 'USD' }) {
+function SearchTermsSection({ accountId, syncing, data, error, filter, onSync, onFilterChange, onDismissError, currencyCode = 'USD', dateRange }) {
   const [stTerms, setStTerms] = useState(null)
   const [stLoading, setStLoading] = useState(false)
   const [sortKey, setSortKey] = useState('cost')
@@ -619,10 +619,10 @@ function SearchTermsSection({ accountId, syncing, data, error, filter, onSync, o
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [exportMenuOpen])
 
-  // Load actual search term rows on first expand or filter change
+  // Load actual search term rows on first expand or filter/date change
   useEffect(() => {
     if (expanded && accountId) loadTerms()
-  }, [expanded, accountId, filter])
+  }, [expanded, accountId, filter, dateRange?.start, dateRange?.end])
 
   async function loadTerms() {
     setStLoading(true)
@@ -630,6 +630,10 @@ function SearchTermsSection({ accountId, syncing, data, error, filter, onSync, o
       const opts = {
         sortBy: 'cost',
         limit: 5000,
+      }
+      if (dateRange?.start && dateRange?.end) {
+        opts.startDate = dateRange.start
+        opts.endDate = dateRange.end
       }
       if (filter === 'non_converting') opts.nonConvertingOnly = true
       if (filter === 'converting') opts.minClicks = 1
@@ -1698,6 +1702,7 @@ export default function Reports() {
         onFilterChange={setStFilter}
         onDismissError={dismissReportSearchTermsSync}
         currencyCode={currencyCode}
+        dateRange={dateRange}
         key={activeAccount?.id || activeAccountId}
       />
 

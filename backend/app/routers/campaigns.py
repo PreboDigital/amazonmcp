@@ -23,7 +23,7 @@ from app.models import (
     AppSettings, SyncJob, User,
 )
 from app.services.token_service import get_mcp_client_with_fresh_token
-from app.services.reporting_service import get_date_range, DATE_PRESETS
+from app.services.reporting_service import get_date_range, DATE_PRESETS, resolve_perf_date_source
 from app.services.product_image_service import get_product_image_url
 from app.utils import parse_uuid, safe_error_detail, utcnow, extract_target_expression, extract_ad_asin_sku, extract_ad_display_name
 
@@ -67,22 +67,19 @@ def _extract_list(data, keys=None) -> list:
 #  CAMPAIGNS — Full CRUD
 # ══════════════════════════════════════════════════════════════════════
 
-def _perf_date_filter(perf_where, perf_start: str, perf_end: str):
+def _perf_date_where(perf_where, mode: str, val1: str, val2: Optional[str]):
     """
     Add date filtering for campaign_performance_daily.
-    Matches: single-day rows (YYYY-MM-DD) and range rows (YYYY-MM-DD__YYYY-MM-DD).
+    Uses a single source (exact_range, single_day, or best_range) to avoid double-counting
+    when overlapping range keys exist in the DB.
     """
-    single_day_match = and_(
-        CampaignPerformanceDaily.date >= perf_start,
-        CampaignPerformanceDaily.date <= perf_end,
-    )
-    # Range key: stored as "start__end", overlaps if start <= perf_end AND end >= perf_start
-    range_match = and_(
-        func.strpos(CampaignPerformanceDaily.date, "__") > 0,
-        func.split_part(CampaignPerformanceDaily.date, "__", 1) <= perf_end,
-        func.split_part(CampaignPerformanceDaily.date, "__", 2) >= perf_start,
-    )
-    perf_where.append(or_(single_day_match, range_match))
+    if mode == "exact_range" or mode == "best_range":
+        perf_where.append(CampaignPerformanceDaily.date == val1)
+    else:
+        # single_day: only rows without __ in date
+        perf_where.append(CampaignPerformanceDaily.date >= val1)
+        perf_where.append(CampaignPerformanceDaily.date <= val2)
+        perf_where.append(func.strpos(CampaignPerformanceDaily.date, "__") <= 0)
 
 
 @router.get("")
@@ -115,6 +112,12 @@ async def list_campaigns(
     else:
         s, e = get_date_range("this_month")
         perf_start, perf_end = s.isoformat(), e.isoformat()
+
+    # Resolve single date source to avoid double-counting overlapping range keys
+    perf_mode, perf_val1, perf_val2 = await resolve_perf_date_source(
+        db, cred.id, perf_start, perf_end, cred.profile_id
+    )
+
     base_query = select(Campaign).where(Campaign.credential_id == cred.id)
     if cred.profile_id is not None:
         base_query = base_query.where(Campaign.profile_id == cred.profile_id)
@@ -166,7 +169,7 @@ async def list_campaigns(
             perf_where.append(CampaignPerformanceDaily.profile_id == cred.profile_id)
         else:
             perf_where.append(CampaignPerformanceDaily.profile_id.is_(None))
-        _perf_date_filter(perf_where, perf_start, perf_end)
+        _perf_date_where(perf_where, perf_mode, perf_val1, perf_val2)
         perf_subq = (
             select(
                 CampaignPerformanceDaily.amazon_campaign_id,
@@ -217,7 +220,7 @@ async def list_campaigns(
             perf_where.append(CampaignPerformanceDaily.profile_id == cred.profile_id)
         else:
             perf_where.append(CampaignPerformanceDaily.profile_id.is_(None))
-        _perf_date_filter(perf_where, perf_start, perf_end)
+        _perf_date_where(perf_where, perf_mode, perf_val1, perf_val2)
         perf_result = await db.execute(
             select(
                 CampaignPerformanceDaily.amazon_campaign_id,
@@ -704,10 +707,25 @@ async def delete_campaign(
 async def list_ad_groups(
     amazon_campaign_id: str,
     credential_id: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None, description="Filter performance by date (YYYY-MM-DD)"),
+    date_to: Optional[str] = Query(None, description="Filter performance by date (YYYY-MM-DD)"),
+    preset: Optional[str] = Query(None, description="Date preset when date_from/date_to not set"),
     db: AsyncSession = Depends(get_db),
 ):
     """List ad groups for a specific campaign, enriched with performance from SearchTermPerformance."""
     cred = await _get_credential(db, credential_id)
+
+    # Resolve date range for SearchTermPerformance filter
+    st_start, st_end = None, None
+    if date_from and date_to:
+        st_start, st_end = date_from, date_to
+    elif preset and preset in DATE_PRESETS:
+        s, e = get_date_range(preset)
+        st_start, st_end = s.isoformat(), e.isoformat()
+    else:
+        s, e = get_date_range("this_month")
+        st_start, st_end = s.isoformat(), e.isoformat()
+
     query = (
         select(AdGroup)
         .where(AdGroup.credential_id == cred.id, AdGroup.amazon_campaign_id == amazon_campaign_id)
@@ -722,6 +740,8 @@ async def list_ad_groups(
         st_where = [
             SearchTermPerformance.credential_id == cred.id,
             SearchTermPerformance.amazon_ad_group_id.in_(ag_ids),
+            SearchTermPerformance.report_date_start <= st_end,
+            SearchTermPerformance.report_date_end >= st_start,
         ]
         if cred.profile_id is not None:
             st_where.append(SearchTermPerformance.profile_id == cred.profile_id)
@@ -950,10 +970,24 @@ async def delete_ad_group(
 async def list_targets(
     amazon_ad_group_id: str,
     credential_id: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None, description="Filter performance by date (YYYY-MM-DD)"),
+    date_to: Optional[str] = Query(None, description="Filter performance by date (YYYY-MM-DD)"),
+    preset: Optional[str] = Query(None, description="Date preset when date_from/date_to not set"),
     db: AsyncSession = Depends(get_db),
 ):
     """List targets/keywords for an ad group, enriched with performance from SearchTermPerformance (keyword_id = amazon_target_id)."""
     cred = await _get_credential(db, credential_id)
+
+    st_start, st_end = None, None
+    if date_from and date_to:
+        st_start, st_end = date_from, date_to
+    elif preset and preset in DATE_PRESETS:
+        s, e = get_date_range(preset)
+        st_start, st_end = s.isoformat(), e.isoformat()
+    else:
+        s, e = get_date_range("this_month")
+        st_start, st_end = s.isoformat(), e.isoformat()
+
     query = (
         select(Target)
         .where(Target.credential_id == cred.id, Target.amazon_ad_group_id == amazon_ad_group_id)
@@ -969,6 +1003,8 @@ async def list_targets(
             SearchTermPerformance.credential_id == cred.id,
             SearchTermPerformance.amazon_ad_group_id == amazon_ad_group_id,
             SearchTermPerformance.keyword_id.in_(target_ids),
+            SearchTermPerformance.report_date_start <= st_end,
+            SearchTermPerformance.report_date_end >= st_start,
         ]
         if cred.profile_id is not None:
             st_where.append(SearchTermPerformance.profile_id == cred.profile_id)
@@ -1210,10 +1246,24 @@ async def delete_target(
 async def list_ads(
     amazon_ad_group_id: str,
     credential_id: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None, description="Filter performance by date (YYYY-MM-DD)"),
+    date_to: Optional[str] = Query(None, description="Filter performance by date (YYYY-MM-DD)"),
+    preset: Optional[str] = Query(None, description="Date preset when date_from/date_to not set"),
     db: AsyncSession = Depends(get_db),
 ):
     """List ads for an ad group. Includes ad_group_metrics (spend, sales, acos) from SearchTermPerformance for context."""
     cred = await _get_credential(db, credential_id)
+
+    st_start, st_end = None, None
+    if date_from and date_to:
+        st_start, st_end = date_from, date_to
+    elif preset and preset in DATE_PRESETS:
+        s, e = get_date_range(preset)
+        st_start, st_end = s.isoformat(), e.isoformat()
+    else:
+        s, e = get_date_range("this_month")
+        st_start, st_end = s.isoformat(), e.isoformat()
+
     query = (
         select(Ad)
         .where(Ad.credential_id == cred.id, Ad.amazon_ad_group_id == amazon_ad_group_id)
@@ -1227,6 +1277,8 @@ async def list_ads(
     st_where = [
         SearchTermPerformance.credential_id == cred.id,
         SearchTermPerformance.amazon_ad_group_id == amazon_ad_group_id,
+        SearchTermPerformance.report_date_start <= st_end,
+        SearchTermPerformance.report_date_end >= st_start,
     ]
     if cred.profile_id is not None:
         st_where.append(SearchTermPerformance.profile_id == cred.profile_id)

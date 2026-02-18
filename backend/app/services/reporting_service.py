@@ -632,12 +632,14 @@ async def query_account_daily_trend(
 ) -> list:
     """
     Query account_performance_daily for a date range — one row per day,
-    ideal for trend charts.
+    ideal for trend charts. Excludes range keys (date contains '__') since
+    string comparison fails for them and trends require daily granularity.
     """
     trend_where = [
         AccountPerformanceDaily.credential_id == credential_id,
         AccountPerformanceDaily.date >= start_date,
         AccountPerformanceDaily.date <= end_date,
+        func.strpos(AccountPerformanceDaily.date, "__") <= 0,  # single-day only
     ]
     if profile_id is not None:
         trend_where.append(AccountPerformanceDaily.profile_id == profile_id)
@@ -666,6 +668,102 @@ async def query_account_daily_trend(
         }
         for r in rows
     ]
+
+
+async def resolve_perf_date_source(
+    db: AsyncSession,
+    credential_id: uuid.UUID,
+    perf_start: str,
+    perf_end: str,
+    profile_id: Optional[str] = None,
+) -> tuple[str, str, Optional[str]]:
+    """
+    Resolve which date source to use for campaign_performance_daily aggregation
+    to avoid double-counting when overlapping range keys exist.
+
+    Returns: (mode, value1, value2)
+      - ("exact_range", range_key, None): use rows where date = range_key
+      - ("single_day", perf_start, perf_end): use single-day rows only (exclude range keys)
+      - ("best_range", range_key, None): use one best-matching range key
+    """
+    base_where = [
+        CampaignPerformanceDaily.credential_id == credential_id,
+        CampaignPerformanceDaily.profile_id == profile_id
+        if profile_id is not None
+        else CampaignPerformanceDaily.profile_id.is_(None),
+    ]
+
+    # 1. Exact range key exists?
+    if perf_start != perf_end:
+        range_key = f"{perf_start}__{perf_end}"
+        check = await db.execute(
+            select(func.count()).select_from(CampaignPerformanceDaily).where(
+                and_(*base_where, CampaignPerformanceDaily.date == range_key)
+            )
+        )
+        if (check.scalar() or 0) > 0:
+            return ("exact_range", range_key, None)
+
+    # 2. Single-day rows exist for this range?
+    single_where = base_where + [
+        CampaignPerformanceDaily.date >= perf_start,
+        CampaignPerformanceDaily.date <= perf_end,
+        func.strpos(CampaignPerformanceDaily.date, "__") <= 0,
+    ]
+    check = await db.execute(
+        select(func.count()).select_from(CampaignPerformanceDaily).where(and_(*single_where))
+    )
+    if (check.scalar() or 0) > 0:
+        return ("single_day", perf_start, perf_end)
+
+    # 3. Best overlapping range key?
+    range_where = base_where + [func.strpos(CampaignPerformanceDaily.date, "__") > 0]
+    result = await db.execute(
+        select(CampaignPerformanceDaily.date).where(and_(*range_where)).distinct()
+    )
+    range_keys = [r[0] for r in result.all()]
+
+    parsed = []
+    for rk in range_keys:
+        parts = rk.split("__")
+        if len(parts) == 2:
+            parsed.append((rk, parts[0], parts[1]))
+
+    # Exact encompassing
+    for rk, rs, re in parsed:
+        if rs <= perf_start and re >= perf_end:
+            return ("best_range", rk, None)
+
+    # Best overlap (≥70%)
+    try:
+        req_start = date.fromisoformat(perf_start)
+        req_end = date.fromisoformat(perf_end)
+        req_days = (req_end - req_start).days + 1
+        best_match, best_overlap = None, 0
+
+        for rk, rs, re in parsed:
+            try:
+                r_start = date.fromisoformat(rs)
+                r_end = date.fromisoformat(re)
+            except ValueError:
+                continue
+            overlap_start = max(r_start, req_start)
+            overlap_end = min(r_end, req_end)
+            overlap_days = (overlap_end - overlap_start).days + 1
+            if overlap_days <= 0:
+                continue
+            ratio = overlap_days / req_days if req_days > 0 else 0
+            if ratio >= 0.7 and overlap_days > best_overlap:
+                best_overlap = overlap_days
+                best_match = rk
+
+        if best_match:
+            return ("best_range", best_match, None)
+    except (ValueError, TypeError):
+        pass
+
+    # Fallback: single_day (may return empty)
+    return ("single_day", perf_start, perf_end)
 
 
 async def find_encompassing_range_data(
