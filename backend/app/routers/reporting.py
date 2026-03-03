@@ -5,27 +5,27 @@ full historical tracking in campaign_performance_daily /
 account_performance_daily tables.
 """
 
+import asyncio
 import uuid
 import logging
-from datetime import datetime, date as date_type, timedelta
+from datetime import date as date_type, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, and_, delete
 from pydantic import BaseModel
 from typing import Optional
-from app.database import get_db
+from app.database import get_db, async_session
 from app.models import (
     Credential, Campaign, AuditSnapshot, Report, ActivityLog, Account,
-    SearchTermPerformance,
+    SearchTermPerformance, CampaignPerformanceDaily, AccountPerformanceDaily,
 )
 from app.services.token_service import get_mcp_client_with_fresh_token
 from app.services.reporting_service import (
     get_date_range, get_comparison_range, get_comparison_range_for_dates,
     compute_metrics, compute_deltas, enrich_campaigns, ReportingService,
-    store_campaign_rows_by_date,
+    store_campaign_rows_by_date, store_account_daily_summary,
     query_campaign_daily, query_account_daily_trend,
-    query_account_range_key_trend,
-    has_daily_data, find_encompassing_range_data, DATE_PRESETS,
+    DATE_PRESETS,
     get_currency_for_marketplace,
 )
 from app.services.search_term_service import SearchTermService, get_search_term_summary
@@ -57,18 +57,23 @@ async def _get_cred(db: AsyncSession, cred_id: str = None) -> Credential:
     return cred
 
 
-async def _resolve_advertiser_account_id(db: AsyncSession, cred: Credential) -> Optional[str]:
+async def _resolve_advertiser_account_id(
+    db: AsyncSession,
+    cred: Credential,
+    profile_id_override: Optional[str] = None,
+) -> Optional[str]:
     """
     Resolve the Amazon Ads advertiserAccountId (amzn1.ads-account.g.xxx format)
     from the active Account's raw_data. The report API requires this — an empty
     accessRequestedAccounts array causes a server-side serialization error.
     """
-    if not cred.profile_id:
+    profile_id = profile_id_override if profile_id_override is not None else cred.profile_id
+    if not profile_id:
         return None
     result = await db.execute(
         select(Account).where(
             Account.credential_id == cred.id,
-            Account.profile_id == cred.profile_id,
+            Account.profile_id == profile_id,
         )
     )
     active_account = result.scalar_one_or_none()
@@ -95,6 +100,275 @@ async def _resolve_currency(db: AsyncSession, cred: Credential) -> str:
                 region=cred.region,
             )
     return get_currency_for_marketplace(region=cred.region)
+
+
+def _days_inclusive(start_date: str, end_date: str) -> int:
+    start_d = date_type.fromisoformat(start_date)
+    end_d = date_type.fromisoformat(end_date)
+    return max(1, (end_d - start_d).days + 1)
+
+
+async def _get_exact_daily_coverage(
+    db: AsyncSession,
+    credential_id,
+    start_date: str,
+    end_date: str,
+    profile_id: Optional[str] = None,
+) -> tuple[bool, int, int]:
+    expected_days = _days_inclusive(start_date, end_date)
+    where = [
+        AccountPerformanceDaily.credential_id == credential_id,
+        AccountPerformanceDaily.date >= start_date,
+        AccountPerformanceDaily.date <= end_date,
+        func.strpos(AccountPerformanceDaily.date, "__") <= 0,
+    ]
+    if profile_id is not None:
+        where.append(AccountPerformanceDaily.profile_id == profile_id)
+    else:
+        where.append(AccountPerformanceDaily.profile_id.is_(None))
+
+    result = await db.execute(
+        select(func.count(func.distinct(AccountPerformanceDaily.date))).where(and_(*where))
+    )
+    synced_days = int(result.scalar() or 0)
+    return synced_days >= expected_days, synced_days, expected_days
+
+
+async def _find_report_sync_job(
+    db: AsyncSession,
+    credential_id,
+    start_date: str,
+    end_date: str,
+    profile_id: Optional[str],
+) -> Optional[Report]:
+    result = await db.execute(
+        select(Report)
+        .where(
+            Report.credential_id == credential_id,
+            Report.report_type == "performance_sync",
+            Report.date_range_start == start_date,
+            Report.date_range_end == end_date,
+        )
+        .order_by(Report.created_at.desc())
+        .limit(10)
+    )
+    for report in result.scalars().all():
+        raw = report.raw_response or {}
+        if raw.get("profile_id") == profile_id:
+            return report
+    return None
+
+
+async def _clear_exact_daily_slice(
+    db: AsyncSession,
+    credential_id,
+    report_date: str,
+    profile_id: Optional[str],
+) -> None:
+    campaign_where = [
+        CampaignPerformanceDaily.credential_id == credential_id,
+        CampaignPerformanceDaily.date == report_date,
+        func.strpos(CampaignPerformanceDaily.date, "__") <= 0,
+    ]
+    account_where = [
+        AccountPerformanceDaily.credential_id == credential_id,
+        AccountPerformanceDaily.date == report_date,
+        func.strpos(AccountPerformanceDaily.date, "__") <= 0,
+    ]
+    if profile_id is not None:
+        campaign_where.append(CampaignPerformanceDaily.profile_id == profile_id)
+        account_where.append(AccountPerformanceDaily.profile_id == profile_id)
+    else:
+        campaign_where.append(CampaignPerformanceDaily.profile_id.is_(None))
+        account_where.append(AccountPerformanceDaily.profile_id.is_(None))
+
+    await db.execute(delete(CampaignPerformanceDaily).where(and_(*campaign_where)))
+    await db.execute(delete(AccountPerformanceDaily).where(and_(*account_where)))
+
+
+async def _clear_legacy_range_slice(
+    db: AsyncSession,
+    credential_id,
+    start_date: str,
+    end_date: str,
+    profile_id: Optional[str],
+) -> None:
+    range_key = f"{start_date}__{end_date}"
+    campaign_where = [
+        CampaignPerformanceDaily.credential_id == credential_id,
+        CampaignPerformanceDaily.date == range_key,
+    ]
+    account_where = [
+        AccountPerformanceDaily.credential_id == credential_id,
+        AccountPerformanceDaily.date == range_key,
+    ]
+    if profile_id is not None:
+        campaign_where.append(CampaignPerformanceDaily.profile_id == profile_id)
+        account_where.append(AccountPerformanceDaily.profile_id == profile_id)
+    else:
+        campaign_where.append(CampaignPerformanceDaily.profile_id.is_(None))
+        account_where.append(AccountPerformanceDaily.profile_id.is_(None))
+
+    await db.execute(delete(CampaignPerformanceDaily).where(and_(*campaign_where)))
+    await db.execute(delete(AccountPerformanceDaily).where(and_(*account_where)))
+
+
+async def _run_report_sync_background(report_id: uuid.UUID) -> None:
+    async with async_session() as db:
+        result = await db.execute(select(Report).where(Report.id == report_id))
+        report = result.scalar_one_or_none()
+        if not report:
+            return
+
+        raw = dict(report.raw_response or {})
+        start_date = report.date_range_start
+        end_date = report.date_range_end
+        profile_id = raw.get("profile_id")
+        total_days = _days_inclusive(start_date, end_date)
+
+        try:
+            cred_result = await db.execute(select(Credential).where(Credential.id == report.credential_id))
+            cred = cred_result.scalar_one_or_none()
+            if not cred:
+                raise RuntimeError("Credential not found for report sync")
+
+            report.status = "running"
+            raw.update({
+                "profile_id": profile_id,
+                "step": "Preparing daily report sync...",
+                "progress_pct": 0,
+                "days_synced": 0,
+                "days_total": total_days,
+            })
+            report.raw_response = raw
+            await db.commit()
+
+            client = await get_mcp_client_with_fresh_token(
+                cred,
+                db,
+                profile_id_override=profile_id,
+            )
+            advertiser_account_id = await _resolve_advertiser_account_id(
+                db,
+                cred,
+                profile_id_override=profile_id,
+            )
+            service = ReportingService(client, advertiser_account_id=advertiser_account_id)
+
+            current = date_type.fromisoformat(start_date)
+            end = date_type.fromisoformat(end_date)
+            synced_days = 0
+
+            while current <= end:
+                day_str = current.isoformat()
+                raw = dict(report.raw_response or {})
+                raw.update({
+                    "step": f"Syncing exact daily performance for {day_str}",
+                    "progress_pct": min(99, int((synced_days / max(total_days, 1)) * 100)),
+                    "days_synced": synced_days,
+                    "days_total": total_days,
+                    "current_date": day_str,
+                })
+                report.raw_response = raw
+                await db.commit()
+
+                pending_report_id = None
+                day_result = {}
+                attempts = 0
+                while attempts < 3:
+                    attempts += 1
+                    day_result = await service.generate_mcp_report(
+                        day_str,
+                        day_str,
+                        pending_report_id=pending_report_id,
+                        max_wait=180,
+                    )
+                    pending_report_id = day_result.get("_pending_report_id")
+                    if not pending_report_id:
+                        break
+
+                if not day_result or ("campaigns" not in day_result and "_pending_report_id" not in day_result):
+                    raise RuntimeError(f"Amazon report fetch failed for {day_str}")
+                if day_result.get("_pending_report_id"):
+                    raise RuntimeError(f"Amazon report for {day_str} did not complete in time")
+
+                day_rows = service.parse_report_campaign_rows(day_result)
+                for row in day_rows:
+                    row["report_date"] = row.get("report_date") or day_str
+
+                await _clear_exact_daily_slice(db, cred.id, day_str, profile_id)
+                if day_rows:
+                    await store_campaign_rows_by_date(
+                        db,
+                        cred.id,
+                        day_rows,
+                        day_str,
+                        source="performance_sync",
+                        profile_id=profile_id,
+                    )
+                else:
+                    await store_account_daily_summary(
+                        db,
+                        cred.id,
+                        [],
+                        day_str,
+                        source="performance_sync",
+                        profile_id=profile_id,
+                    )
+                synced_days += 1
+                raw = dict(report.raw_response or {})
+                raw.update({
+                    "days_synced": synced_days,
+                    "progress_pct": min(99, int((synced_days / max(total_days, 1)) * 100)),
+                })
+                report.raw_response = raw
+                await db.commit()
+                current += timedelta(days=1)
+
+            await _clear_legacy_range_slice(db, cred.id, start_date, end_date, profile_id)
+
+            report.status = "completed"
+            report.completed_at = utcnow()
+            report.report_data = {
+                "status": "completed",
+                "days_synced": synced_days,
+                "days_total": total_days,
+                "profile_id": profile_id,
+            }
+            raw = dict(report.raw_response or {})
+            raw.update({
+                "step": "Completed",
+                "progress_pct": 100,
+                "days_synced": synced_days,
+                "days_total": total_days,
+            })
+            report.raw_response = raw
+            db.add(ActivityLog(
+                credential_id=cred.id,
+                action="performance_sync",
+                category="reporting",
+                description=f"Daily performance sync completed for {start_date} – {end_date}",
+                entity_type="report",
+                entity_id=str(report.id),
+                details=report.report_data,
+            ))
+            await db.commit()
+        except Exception as exc:
+            logger.exception("Performance report sync failed: %s", exc)
+            await db.rollback()
+            fail_result = await db.execute(select(Report).where(Report.id == report_id))
+            failed_report = fail_result.scalar_one_or_none()
+            if failed_report:
+                raw = dict(failed_report.raw_response or {})
+                raw.update({
+                    "step": "Failed",
+                    "error": str(exc),
+                })
+                failed_report.status = "failed"
+                failed_report.completed_at = utcnow()
+                failed_report.raw_response = raw
+                failed_report.report_data = {"status": "failed", "message": str(exc)}
+                await db.commit()
 
 
 def _campaign_to_dict(c: Campaign) -> dict:
@@ -206,36 +480,18 @@ async def report_summary(
     start_str = start_d.isoformat()
     end_str = end_d.isoformat()
 
-    # Try historical daily performance data first (stored from reports)
-    is_single_day = start_str == end_str
-
-    # Prefer true daily rows when available; fall back to legacy range keys.
-    daily_campaigns = await query_campaign_daily(
+    has_exact_daily, _, _ = await _get_exact_daily_coverage(
         db, cred.id, start_str, end_str, profile_id=cred.profile_id
     )
-    if not daily_campaigns and not is_single_day:
-        # Legacy range-key fallback: stored report ranges that overlap the period
-        daily_campaigns = await find_encompassing_range_data(db, cred.id, start_str, end_str, profile_id=cred.profile_id)
+    daily_campaigns = []
+    if has_exact_daily:
+        daily_campaigns = await query_campaign_daily(
+            db, cred.id, start_str, end_str, profile_id=cred.profile_id
+        )
 
     has_history = len(daily_campaigns) > 0
-    last_synced = None
-
-    if daily_campaigns:
-        enriched = daily_campaigns  # Already enriched by query_campaign_daily
-        last_synced = utcnow().isoformat()
-    else:
-        # Fallback: cached campaigns table
-        camp_query = select(Campaign).where(Campaign.credential_id == cred.id)
-        if cred.profile_id is not None:
-            camp_query = camp_query.where(Campaign.profile_id == cred.profile_id)
-        else:
-            camp_query = camp_query.where(Campaign.profile_id.is_(None))
-        camp_query = camp_query.order_by(Campaign.spend.desc().nullslast())
-        result = await db.execute(camp_query)
-        campaigns = result.scalars().all()
-        campaign_list = [_campaign_to_dict(c) for c in campaigns]
-        enriched = enrich_campaigns(campaign_list)
-        last_synced = campaigns[0].synced_at.isoformat() if campaigns else None
+    last_synced = utcnow().isoformat() if has_history else None
+    enriched = daily_campaigns if daily_campaigns else []
 
     summary = compute_metrics(enriched)
     active = [c for c in enriched if (c.get("state") or "").lower() in ("enabled", "active")]
@@ -265,6 +521,7 @@ async def report_summary(
         "top_performers": by_sales[:5],
         "worst_performers": by_acos_worst[:5],
         "has_historical_data": has_history,
+        "requires_sync": not has_history,
         "last_synced": last_synced,
         "currency_code": currency_code,
         "period": {
@@ -299,13 +556,7 @@ async def report_trends(
     limit: int = Query(90),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Daily trend data from account_performance_daily table.
-    Fallback order:
-      1) True daily history rows
-      2) Daily audit snapshots
-      3) Approximate range-key history
-    """
+    """Daily trend data from exact account_performance_daily rows only."""
     cred = await _get_cred(db, credential_id)
     logger.info("Reports trends: credential_id=%s profile_id=%s", str(cred.id), cred.profile_id)
 
@@ -321,32 +572,6 @@ async def report_trends(
 
     if daily_trend:
         return {"source": "daily_history", "data": daily_trend}
-
-    # Fallback: audit snapshots (one point per day)
-    result = await db.execute(
-        select(AuditSnapshot)
-        .where(
-            AuditSnapshot.credential_id == cred.id,
-            func.date(AuditSnapshot.created_at) >= start_date,
-            func.date(AuditSnapshot.created_at) <= end_date,
-        )
-        .order_by(AuditSnapshot.created_at.asc())
-    )
-    snapshots = result.scalars().all()
-    fallback = _snapshot_rows_to_trend(snapshots)
-    if fallback:
-        if limit and len(fallback) > limit:
-            fallback = fallback[-limit:]
-        return {"source": "audit_snapshots", "data": fallback}
-
-    # Last-resort fallback: approximate per-day trend built from range-key rows.
-    range_trend = await query_account_range_key_trend(
-        db, cred.id, start_date.isoformat(), end_date.isoformat(), profile_id=cred.profile_id
-    )
-    if range_trend:
-        if limit and len(range_trend) > limit:
-            range_trend = range_trend[-limit:]
-        return {"source": "range_history", "data": range_trend}
 
     return {"source": "none", "data": []}
 
@@ -383,17 +608,15 @@ async def generate_report(
     end_str = end_date.isoformat()
     preset = payload.preset if payload.preset in DATE_PRESETS else "this_month"
 
-    campaigns_data = None  # None = not resolved yet, [] = resolved but empty
+    campaigns_data = []
     daily_trend = []
     mcp_report_raw = {}
     report_source = "database"
-    report_pending_id = None  # Track pending report ID for frontend UX
-    service = None
+    report_pending_id = None
+    sync_error = None
 
     # For single-day ranges, use plain ISO date; for multi-day, use range key
     is_single_day = start_str == end_str
-    storage_key = start_str if is_single_day else f"{start_str}__{end_str}"
-    range_key = f"{start_str}__{end_str}"   # Keep for legacy compat
 
     # ── Step 0: Ensure Campaign table has metadata (state, type, budget)
     camp_count_query = select(func.count(Campaign.id)).where(Campaign.credential_id == cred.id)
@@ -412,214 +635,75 @@ async def generate_report(
         except Exception as e:
             logger.warning(f"Campaign auto-sync failed: {e}")
 
-    # ── Step 1: Try MCP report first (user clicked Generate — get fresh data) ──
-    logger.info(f"Report generate: date range {start_str} to {end_str} (preset={preset}, storage_key={storage_key})")
-    try:
-        client = await get_mcp_client_with_fresh_token(cred, db)
-        adv_account_id = await _resolve_advertiser_account_id(db, cred)
-        service = ReportingService(client, advertiser_account_id=adv_account_id)
-
-        # Check for a pending report from a previous request — match by date range
-        # so we don't accidentally resume a report for a different period
-        pending_id = None
-        pending_result = await db.execute(
-            select(Report).where(
-                Report.credential_id == cred.id,
-                Report.status == "pending_mcp",
-                Report.date_range_start == start_str,
-                Report.date_range_end == end_str,
-            ).order_by(Report.created_at.desc()).limit(1)
-        )
-        pending = pending_result.scalar_one_or_none()
-        if pending and pending.raw_response:
-            pending_id = pending.raw_response.get("mcp_report_id")
-            logger.info(f"Resuming pending report {pending_id} for {start_str}–{end_str}")
-
-        mcp_result = await service.generate_mcp_report(
-            start_str, end_str, pending_report_id=pending_id, max_wait=150,
-        )
-
-        # If report returned a pending ID, save it for next time
-        if mcp_result.get("_pending_report_id"):
-            pending_report_id = mcp_result["_pending_report_id"]
-            logger.info(f"Saving pending MCP report ID: {pending_report_id}")
-            if pending:
-                pending.raw_response = {"mcp_report_id": pending_report_id}
-            else:
-                pending_entry = Report(
-                    credential_id=cred.id,
-                    report_type="performance",
-                    ad_product="ALL",
-                    date_range_start=start_str,
-                    date_range_end=end_str,
-                    status="pending_mcp",
-                    raw_response={"mcp_report_id": pending_report_id},
-                )
-                db.add(pending_entry)
-            # Flush so the pending report is saved even if we fall through
-            await db.flush()
-            report_pending_id = pending_report_id
-
-        parsed_rows = service.parse_report_campaign_rows(mcp_result)
-        parsed = service.parse_report_campaigns(mcp_result)
-        has_exact_daily_rows = any(r.get("report_date") for r in parsed_rows)
-
-        if parsed_rows and not is_single_day and not has_exact_daily_rows:
-            backfilled_rows = await service.generate_daily_report_rows(
-                start_str,
-                end_str,
-                max_wait_per_day=180,
-            )
-            if backfilled_rows:
-                parsed_rows = backfilled_rows
-                parsed = service.aggregate_campaign_rows(parsed_rows)
-                logger.info(
-                    "Replaced aggregate range report with %d exact daily row(s) across %s to %s",
-                    len(parsed_rows),
-                    start_str,
-                    end_str,
-                )
-        # "campaigns" key present means MCP completed (even if 0 rows = no data for range)
-        mcp_had_campaigns_key = "campaigns" in mcp_result
-        if parsed or mcp_had_campaigns_key:
-            campaigns_data = parsed or []  # empty list is a valid "no data" result
-            mcp_report_raw = mcp_result
-            report_source = "amazon_ads_api"
-            logger.info(f"MCP returned {len(campaigns_data)} campaigns for {start_str} to {end_str}")
-
-            # Merge campaign state/type from Campaign table (reports don't include state)
-            camp_ids = [c["campaign_id"] for c in campaigns_data if c.get("campaign_id")]
-            if camp_ids:
-                camp_meta_query = select(Campaign).where(
-                    Campaign.credential_id == cred.id,
-                    Campaign.amazon_campaign_id.in_(camp_ids),
-                )
-                if cred.profile_id is not None:
-                    camp_meta_query = camp_meta_query.where(Campaign.profile_id == cred.profile_id)
-                else:
-                    camp_meta_query = camp_meta_query.where(Campaign.profile_id.is_(None))
-                camp_result = await db.execute(camp_meta_query)
-                state_map = {}
-                for c in camp_result.scalars().all():
-                    state_map[c.amazon_campaign_id] = {
-                        "state": c.state,
-                        "campaign_type": c.campaign_type,
-                        "targeting_type": c.targeting_type,
-                        "daily_budget": c.daily_budget,
-                    }
-                for c in campaigns_data:
-                    meta = state_map.get(c.get("campaign_id"), {})
-                    if not c.get("state"):
-                        c["state"] = meta.get("state", "")
-                    if not c.get("campaign_type"):
-                        c["campaign_type"] = meta.get("campaign_type", "")
-                    if not c.get("targeting_type"):
-                        c["targeting_type"] = meta.get("targeting_type", "")
-                    if not c.get("daily_budget"):
-                        c["daily_budget"] = meta.get("daily_budget", 0)
-
-            # Mark pending report as completed
-            if pending:
-                pending.status = "completed"
-                pending.completed_at = utcnow()
-
-            # Persist to daily tables (only if there's data)
-            if parsed_rows:
-                stored_groups = await store_campaign_rows_by_date(
-                    db, cred.id, parsed_rows, storage_key, source="mcp_report", profile_id=cred.profile_id
-                )
-                logger.info(
-                    "Stored %d report rows across %d date key(s) from MCP",
-                    len(parsed_rows),
-                    stored_groups,
-                )
-    except Exception as e:
-        logger.warning(f"MCP report failed, trying fallback: {e}")
-
-    # ── Step 2: If MCP failed entirely (not resolved), check daily tables ──
-    if campaigns_data is None:
-        if not is_single_day and service is not None:
-            try:
-                backfilled_rows = await service.generate_daily_report_rows(
-                    start_str,
-                    end_str,
-                    max_wait_per_day=180,
-                )
-            except Exception as e:
-                logger.warning(f"Exact daily backfill failed: {e}")
-                backfilled_rows = []
-            if backfilled_rows:
-                campaigns_data = service.aggregate_campaign_rows(backfilled_rows)
-                report_source = "amazon_ads_api"
-                await store_campaign_rows_by_date(
-                    db, cred.id, backfilled_rows, storage_key, source="mcp_report", profile_id=cred.profile_id
-                )
-                logger.info(
-                    "Backfilled %d exact daily row(s) for %s to %s after range report miss",
-                    len(backfilled_rows),
-                    start_str,
-                    end_str,
-                )
-
-    if campaigns_data is None:
-        # Prefer real daily rows when available.
-        cached = await query_campaign_daily(db, cred.id, start_str, end_str, profile_id=cred.profile_id)
-        if cached:
-            campaigns_data = cached
-            report_source = "daily_history"
-            logger.info(f"Found {len(campaigns_data)} campaigns in daily cache for {start_str} to {end_str}")
-
-        # Try legacy range-key matching when no daily rows exist.
-        if not cached:
-            encompassing = await find_encompassing_range_data(db, cred.id, start_str, end_str, profile_id=cred.profile_id)
-            if encompassing:
-                campaigns_data = encompassing
-                report_source = "daily_history"
-                logger.info(f"Found {len(campaigns_data)} campaigns from range match")
-
-    # ── Step 3: Fallback to cached campaigns table ────────────────────
-    # Only if MCP failed entirely (campaigns_data is still None).
-    # If MCP returned [] (empty), that's the real answer — no data for this range.
-    if campaigns_data is None:
-        camp_fallback = select(Campaign).where(Campaign.credential_id == cred.id)
-        if cred.profile_id is not None:
-            camp_fallback = camp_fallback.where(Campaign.profile_id == cred.profile_id)
-        else:
-            camp_fallback = camp_fallback.where(Campaign.profile_id.is_(None))
-        camp_fallback = camp_fallback.order_by(Campaign.spend.desc().nullslast())
-        result = await db.execute(camp_fallback)
-        campaigns = result.scalars().all()
-        campaign_list = enrich_campaigns([_campaign_to_dict(c) for c in campaigns])
-
-        if campaign_list:
-            campaigns_data = campaign_list
-            report_source = "campaign_cache"
-            logger.info(f"Using campaign cache fallback ({len(campaigns_data)} campaigns)")
-        else:
-            campaigns_data = []
-
-    # Ensure campaigns_data is always a list at this point
-    campaigns_data = campaigns_data or []
-
-    # Get daily trend for the period
-    daily_trend = await query_account_daily_trend(
-        db, cred.id, start_str, end_str, profile_id=cred.profile_id
+    logger.info("Report generate: date range %s to %s (preset=%s)", start_str, end_str, preset)
+    exact_daily_ready, synced_days, expected_days = await _get_exact_daily_coverage(
+        db,
+        cred.id,
+        start_str,
+        end_str,
+        profile_id=cred.profile_id,
     )
-    if not daily_trend:
-        snap_result = await db.execute(
-            select(AuditSnapshot)
-            .where(
-                AuditSnapshot.credential_id == cred.id,
-                func.date(AuditSnapshot.created_at) >= start_date,
-                func.date(AuditSnapshot.created_at) <= end_date,
+    sync_job = await _find_report_sync_job(
+        db,
+        cred.id,
+        start_str,
+        end_str,
+        profile_id=cred.profile_id,
+    )
+
+    if exact_daily_ready:
+        campaigns_data = await query_campaign_daily(
+            db,
+            cred.id,
+            start_str,
+            end_str,
+            profile_id=cred.profile_id,
+        )
+        daily_trend = await query_account_daily_trend(
+            db,
+            cred.id,
+            start_str,
+            end_str,
+            profile_id=cred.profile_id,
+        )
+        report_source = "daily_history"
+    else:
+        report_source = "sync_pending"
+        recent_failed = (
+            sync_job
+            and sync_job.status == "failed"
+            and sync_job.completed_at
+            and (utcnow() - sync_job.completed_at).total_seconds() < 120
+        )
+        if sync_job and sync_job.status in ("pending", "running"):
+            report_pending_id = str(sync_job.id)
+        elif recent_failed:
+            sync_error = (sync_job.report_data or {}).get("message") or (sync_job.raw_response or {}).get("error")
+            report_source = "sync_failed"
+        else:
+            sync_job = Report(
+                credential_id=cred.id,
+                report_type="performance_sync",
+                ad_product="ALL",
+                date_range_start=start_str,
+                date_range_end=end_str,
+                status="pending",
+                raw_response={
+                    "profile_id": cred.profile_id,
+                    "step": "Queued exact daily sync...",
+                    "progress_pct": 0,
+                    "days_synced": synced_days,
+                    "days_total": expected_days,
+                },
             )
-            .order_by(AuditSnapshot.created_at.asc())
-        )
-        daily_trend = _snapshot_rows_to_trend(snap_result.scalars().all())
-    if not daily_trend:
-        daily_trend = await query_account_range_key_trend(
-            db, cred.id, start_str, end_str, profile_id=cred.profile_id
-        )
+            db.add(sync_job)
+            await db.flush()
+            report_pending_id = str(sync_job.id)
+            await db.commit()
+            asyncio.create_task(_run_report_sync_background(sync_job.id))
+
+        campaigns_data = []
+        daily_trend = []
 
     # ── Compute summary ───────────────────────────────────────────────
     summary = compute_metrics(campaigns_data)
@@ -665,14 +749,7 @@ async def generate_report(
         state_breakdown[s]["spend"] += c.get("spend", 0)
         state_breakdown[s]["sales"] += c.get("sales", 0)
 
-    # When report is pending and we fell back to campaign_cache, data may not match the requested range
-    data_may_not_match = (
-        report_pending_id is not None and report_source == "campaign_cache"
-    )
-    if data_may_not_match:
-        logger.warning(
-            f"Report pending but using campaign_cache fallback — data may not match {start_str}–{end_str}"
-        )
+    data_may_not_match = False
 
     response = {
         "period": {
@@ -694,6 +771,7 @@ async def generate_report(
         "report_pending": report_pending_id is not None,
         "report_pending_id": report_pending_id,
         "data_may_not_match_range": data_may_not_match,
+        "sync_error": sync_error,
     }
 
     # ── Comparison period ─────────────────────────────────────────────
@@ -705,76 +783,65 @@ async def generate_report(
         comp_start_str = comp_start.isoformat()
         comp_end_str = comp_end.isoformat()
         comp_campaigns = []
-        comp_source = "database"
+        comp_source = "unavailable"
         comp_daily_trend = []
+        comp_exact_ready, comp_synced_days, comp_expected_days = await _get_exact_daily_coverage(
+            db,
+            cred.id,
+            comp_start_str,
+            comp_end_str,
+            profile_id=cred.profile_id,
+        )
 
-        comp_is_single_day = comp_start_str == comp_end_str
-        comp_storage_key = comp_start_str if comp_is_single_day else f"{comp_start_str}__{comp_end_str}"
-        comp_range_key = f"{comp_start_str}__{comp_end_str}"
-
-        # Try MCP first for comparison period too
-        try:
-            if report_source == "amazon_ads_api":
-                comp_result = await service.generate_mcp_report(comp_start_str, comp_end_str)
-                comp_rows = service.parse_report_campaign_rows(comp_result)
-                comp_parsed = service.parse_report_campaigns(comp_result)
-                if comp_rows and comp_start_str != comp_end_str and not any(r.get("report_date") for r in comp_rows):
-                    backfilled_comp_rows = await service.generate_daily_report_rows(
-                        comp_start_str,
-                        comp_end_str,
-                        max_wait_per_day=180,
-                    )
-                    if backfilled_comp_rows:
-                        comp_rows = backfilled_comp_rows
-                        comp_parsed = service.aggregate_campaign_rows(comp_rows)
-                if comp_parsed:
-                    comp_campaigns = comp_parsed
-                    comp_source = "amazon_ads_api"
-                    await store_campaign_rows_by_date(
-                        db, cred.id, comp_rows or comp_campaigns, comp_storage_key, source="mcp_report", profile_id=cred.profile_id
-                    )
-        except Exception as e:
-            logger.warning(f"Comparison MCP report failed: {e}")
-
-        # Fallback to cached daily tables
-        if not comp_campaigns:
+        if comp_exact_ready:
             comp_campaigns = await query_campaign_daily(
                 db, cred.id, comp_start_str, comp_end_str, profile_id=cred.profile_id
             )
-            if not comp_campaigns:
-                comp_campaigns = await find_encompassing_range_data(
-                    db, cred.id, comp_start_str, comp_end_str, profile_id=cred.profile_id
-                )
-            if comp_campaigns:
-                comp_source = "daily_history"
-
-        if not comp_campaigns:
-            comp_source = "unavailable"
-            comp_summary = {}
-            deltas = {}
-            comp_daily_trend = []
-        else:
+            comp_source = "daily_history"
             comp_summary = compute_metrics(comp_campaigns)
             deltas = compute_deltas(summary, comp_summary)
-
             comp_daily_trend = await query_account_daily_trend(
                 db, cred.id, comp_start_str, comp_end_str, profile_id=cred.profile_id
             )
-            if not comp_daily_trend:
-                comp_snapshots = await db.execute(
-                    select(AuditSnapshot)
-                    .where(
-                        AuditSnapshot.credential_id == cred.id,
-                        func.date(AuditSnapshot.created_at) >= comp_start,
-                        func.date(AuditSnapshot.created_at) <= comp_end,
-                    )
-                    .order_by(AuditSnapshot.created_at.asc())
+        else:
+            comp_summary = {}
+            deltas = {}
+            comp_job = await _find_report_sync_job(
+                db,
+                cred.id,
+                comp_start_str,
+                comp_end_str,
+                profile_id=cred.profile_id,
+            )
+            comp_recent_failed = (
+                comp_job
+                and comp_job.status == "failed"
+                and comp_job.completed_at
+                and (utcnow() - comp_job.completed_at).total_seconds() < 120
+            )
+            if comp_job and comp_job.status in ("pending", "running"):
+                report_pending_id = report_pending_id or str(comp_job.id)
+            elif not comp_recent_failed:
+                comp_job = Report(
+                    credential_id=cred.id,
+                    report_type="performance_sync",
+                    ad_product="ALL",
+                    date_range_start=comp_start_str,
+                    date_range_end=comp_end_str,
+                    status="pending",
+                    raw_response={
+                        "profile_id": cred.profile_id,
+                        "step": "Queued exact daily sync...",
+                        "progress_pct": 0,
+                        "days_synced": comp_synced_days,
+                        "days_total": comp_expected_days,
+                    },
                 )
-                comp_daily_trend = _snapshot_rows_to_trend(comp_snapshots.scalars().all())
-            if not comp_daily_trend:
-                comp_daily_trend = await query_account_range_key_trend(
-                    db, cred.id, comp_start_str, comp_end_str, profile_id=cred.profile_id
-                )
+                db.add(comp_job)
+                await db.flush()
+                report_pending_id = report_pending_id or str(comp_job.id)
+                await db.commit()
+                asyncio.create_task(_run_report_sync_background(comp_job.id))
 
         response["comparison"] = {
             "period": {
@@ -788,9 +855,13 @@ async def generate_report(
             "source": comp_source,
             "unavailable": comp_source == "unavailable",
         }
+        response["report_pending"] = report_pending_id is not None
+        response["report_pending_id"] = report_pending_id
 
     # ── Save to reports table ─────────────────────────────────────────
     try:
+        if response["report_pending"] or sync_error:
+            return response
         report = Report(
             credential_id=cred.id,
             report_type="performance",
@@ -845,7 +916,10 @@ async def report_history(
 
     result = await db.execute(
         select(Report)
-        .where(Report.credential_id == cred.id)
+        .where(
+            Report.credential_id == cred.id,
+            Report.report_type != "performance_sync",
+        )
         .order_by(Report.created_at.desc())
         .limit(limit)
     )

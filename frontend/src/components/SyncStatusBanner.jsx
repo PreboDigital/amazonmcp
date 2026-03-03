@@ -166,7 +166,7 @@ export default function SyncStatusBanner() {
           <div className="flex-1 min-w-0">
             {isRunning && (
               <p className="text-sm font-medium text-cyan-900">
-                Generating campaign performance report... Report is processing at Amazon. You can navigate away.
+                Syncing exact daily campaign performance... You can navigate away.
               </p>
             )}
             {isSuccess && (

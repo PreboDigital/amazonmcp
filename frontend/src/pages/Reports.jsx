@@ -1415,8 +1415,7 @@ export default function Reports() {
 
   const hasComparison = compare && !!reportData?.comparison && !reportData?.comparison?.unavailable
   const hasData = activeSummary && Object.keys(activeSummary).length > 0
-  const isEmptyApiResult = reportData?.report_source === 'amazon_ads_api' && (!reportData?.campaigns?.length)
-  const isCacheData = reportData?.report_source === 'campaign_cache'
+  const isEmptyApiResult = reportData?.report_source === 'daily_history' && (!reportData?.campaigns?.length)
 
   // Chart data for campaign breakdown
   const topCampaignChart = useMemo(() => {
@@ -1484,11 +1483,14 @@ export default function Reports() {
           <div className="flex items-center gap-2 text-xs text-slate-400">
             <Clock size={12} />
             <span>Generated {new Date(reportData.generated_at).toLocaleString()}</span>
-            {reportData.report_source === 'amazon_ads_api' && (
-              <span className="badge-blue">Live Data</span>
+            {reportData.report_source === 'daily_history' && (
+              <span className="badge-blue">Exact Daily Data</span>
             )}
-            {reportData.report_source === 'database' && (
-              <span className="badge-gray">Cached Data</span>
+            {reportData.report_source === 'sync_pending' && (
+              <span className="badge-gray">Syncing</span>
+            )}
+            {reportData.report_source === 'sync_failed' && (
+              <span className="badge-red">Sync Failed</span>
             )}
           </div>
         )}
@@ -1600,10 +1602,10 @@ export default function Reports() {
         <div className="card bg-amber-50 border-amber-200 p-4 flex items-center gap-3">
           <Loader2 size={16} className="text-amber-500 shrink-0 animate-spin" />
           <div className="flex-1">
-            <p className="text-sm font-medium text-amber-800">Report is still processing at Amazon</p>
+            <p className="text-sm font-medium text-amber-800">Syncing exact daily performance</p>
             <p className="text-xs text-amber-600 mt-0.5">
-              Amazon Ads reports can take 2-5 minutes to generate. Showing cached data in the meantime.
-              Click "Generate Report" again to check if it's ready.
+              The backend is fetching exact daily rows for this range so charts and comparisons stay reliable.
+              You can navigate away and check back when sync completes.
             </p>
           </div>
           <button
@@ -1620,13 +1622,11 @@ export default function Reports() {
         </div>
       )}
 
-      {/* Cached data may not match selected date range (report pending + campaign cache fallback) */}
-      {reportData?.data_may_not_match_range && (
+      {reportData?.sync_error && (
         <div className="card bg-amber-50 border-amber-200 p-4 flex items-center gap-3">
           <AlertTriangle size={16} className="text-amber-500 shrink-0" />
           <p className="text-sm text-amber-800 flex-1">
-            Report is still processing. The numbers shown may not match the selected date range.
-            Click &quot;Generate Report&quot; again when ready to refresh with accurate data.
+            Exact daily sync failed for this range. {reportData.sync_error}
           </p>
         </div>
       )}
@@ -1780,12 +1780,8 @@ export default function Reports() {
           title="Spend vs Sales Trend"
           subtitle={
             trendData.length > 0
-              ? trendSource === 'range_history'
-                ? `${trendData.length} data point${trendData.length > 1 ? 's' : ''} — built from saved report ranges (approx.)`
-                : trendSource === 'audit_snapshots'
-                  ? `${trendData.length} data point${trendData.length > 1 ? 's' : ''} — built from audit snapshots`
-                : `${trendData.length} data point${trendData.length > 1 ? 's' : ''} — daily trend history`
-              : 'Run audits or generate reports to build trend data'
+              ? `${trendData.length} data point${trendData.length > 1 ? 's' : ''} — exact daily history`
+              : 'Generate a report to sync exact daily history'
           }
         >
           {trendData.length > 0 ? (

@@ -674,11 +674,7 @@ export default function Dashboard() {
             <h2 className="text-sm font-semibold text-slate-900">Daily Spend vs Sales</h2>
             <p className="text-xs text-slate-400 mt-0.5">
               {dashboardTrend.length > 0
-                ? dashboardTrendSource === 'range_history'
-                  ? `${dashboardTrend.length} points · approximate range-history fallback`
-                  : dashboardTrendSource === 'audit_snapshots'
-                    ? `${dashboardTrend.length} points · audit snapshot fallback`
-                    : `${dashboardTrend.length} points · true daily history`
+                ? `${dashboardTrend.length} points · exact daily history`
                 : 'No trend data yet'}
             </p>
           </div>
