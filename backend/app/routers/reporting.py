@@ -160,6 +160,43 @@ async def _find_report_sync_job(
     return None
 
 
+async def _finalize_report_sync_job_if_ready(
+    db: AsyncSession,
+    sync_job: Optional[Report],
+    profile_id: Optional[str],
+    synced_days: int,
+    expected_days: int,
+) -> None:
+    """
+    If exact daily coverage already exists, stale/racing performance_sync jobs
+    should no longer keep the UI in a pending state.
+    """
+    if not sync_job or sync_job.status not in ("pending", "running"):
+        return
+
+    raw = dict(sync_job.raw_response or {})
+    if raw.get("profile_id") != profile_id:
+        return
+
+    sync_job.status = "completed"
+    sync_job.completed_at = utcnow()
+    sync_job.report_data = {
+        "status": "completed",
+        "days_synced": synced_days,
+        "days_total": expected_days,
+        "profile_id": profile_id,
+        "completed_from": "coverage_check",
+    }
+    raw.update({
+        "step": "Completed",
+        "progress_pct": 100,
+        "days_synced": synced_days,
+        "days_total": expected_days,
+    })
+    sync_job.raw_response = raw
+    await db.commit()
+
+
 async def _clear_exact_daily_slice(
     db: AsyncSession,
     credential_id,
@@ -657,6 +694,13 @@ async def generate_report(
     )
 
     if exact_daily_ready:
+        await _finalize_report_sync_job_if_ready(
+            db,
+            sync_job,
+            cred.profile_id,
+            synced_days,
+            expected_days,
+        )
         campaigns_data = await query_campaign_daily(
             db,
             cred.id,
@@ -797,8 +841,22 @@ async def generate_report(
             comp_end_str,
             profile_id=cred.profile_id,
         )
+        comp_job = await _find_report_sync_job(
+            db,
+            cred.id,
+            comp_start_str,
+            comp_end_str,
+            profile_id=cred.profile_id,
+        )
 
         if comp_exact_ready:
+            await _finalize_report_sync_job_if_ready(
+                db,
+                comp_job,
+                cred.profile_id,
+                comp_synced_days,
+                comp_expected_days,
+            )
             comp_campaigns = await query_campaign_daily(
                 db, cred.id, comp_start_str, comp_end_str, profile_id=cred.profile_id
             )
@@ -811,13 +869,6 @@ async def generate_report(
         else:
             comp_summary = {}
             deltas = {}
-            comp_job = await _find_report_sync_job(
-                db,
-                cred.id,
-                comp_start_str,
-                comp_end_str,
-                profile_id=cred.profile_id,
-            )
             comp_recent_failed = (
                 comp_job
                 and comp_job.status == "failed"
