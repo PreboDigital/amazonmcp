@@ -38,6 +38,21 @@ class AmazonAdsMCP:
         self.region = region.lower()
         self.profile_id = profile_id
         self.account_id = account_id
+        self.advertiser_account_id: Optional[str] = None
+
+    def set_advertiser_account_id(self, advertiser_account_id: Optional[str]) -> None:
+        """Store the active advertiser account for MCP body scoping."""
+        self.advertiser_account_id = advertiser_account_id
+
+    def _apply_access_requested_account(self, body: dict) -> dict:
+        """Attach Amazon's required account scope to campaign-management queries."""
+        if not self.advertiser_account_id or body.get("accessRequestedAccount"):
+            return body
+        scoped_body = dict(body)
+        scoped_body["accessRequestedAccount"] = {
+            "advertiserAccountId": self.advertiser_account_id
+        }
+        return scoped_body
 
     @property
     def url(self) -> str:
@@ -341,6 +356,7 @@ class AmazonAdsMCP:
         if ad_product:
             body = dict(filters or {})
             body["adProductFilter"] = {"include": [ad_product]}
+            body = self._apply_access_requested_account(body)
             items = await self._paginated_query(
                 "campaign_management-query_campaign", body, "campaigns"
             )
@@ -351,6 +367,7 @@ class AmazonAdsMCP:
 
         body = dict(filters or {})
         body["adProductFilter"] = {"include": ["SPONSORED_PRODUCTS"]}
+        body = self._apply_access_requested_account(body)
         items = await self._paginated_query(
             "campaign_management-query_campaign", body, "campaigns"
         )
@@ -368,6 +385,7 @@ class AmazonAdsMCP:
             try:
                 body = dict(filters or {})
                 body["adProductFilter"] = {"include": [ap]}
+                body = self._apply_access_requested_account(body)
                 campaigns = await self._paginated_query(
                     "campaign_management-query_campaign", body, "campaigns"
                 )
@@ -391,6 +409,7 @@ class AmazonAdsMCP:
         body = {"adProductFilter": {"include": [ad_product]}}
         if campaign_id:
             body["campaignIdFilter"] = {"include": [campaign_id]}
+        body = self._apply_access_requested_account(body)
         items = await self._paginated_query(
             "campaign_management-query_ad_group", body, "adGroups"
         )
@@ -426,6 +445,7 @@ class AmazonAdsMCP:
             body["campaignIdFilter"] = {"include": [campaign_id]}
         if ad_group_id:
             body["adGroupIdFilter"] = {"include": [ad_group_id]}
+        body = self._apply_access_requested_account(body)
         items = await self._paginated_query(
             "campaign_management-query_target", body, "targets"
         )
@@ -465,6 +485,7 @@ class AmazonAdsMCP:
             body["campaignIdFilter"] = {"include": [campaign_id]}
         if ad_group_id:
             body["adGroupIdFilter"] = {"include": [ad_group_id]}
+        body = self._apply_access_requested_account(body)
         items = await self._paginated_query(
             "campaign_management-query_ad", body, "ads"
         )
@@ -897,10 +918,39 @@ class AmazonAdsMCP:
             logger.info(f"Report created: {data}")
             # v3 API returns {"reportId": "xxx", "status": "PENDING", ...}
             return {"success": [{"report": data}]}
-        else:
-            error_text = resp.text[:500]
-            logger.error(f"Search term report creation failed: {resp.status_code} - {error_text}")
-            raise MCPError(f"Search term report API error ({resp.status_code}): {error_text}")
+
+        error_text = resp.text[:500]
+        logger.error(
+            "Search term report creation failed: %s - %s",
+            resp.status_code,
+            error_text,
+        )
+
+        if resp.status_code in (401, 403) and advertiser_account_id:
+            logger.warning(
+                "Direct v3 search term report was rejected; retrying via MCP create_report "
+                "with advertiser account scope"
+            )
+            report_config = {
+                "reports": [
+                    {
+                        "format": "GZIP_JSON",
+                        "periods": [
+                            {"datePeriod": {"startDate": start_date, "endDate": end_date}}
+                        ],
+                        "reportTypeId": report_type_id,
+                        "groupBy": ["searchTerm"],
+                        "columns": columns or default_columns,
+                        "timeUnit": time_unit,
+                    }
+                ]
+            }
+            return await self.create_report(
+                report_config,
+                advertiser_account_id=advertiser_account_id,
+            )
+
+        raise MCPError(f"Search term report API error ({resp.status_code}): {error_text}")
 
     async def create_advertised_product_report(
         self,

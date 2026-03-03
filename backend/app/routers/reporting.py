@@ -899,6 +899,8 @@ async def sync_search_terms(
     pending_report_id that can be passed on the next call to resume.
     """
     cred = await _get_cred(db, payload.credential_id)
+    cred_id = cred.id
+    cred_profile_id = cred.profile_id
 
     # Get MCP client with fresh token
     client = await get_mcp_client_with_fresh_token(cred, db)
@@ -912,17 +914,17 @@ async def sync_search_terms(
     service = SearchTermService(client, advertiser_account_id)
     result = await service.sync_search_terms(
         db=db,
-        credential_id=cred.id,
+        credential_id=cred_id,
         start_date=payload.start_date,
         end_date=payload.end_date,
         ad_product=payload.ad_product,
         pending_report_id=payload.pending_report_id,
-        profile_id=cred.profile_id,
+        profile_id=cred_profile_id,
     )
 
     # Log activity
     db.add(ActivityLog(
-        credential_id=cred.id,
+        credential_id=cred_id,
         action="search_term_sync",
         category="reporting",
         description=f"Search term sync: {result.get('status', '?')} — {result.get('rows_stored', 0)} rows",

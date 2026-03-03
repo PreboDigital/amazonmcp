@@ -35,6 +35,8 @@ class SearchTermService:
     ):
         self.client = client
         self.advertiser_account_id = advertiser_account_id
+        if advertiser_account_id:
+            self.client.set_advertiser_account_id(advertiser_account_id)
 
     async def sync_search_terms(
         self,

@@ -1039,6 +1039,8 @@ class ReportingService:
     def __init__(self, client: Optional[AmazonAdsMCP] = None, advertiser_account_id: Optional[str] = None):
         self.client = client
         self.advertiser_account_id = advertiser_account_id
+        if self.client and advertiser_account_id:
+            self.client.set_advertiser_account_id(advertiser_account_id)
 
     async def generate_mcp_report(
         self,

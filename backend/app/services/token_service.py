@@ -7,8 +7,9 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 import httpx
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models import Credential
+from app.models import Account, Credential
 from app.mcp_client import create_mcp_client, AmazonAdsMCP
 from app.crypto import decrypt_value
 
@@ -121,10 +122,26 @@ async def get_mcp_client_with_fresh_token(
     cred = await ensure_fresh_token(cred, db)
 
     profile_id = profile_id_override if profile_id_override is not None else cred.profile_id
-    return create_mcp_client(
+    client = create_mcp_client(
         client_id=cred.client_id,
         access_token=decrypt_value(cred.access_token),
         region=cred.region,
         profile_id=profile_id,
         account_id=cred.account_id,
     )
+    if profile_id is not None:
+        result = await db.execute(
+            select(Account).where(
+                Account.credential_id == cred.id,
+                Account.profile_id == profile_id,
+            )
+        )
+        active_account = result.scalar_one_or_none()
+        advertiser_account_id = (
+            active_account.raw_data.get("advertiserAccountId")
+            if active_account and active_account.raw_data
+            else None
+        )
+        if advertiser_account_id:
+            client.set_advertiser_account_id(advertiser_account_id)
+    return client
