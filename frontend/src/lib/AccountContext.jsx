@@ -34,14 +34,40 @@ export function AccountProvider({ children }) {
 
       // Determine the active account
       const storedId = localStorage.getItem('activeAccountId')
+      const credsById = new Map(credsList.map((cred) => [cred.id, cred]))
 
       if (profilesList.length > 0) {
-        // Use discovered profiles as accounts
-        const match =
-          profilesList.find((a) => a.id === storedId) ||
-          profilesList[0] ||
-          null
+        const storedAccount = storedId
+          ? profilesList.find((a) => a.id === storedId) || null
+          : null
+        let resolvedStoredAccount = storedAccount
+
+        // Backend state is authoritative for data scoping. If localStorage points
+        // to a different profile, reconcile the backend first so UI and API match.
+        if (storedAccount) {
+          const parentCred = credsById.get(storedAccount.credential_id)
+          const backendMatchesStored = parentCred?.profile_id === storedAccount.profile_id
+
+          if (!backendMatchesStored && storedAccount.profile_id) {
+            try {
+              await accountsApi.setActive(storedAccount.id)
+              if (parentCred) parentCred.profile_id = storedAccount.profile_id
+            } catch (err) {
+              console.error('Failed to reconcile active account on load:', err)
+              resolvedStoredAccount = null
+            }
+          }
+        }
+
+        const backendActive =
+          profilesList.find((acct) => {
+            const parentCred = credsById.get(acct.credential_id)
+            return parentCred?.profile_id && parentCred.profile_id === acct.profile_id
+          }) || null
+
+        const match = resolvedStoredAccount || backendActive || profilesList[0] || null
         setActiveAccount(match)
+        if (match?.id) localStorage.setItem('activeAccountId', match.id)
       } else if (credsList.length > 0) {
         // Fallback: no profiles discovered yet, use credential as placeholder
         const defaultCred = credsList.find((c) => c.is_default) || credsList[0]
@@ -76,9 +102,15 @@ export function AccountProvider({ children }) {
         await accountsApi.setActive(account.id)
       } catch (err) {
         console.error('Failed to set active account:', err)
+        return
       }
     }
     setActiveAccount(account)
+    setCreds((prev) => prev.map((cred) => (
+      cred.id === account.credential_id
+        ? { ...cred, profile_id: account.profile_id || null }
+        : cred
+    )))
     localStorage.setItem('activeAccountId', account.id)
   }
 
