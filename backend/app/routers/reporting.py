@@ -468,7 +468,7 @@ async def generate_report(
             backfilled_rows = await service.generate_daily_report_rows(
                 start_str,
                 end_str,
-                max_wait_per_day=45,
+                max_wait_per_day=180,
             )
             if backfilled_rows:
                 parsed_rows = backfilled_rows
@@ -543,7 +543,7 @@ async def generate_report(
                 backfilled_rows = await service.generate_daily_report_rows(
                     start_str,
                     end_str,
-                    max_wait_per_day=45,
+                    max_wait_per_day=180,
                 )
             except Exception as e:
                 logger.warning(f"Exact daily backfill failed: {e}")
@@ -722,7 +722,7 @@ async def generate_report(
                     backfilled_comp_rows = await service.generate_daily_report_rows(
                         comp_start_str,
                         comp_end_str,
-                        max_wait_per_day=45,
+                        max_wait_per_day=180,
                     )
                     if backfilled_comp_rows:
                         comp_rows = backfilled_comp_rows

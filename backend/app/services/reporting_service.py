@@ -1168,7 +1168,7 @@ class ReportingService:
         self,
         start_date: str,
         end_date: str,
-        max_wait_per_day: int = 45,
+        max_wait_per_day: int = 180,
     ) -> list[dict]:
         """
         Backfill exact per-day campaign rows by issuing one report request per day.
@@ -1185,14 +1185,28 @@ class ReportingService:
         while current <= end:
             day_str = current.isoformat()
             logger.info("Backfilling exact daily campaign report for %s", day_str)
-            day_result = await self.generate_mcp_report(
-                day_str,
-                day_str,
-                max_wait=max_wait_per_day,
-            )
+            pending_report_id = None
+            day_result: dict = {}
+            attempts = 0
+            while attempts < 3:
+                attempts += 1
+                day_result = await self.generate_mcp_report(
+                    day_str,
+                    day_str,
+                    pending_report_id=pending_report_id,
+                    max_wait=max_wait_per_day,
+                )
+                pending_report_id = day_result.get("_pending_report_id")
+                if not pending_report_id:
+                    break
+                logger.info(
+                    "Daily backfill report for %s still pending after attempt %s; retrying poll",
+                    day_str,
+                    attempts,
+                )
             if day_result.get("_pending_report_id"):
                 logger.warning(
-                    "Daily backfill report for %s is still pending; skipping exact daily backfill",
+                    "Daily backfill report for %s did not complete after retries; skipping exact daily backfill",
                     day_str,
                 )
                 return []
