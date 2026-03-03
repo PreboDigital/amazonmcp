@@ -401,6 +401,8 @@ export default function CampaignManager() {
   const [sortDir, setSortDir] = useState('asc')
   const [error, setError] = useState(null)
   const [successMsg, setSuccessMsg] = useState(null)
+  const [targetSortBy, setTargetSortBy] = useState('expression_value')
+  const [targetSortDir, setTargetSortDir] = useState('asc')
 
   // Bulk selection
   const [selectedCampaignIds, setSelectedCampaignIds] = useState(new Set())
@@ -490,8 +492,8 @@ export default function CampaignManager() {
     setError(null)
     try {
       const opts = dateRange.preset === 'custom' && dateRange.start && dateRange.end
-        ? { date_from: dateRange.start, date_to: dateRange.end }
-        : { preset: dateRange.preset || 'this_month' }
+        ? { date_from: dateRange.start, date_to: dateRange.end, sort_by: targetSortBy, sort_dir: targetSortDir }
+        : { preset: dateRange.preset || 'this_month', sort_by: targetSortBy, sort_dir: targetSortDir }
       const data = await campaignManager.listTargets(adGroupId, activeAccountId, opts)
       setTargets(data.targets || [])
     } catch (err) {
@@ -499,7 +501,7 @@ export default function CampaignManager() {
     } finally {
       setLoading(false)
     }
-  }, [activeAccountId, dateRange.preset, dateRange.start, dateRange.end])
+  }, [activeAccountId, dateRange.preset, dateRange.start, dateRange.end, targetSortBy, targetSortDir])
 
   const loadAds = useCallback(async (adGroupId) => {
     try {
@@ -539,7 +541,7 @@ export default function CampaignManager() {
       loadTargets(selectedAdGroup.amazon_ad_group_id)
       loadAds(selectedAdGroup.amazon_ad_group_id)
     }
-  }, [dateRange.preset, dateRange.start, dateRange.end]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [dateRange.preset, dateRange.start, dateRange.end, targetSortBy, targetSortDir]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Navigation helpers ──────────────────────────────────────────
   function openCampaign(campaign) {
@@ -877,8 +879,8 @@ export default function CampaignManager() {
         setModalSaving(true)
         try {
           const updates = {}
-          if (vals.bid) updates.bid = parseFloat(vals.bid)
-          if (vals.state) updates.state = vals.state
+          if (vals.bid !== '' && vals.bid != null) updates.bid = parseFloat(vals.bid)
+          if (vals.state) updates.state = vals.state.toUpperCase()
           await campaignManager.updateTarget(target.amazon_target_id, updates, activeAccountId, skipApproval)
           setSuccessMsg(skipApproval ? 'Target updated directly on Amazon' : 'Target update sent to approval queue')
           setTimeout(() => setSuccessMsg(null), 4000)
@@ -1116,6 +1118,15 @@ export default function CampaignManager() {
 
   function toggleSelectAllTargets(checked) {
     setSelectedTargetIds(checked ? new Set(targets.map(t => t.amazon_target_id)) : new Set())
+  }
+
+  function toggleTargetSort(col) {
+    if (targetSortBy === col) {
+      setTargetSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    } else {
+      setTargetSortBy(col)
+      setTargetSortDir(col === 'expression_value' || col === 'match_type' || col === 'state' ? 'asc' : 'desc')
+    }
   }
 
   function toggleSelectAllAds(checked) {
@@ -1940,15 +1951,69 @@ export default function CampaignManager() {
                 <div className="hidden sm:grid sm:grid-cols-12 gap-3 px-5 py-2.5 bg-slate-50 text-xs font-semibold text-slate-500 uppercase tracking-wider items-center">
                   <div className="col-span-3 flex items-center gap-2">
                     <input type="checkbox" checked={targets.length > 0 && selectedTargetIds.size === targets.length} onChange={e => toggleSelectAllTargets(e.target.checked)} className="rounded border-slate-300 text-brand-600" />
-                    <span>Target / Keyword</span>
+                    <button onClick={() => toggleTargetSort('expression_value')} className="inline-flex items-center gap-1 hover:text-slate-700 transition-colors">
+                      Target / Keyword
+                      {targetSortBy === 'expression_value' ? (
+                        targetSortDir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />
+                      ) : <ChevronDown size={12} className="text-slate-300" />}
+                    </button>
                   </div>
-                  <div className="col-span-1">Match</div>
-                  <div className="col-span-1">State</div>
-                  <div className="col-span-1 text-right">Bid</div>
-                  <div className="col-span-1 text-right">Clicks</div>
-                  <div className="col-span-1 text-right">Spend</div>
-                  <div className="col-span-1 text-right">Sales</div>
-                  <div className="col-span-1 text-right">ACOS</div>
+                  <div className="col-span-1">
+                    <button onClick={() => toggleTargetSort('match_type')} className="inline-flex items-center gap-1 hover:text-slate-700 transition-colors">
+                      Match
+                      {targetSortBy === 'match_type' ? (
+                        targetSortDir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />
+                      ) : <ChevronDown size={12} className="text-slate-300" />}
+                    </button>
+                  </div>
+                  <div className="col-span-1">
+                    <button onClick={() => toggleTargetSort('state')} className="inline-flex items-center gap-1 hover:text-slate-700 transition-colors">
+                      State
+                      {targetSortBy === 'state' ? (
+                        targetSortDir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />
+                      ) : <ChevronDown size={12} className="text-slate-300" />}
+                    </button>
+                  </div>
+                  <div className="col-span-1 text-right">
+                    <button onClick={() => toggleTargetSort('bid')} className="inline-flex items-center justify-end gap-1 hover:text-slate-700 transition-colors">
+                      Bid
+                      {targetSortBy === 'bid' ? (
+                        targetSortDir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />
+                      ) : <ChevronDown size={12} className="text-slate-300" />}
+                    </button>
+                  </div>
+                  <div className="col-span-1 text-right">
+                    <button onClick={() => toggleTargetSort('clicks')} className="inline-flex items-center justify-end gap-1 hover:text-slate-700 transition-colors">
+                      Clicks
+                      {targetSortBy === 'clicks' ? (
+                        targetSortDir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />
+                      ) : <ChevronDown size={12} className="text-slate-300" />}
+                    </button>
+                  </div>
+                  <div className="col-span-1 text-right">
+                    <button onClick={() => toggleTargetSort('spend')} className="inline-flex items-center justify-end gap-1 hover:text-slate-700 transition-colors">
+                      Spend
+                      {targetSortBy === 'spend' ? (
+                        targetSortDir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />
+                      ) : <ChevronDown size={12} className="text-slate-300" />}
+                    </button>
+                  </div>
+                  <div className="col-span-1 text-right">
+                    <button onClick={() => toggleTargetSort('sales')} className="inline-flex items-center justify-end gap-1 hover:text-slate-700 transition-colors">
+                      Sales
+                      {targetSortBy === 'sales' ? (
+                        targetSortDir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />
+                      ) : <ChevronDown size={12} className="text-slate-300" />}
+                    </button>
+                  </div>
+                  <div className="col-span-1 text-right">
+                    <button onClick={() => toggleTargetSort('acos')} className="inline-flex items-center justify-end gap-1 hover:text-slate-700 transition-colors">
+                      ACOS
+                      {targetSortBy === 'acos' ? (
+                        targetSortDir === 'asc' ? <ChevronUp size={12} /> : <ChevronDown size={12} />
+                      ) : <ChevronDown size={12} className="text-slate-300" />}
+                    </button>
+                  </div>
                   <div className="col-span-1 text-right flex items-center justify-end gap-2">
                     {selectedTargetIds.size > 0 && (
                       <div className="relative">

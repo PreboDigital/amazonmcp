@@ -95,6 +95,8 @@ async def _add_missing_columns(conn):
         ("campaigns", "profile_id", "VARCHAR(255)"),
         ("campaign_performance_daily", "profile_id", "VARCHAR(255)"),
         ("account_performance_daily", "profile_id", "VARCHAR(255)"),
+        ("campaign_performance_daily", "top_of_search_impression_share", "FLOAT"),
+        ("account_performance_daily", "avg_top_of_search_impression_share", "FLOAT"),
         # App settings API keys (encrypted)
         ("app_settings", "openai_api_key", "TEXT"),
         ("app_settings", "anthropic_api_key", "TEXT"),
@@ -112,6 +114,26 @@ async def _add_missing_columns(conn):
             ))
         except Exception as e:
             logger.debug(f"Column addition skipped ({table}.{column}): {e}")
+
+    # Ensure daily performance uniqueness is profile-scoped (prevents cross-profile collisions).
+    # Use COALESCE(profile_id, '') so NULL profile rows are also uniquely enforced.
+    constraint_sql = [
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_cpd_scoped_unique
+        ON campaign_performance_daily (credential_id, COALESCE(profile_id, ''), amazon_campaign_id, date)
+        """,
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_apd_scoped_unique
+        ON account_performance_daily (credential_id, COALESCE(profile_id, ''), date)
+        """,
+        "ALTER TABLE campaign_performance_daily DROP CONSTRAINT IF EXISTS uq_campaign_perf_daily",
+        "ALTER TABLE account_performance_daily DROP CONSTRAINT IF EXISTS uq_account_perf_daily",
+    ]
+    for sql in constraint_sql:
+        try:
+            await conn.execute(text(sql))
+        except Exception as e:
+            logger.debug(f"Constraint/index setup skipped: {e}")
 
 
 async def drop_and_recreate_db():

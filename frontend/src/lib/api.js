@@ -394,6 +394,38 @@ export const reports = {
   },
   searchTermsSummary: (credentialId) =>
     request(`/reports/search-terms/summary${credentialId ? `?credential_id=${credentialId}` : ''}`),
+  // Product/business reports
+  productSync: (credentialId, opts = {}) => request('/reports/products/sync', {
+    method: 'POST',
+    body: JSON.stringify({
+      credential_id: credentialId || null,
+      start_date: opts.startDate || null,
+      end_date: opts.endDate || null,
+      ad_product: opts.adProduct || 'SPONSORED_PRODUCTS',
+      pending_report_id: opts.pendingReportId || null,
+    }),
+  }),
+  products: (credentialId, opts = {}) => {
+    const params = new URLSearchParams()
+    if (credentialId) params.set('credential_id', credentialId)
+    if (opts.preset) params.set('preset', opts.preset)
+    if (opts.startDate) params.set('start_date', opts.startDate)
+    if (opts.endDate) params.set('end_date', opts.endDate)
+    if (opts.limit) params.set('limit', opts.limit)
+    if (opts.sortBy) params.set('sort_by', opts.sortBy)
+    const qs = params.toString()
+    return request(`/reports/products${qs ? `?${qs}` : ''}`)
+  },
+  productSummary: (credentialId, opts = {}) => {
+    const params = new URLSearchParams()
+    if (credentialId) params.set('credential_id', credentialId)
+    if (opts.preset) params.set('preset', opts.preset)
+    if (opts.startDate) params.set('start_date', opts.startDate)
+    if (opts.endDate) params.set('end_date', opts.endDate)
+    if (opts.compare) params.set('compare', 'true')
+    const qs = params.toString()
+    return request(`/reports/products/summary${qs ? `?${qs}` : ''}`)
+  },
 }
 
 // ── Campaign Management ─────────────────────────────────────────────
@@ -486,6 +518,8 @@ export const campaignManager = {
     if (opts.date_from) params.set('date_from', opts.date_from)
     if (opts.date_to) params.set('date_to', opts.date_to)
     if (opts.preset) params.set('preset', opts.preset)
+    if (opts.sort_by) params.set('sort_by', opts.sort_by)
+    if (opts.sort_dir) params.set('sort_dir', opts.sort_dir)
     const qs = params.toString()
     return request(`/campaigns/ad-groups/${amazonAdGroupId}/targets${qs ? `?${qs}` : ''}`)
   },

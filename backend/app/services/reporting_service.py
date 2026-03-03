@@ -18,6 +18,7 @@ from app.models import (
     CampaignPerformanceDaily, AccountPerformanceDaily,
     Campaign, Credential,
 )
+from app.utils import normalize_amazon_date, normalize_state_value
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +158,15 @@ def compute_metrics(campaigns: list) -> dict:
     total_impressions = sum(int(c.get("impressions") or 0) for c in campaigns)
     total_clicks = sum(int(c.get("clicks") or 0) for c in campaigns)
     total_orders = sum(int(c.get("orders") or 0) for c in campaigns)
+    weighted_top_search = 0.0
+    weighted_top_search_den = 0.0
+    for c in campaigns:
+        tos = c.get("top_of_search_impression_share")
+        if tos is None:
+            continue
+        weight = int(c.get("impressions") or 0) or 1
+        weighted_top_search += float(tos) * weight
+        weighted_top_search_den += weight
 
     acos = (total_spend / total_sales * 100) if total_sales > 0 else 0
     roas = (total_sales / total_spend) if total_spend > 0 else 0
@@ -175,15 +185,27 @@ def compute_metrics(campaigns: list) -> dict:
         "ctr": round(ctr, 2),
         "cpc": round(cpc, 2),
         "cvr": round(cvr, 2),
+        "top_of_search_impression_share": round(weighted_top_search / weighted_top_search_den, 2) if weighted_top_search_den > 0 else None,
     }
 
 
 def compute_deltas(current: dict, previous: dict) -> dict:
     """Compute percentage change between two metric dicts."""
     deltas = {}
+
+    def _to_num(value) -> float:
+        if value is None:
+            return 0.0
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
     for key in current:
-        curr = current.get(key, 0)
-        prev = previous.get(key, 0)
+        curr = _to_num(current.get(key))
+        prev = _to_num(previous.get(key))
         if prev != 0:
             deltas[key] = round(((curr - prev) / abs(prev)) * 100, 1)
         else:
@@ -206,6 +228,12 @@ def enrich_campaigns(campaigns: list) -> list:
         row["ctr"] = round(clicks / impressions * 100, 2) if impressions > 0 else 0
         row["cpc"] = round(spend / clicks, 2) if clicks > 0 else 0
         row["cvr"] = round(orders / clicks * 100, 2) if clicks > 0 else 0
+        tos = row.get("top_of_search_impression_share")
+        if tos is not None:
+            try:
+                row["top_of_search_impression_share"] = round(float(tos), 2)
+            except (TypeError, ValueError):
+                row["top_of_search_impression_share"] = None
         enriched.append(row)
     return enriched
 
@@ -247,10 +275,6 @@ async def sync_campaigns_to_db(
             Campaign.credential_id == credential_id,
             Campaign.amazon_campaign_id == str(amazon_id),
         ]
-        if profile_id is not None:
-            lookup.append(Campaign.profile_id == profile_id)
-        else:
-            lookup.append(Campaign.profile_id.is_(None))
         result = await db.execute(select(Campaign).where(and_(*lookup)))
         campaign = result.scalar_one_or_none()
 
@@ -260,7 +284,7 @@ async def sync_campaigns_to_db(
         if not targeting and camp_data.get("autoCreationSettings"):
             auto_targets = camp_data["autoCreationSettings"].get("autoCreateTargets", False)
             targeting = "auto" if auto_targets else "manual"
-        state = camp_data.get("state") or camp_data.get("status")
+        state = normalize_state_value(camp_data.get("state") or camp_data.get("status"), for_storage=True)
 
         budget = camp_data.get("dailyBudget") or camp_data.get("budget")
         if not budget and camp_data.get("budgets"):
@@ -277,8 +301,8 @@ async def sync_campaigns_to_db(
             campaign.targeting_type = targeting or campaign.targeting_type
             campaign.state = state or campaign.state
             campaign.daily_budget = float(budget) if budget else campaign.daily_budget
-            campaign.start_date = camp_data.get("startDate") or camp_data.get("startDateTime") or campaign.start_date
-            campaign.end_date = camp_data.get("endDate") or camp_data.get("endDateTime") or campaign.end_date
+            campaign.start_date = normalize_amazon_date(camp_data.get("startDate") or camp_data.get("startDateTime")) or campaign.start_date
+            campaign.end_date = normalize_amazon_date(camp_data.get("endDate") or camp_data.get("endDateTime")) or campaign.end_date
             campaign.raw_data = camp_data
             campaign.synced_at = datetime.now(timezone.utc).replace(tzinfo=None)
         else:
@@ -291,8 +315,8 @@ async def sync_campaigns_to_db(
                 targeting_type=targeting,
                 state=state,
                 daily_budget=float(budget) if budget else None,
-                start_date=camp_data.get("startDate") or camp_data.get("startDateTime"),
-                end_date=camp_data.get("endDate") or camp_data.get("endDateTime"),
+                start_date=normalize_amazon_date(camp_data.get("startDate") or camp_data.get("startDateTime")),
+                end_date=normalize_amazon_date(camp_data.get("endDate") or camp_data.get("endDateTime")),
                 raw_data=camp_data,
             )
             db.add(new_campaign)
@@ -350,6 +374,12 @@ async def store_campaign_daily_data(
         ctr = round(clicks / impressions * 100, 2) if impressions > 0 else 0
         cpc = round(spend / clicks, 2) if clicks > 0 else 0
         cvr = round(orders / clicks * 100, 2) if clicks > 0 else 0
+        top_share = c.get("top_of_search_impression_share")
+        if top_share is not None:
+            try:
+                top_share = float(str(top_share).replace("%", ""))
+            except (TypeError, ValueError):
+                top_share = None
 
         if existing:
             existing.spend = spend
@@ -362,6 +392,7 @@ async def store_campaign_daily_data(
             existing.ctr = ctr
             existing.cpc = cpc
             existing.cvr = cvr
+            existing.top_of_search_impression_share = top_share
             existing.campaign_name = c.get("campaign_name") or existing.campaign_name
             existing.state = c.get("state") or existing.state
             existing.daily_budget = c.get("daily_budget") or existing.daily_budget
@@ -387,6 +418,7 @@ async def store_campaign_daily_data(
                 ctr=ctr,
                 cpc=cpc,
                 cvr=cvr,
+                top_of_search_impression_share=top_share,
                 daily_budget=c.get("daily_budget"),
                 source=source,
             )
@@ -437,6 +469,7 @@ async def store_account_daily_summary(
         existing.avg_ctr = metrics["ctr"]
         existing.avg_cpc = metrics["cpc"]
         existing.avg_cvr = metrics["cvr"]
+        existing.avg_top_of_search_impression_share = metrics.get("top_of_search_impression_share")
         existing.total_campaigns = len(campaigns)
         existing.active_campaigns = active
         existing.paused_campaigns = paused
@@ -457,6 +490,7 @@ async def store_account_daily_summary(
             avg_ctr=metrics["ctr"],
             avg_cpc=metrics["cpc"],
             avg_cvr=metrics["cvr"],
+            avg_top_of_search_impression_share=metrics.get("top_of_search_impression_share"),
             total_campaigns=len(campaigns),
             active_campaigns=active,
             paused_campaigns=paused,
@@ -524,6 +558,7 @@ async def query_campaign_daily(
                 func.sum(CampaignPerformanceDaily.impressions).label("impressions"),
                 func.sum(CampaignPerformanceDaily.clicks).label("clicks"),
                 func.sum(CampaignPerformanceDaily.orders).label("orders"),
+                func.avg(CampaignPerformanceDaily.top_of_search_impression_share).label("top_of_search_impression_share"),
                 func.max(CampaignPerformanceDaily.daily_budget).label("daily_budget"),
             )
             .where(and_(*base_where, CampaignPerformanceDaily.date == range_key))
@@ -552,6 +587,7 @@ async def query_campaign_daily(
                     func.sum(CampaignPerformanceDaily.impressions).label("impressions"),
                     func.sum(CampaignPerformanceDaily.clicks).label("clicks"),
                     func.sum(CampaignPerformanceDaily.orders).label("orders"),
+                    func.avg(CampaignPerformanceDaily.top_of_search_impression_share).label("top_of_search_impression_share"),
                     func.max(CampaignPerformanceDaily.daily_budget).label("daily_budget"),
                 )
                 .where(and_(*range_where))
@@ -573,6 +609,7 @@ async def query_campaign_daily(
                 func.sum(CampaignPerformanceDaily.impressions).label("impressions"),
                 func.sum(CampaignPerformanceDaily.clicks).label("clicks"),
                 func.sum(CampaignPerformanceDaily.orders).label("orders"),
+                func.avg(CampaignPerformanceDaily.top_of_search_impression_share).label("top_of_search_impression_share"),
                 func.max(CampaignPerformanceDaily.daily_budget).label("daily_budget"),
             )
             .where(and_(*base_where, CampaignPerformanceDaily.date == start_date))
@@ -618,6 +655,7 @@ async def query_campaign_daily(
             "impressions": int(r.impressions or 0),
             "clicks": int(r.clicks or 0),
             "orders": int(r.orders or 0),
+            "top_of_search_impression_share": float(r.top_of_search_impression_share) if r.top_of_search_impression_share is not None else None,
             "daily_budget": float(r.daily_budget or 0) or camp_meta.get("daily_budget", 0),
         })
     return enrich_campaigns(campaigns)
@@ -663,11 +701,118 @@ async def query_account_daily_trend(
             "roas": r.avg_roas or 0,
             "ctr": r.avg_ctr or 0,
             "cpc": r.avg_cpc or 0,
+            "top_of_search_impression_share": r.avg_top_of_search_impression_share,
             "campaigns": r.total_campaigns or 0,
             "active": r.active_campaigns or 0,
         }
         for r in rows
     ]
+
+
+def _parse_range_key(date_key: str) -> tuple[Optional[str], Optional[str]]:
+    """Parse a range key like YYYY-MM-DD__YYYY-MM-DD."""
+    if not isinstance(date_key, str) or "__" not in date_key:
+        return (None, None)
+    parts = date_key.split("__", 1)
+    if len(parts) != 2:
+        return (None, None)
+    start, end = parts[0], parts[1]
+    try:
+        date.fromisoformat(start)
+        date.fromisoformat(end)
+    except ValueError:
+        return (None, None)
+    return (start, end)
+
+
+async def query_account_range_key_trend(
+    db: AsyncSession,
+    credential_id: uuid.UUID,
+    start_date: str,
+    end_date: str,
+    profile_id: Optional[str] = None,
+) -> list:
+    """
+    Build approximate per-day trend points from stored range-key rows when
+    single-day rows don't exist.
+    Strategy: for each requested day, use the shortest stored range that covers
+    that day and distribute that range total across its duration.
+    """
+    where = [
+        AccountPerformanceDaily.credential_id == credential_id,
+        func.strpos(AccountPerformanceDaily.date, "__") > 0,
+    ]
+    if profile_id is not None:
+        where.append(AccountPerformanceDaily.profile_id == profile_id)
+    else:
+        where.append(AccountPerformanceDaily.profile_id.is_(None))
+
+    result = await db.execute(
+        select(AccountPerformanceDaily).where(and_(*where))
+    )
+    rows = result.scalars().all()
+    if not rows:
+        return []
+
+    try:
+        req_start = date.fromisoformat(start_date)
+        req_end = date.fromisoformat(end_date)
+    except ValueError:
+        return []
+
+    candidates: list[tuple[date, date, int, AccountPerformanceDaily]] = []
+    for r in rows:
+        rk_start, rk_end = _parse_range_key(r.date)
+        if not rk_start or not rk_end:
+            continue
+        try:
+            rs = date.fromisoformat(rk_start)
+            re = date.fromisoformat(rk_end)
+        except ValueError:
+            continue
+        if re < req_start or rs > req_end:
+            continue
+        duration = max(1, (re - rs).days + 1)
+        candidates.append((rs, re, duration, r))
+
+    if not candidates:
+        return []
+
+    points = []
+    day = req_start
+    while day <= req_end:
+        covering = [c for c in candidates if c[0] <= day <= c[1]]
+        if not covering:
+            day = day + timedelta(days=1)
+            continue
+        # Prefer the most specific (shortest) range for this day.
+        rs, re, duration, row = sorted(
+            covering,
+            key=lambda c: (c[2], c[0]),
+        )[0]
+        per_day_factor = 1.0 / max(1, duration)
+
+        points.append({
+            "date": day.isoformat(),
+            "spend": round(float(row.total_spend or 0) * per_day_factor, 4),
+            "sales": round(float(row.total_sales or 0) * per_day_factor, 4),
+            "impressions": int(round(float(row.total_impressions or 0) * per_day_factor)),
+            "clicks": int(round(float(row.total_clicks or 0) * per_day_factor)),
+            "orders": int(round(float(row.total_orders or 0) * per_day_factor)),
+            "acos": row.avg_acos or 0,
+            "roas": row.avg_roas or 0,
+            "ctr": row.avg_ctr or 0,
+            "cpc": row.avg_cpc or 0,
+            "top_of_search_impression_share": row.avg_top_of_search_impression_share,
+            "campaigns": int(round(float(row.total_campaigns or 0) * per_day_factor)),
+            "active": int(round(float(row.active_campaigns or 0) * per_day_factor)),
+            "is_approximate": True,
+            "source_range_start": rs.isoformat(),
+            "source_range_end": re.isoformat(),
+            "source_range_days": duration,
+        })
+        day = day + timedelta(days=1)
+    return points
 
 
 async def resolve_perf_date_source(
@@ -1162,6 +1307,18 @@ class ReportingService:
                 c.get("metric.purchases") or c.get("orders")
                 or c.get("attributedConversions14d") or c.get("conversions") or 0
             )
+            top_share = None
+            for key in ("metric.topOfSearchImpressionShare", "topOfSearchImpressionShare", "top_of_search_impression_share"):
+                val = c.get(key)
+                if val is not None:
+                    top_share = val
+                    break
+            if isinstance(top_share, str):
+                top_share = top_share.replace("%", "").strip()
+            try:
+                top_share = float(top_share) if top_share is not None else None
+            except (TypeError, ValueError):
+                top_share = None
 
             normalised.append({
                 "campaign_id": campaign_id,
@@ -1172,6 +1329,7 @@ class ReportingService:
                 "impressions": impressions,
                 "clicks": clicks,
                 "orders": orders,
+                "top_of_search_impression_share": top_share,
                 "daily_budget": float(
                     c.get("dailyBudget") or c.get("daily_budget")
                     or c.get("budget") or 0

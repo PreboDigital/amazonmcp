@@ -19,6 +19,9 @@ import {
   Bot,
   Download,
   Search,
+  Eye,
+  MousePointerClick,
+  Percent,
   Play,
   Rocket,
   CircleDot,
@@ -26,8 +29,18 @@ import {
 } from 'lucide-react'
 import MetricCard from '../components/MetricCard'
 import StatusBadge from '../components/StatusBadge'
-import { audit, optimizer, approvals, accounts as accountsApi, credentials } from '../lib/api'
+import { audit, optimizer, approvals, reports, accounts as accountsApi, credentials } from '../lib/api'
 import { useAccount } from '../lib/AccountContext'
+import {
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  Legend,
+} from 'recharts'
 
 
 // ── Onboarding Wizard ─────────────────────────────────────────────────
@@ -446,6 +459,9 @@ export default function Dashboard() {
   const [snapshots, setSnapshots] = useState([])
   const [activity, setActivity] = useState([])
   const [approvalSummary, setApprovalSummary] = useState(null)
+  const [reportSummary, setReportSummary] = useState(null)
+  const [dashboardTrend, setDashboardTrend] = useState([])
+  const [dashboardTrendSource, setDashboardTrendSource] = useState('daily_history')
   // null = not yet determined, true/false = determined
   const [showOnboarding, setShowOnboarding] = useState(null)
   const [hasCreds, setHasCreds] = useState(false)
@@ -457,10 +473,12 @@ export default function Dashboard() {
   async function loadDashboard() {
     setLoading(true)
     try {
-      const [snapshotsData, activityData, approvalsData, credsData] = await Promise.allSettled([
+      const [snapshotsData, activityData, approvalsData, reportData, trendData, credsData] = await Promise.allSettled([
         audit.snapshots(activeAccountId),
         optimizer.activity(activeAccountId, 10),
         approvals.summary(activeAccountId, activeProfileId),
+        reports.summary(activeAccountId, { preset: 'last_30_days' }),
+        reports.trends(activeAccountId, 30, { preset: 'last_30_days' }),
         credentials.list(),
       ])
       const snaps = snapshotsData.status === 'fulfilled' ? snapshotsData.value : []
@@ -469,6 +487,14 @@ export default function Dashboard() {
       setSnapshots(snaps)
       setActivity(acts)
       setApprovalSummary(approvalsData.status === 'fulfilled' ? approvalsData.value : null)
+      setReportSummary(reportData.status === 'fulfilled' ? reportData.value : null)
+      if (trendData.status === 'fulfilled') {
+        const tVal = trendData.value
+        setDashboardTrend(tVal?.data || tVal || [])
+        setDashboardTrendSource(tVal?.source || 'daily_history')
+      } else {
+        setDashboardTrend([])
+      }
       setHasCreds(creds.length > 0)
 
       // Show onboarding if credentials exist but no meaningful data yet
@@ -484,8 +510,10 @@ export default function Dashboard() {
   }
 
   const latestSnapshot = snapshots[0]
+  const perf = reportSummary?.summary || null
   const hasCredentials = hasCreds || accounts.length > 0
   const pendingCount = approvalSummary?.total_pending || 0
+  const currencyCode = reportSummary?.currency_code || 'USD'
 
   // ── Loading state — show nothing until we know which view ───────────
   if (loading || showOnboarding === null) {
@@ -580,35 +608,133 @@ export default function Dashboard() {
       )}
 
       {/* Metric cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 gap-4">
         <MetricCard
           title="Total Campaigns"
-          value={latestSnapshot?.campaigns_count ?? '—'}
-          subtitle="From last audit"
+          value={reportSummary?.total_campaigns ?? latestSnapshot?.campaigns_count ?? '—'}
+          subtitle={reportSummary ? 'Last 30 days' : 'From last audit'}
           icon={BarChart3}
           color="brand"
         />
         <MetricCard
           title="Total Spend"
-          value={latestSnapshot ? `$${(latestSnapshot.total_spend ?? 0).toLocaleString()}` : '—'}
-          subtitle="Reported period"
+          value={perf ? `$${(perf.spend ?? 0).toLocaleString()}` : latestSnapshot ? `$${(latestSnapshot.total_spend ?? 0).toLocaleString()}` : '—'}
+          subtitle={reportSummary ? 'Last 30 days' : 'Reported period'}
           icon={DollarSign}
           color="blue"
         />
         <MetricCard
           title="Avg. ACOS"
-          value={latestSnapshot ? `${(latestSnapshot.avg_acos ?? 0).toFixed(1)}%` : '—'}
+          value={perf ? `${(perf.acos ?? 0).toFixed(1)}%` : latestSnapshot ? `${(latestSnapshot.avg_acos ?? 0).toFixed(1)}%` : '—'}
           subtitle="Lower is better"
           icon={Target}
-          color={(latestSnapshot?.avg_acos ?? 0) > 30 ? 'red' : 'green'}
+          color={(perf?.acos ?? latestSnapshot?.avg_acos ?? 0) > 30 ? 'red' : 'green'}
         />
         <MetricCard
-          title="Waste Identified"
-          value={latestSnapshot ? `$${(latestSnapshot.waste_identified ?? 0).toLocaleString()}` : '—'}
-          subtitle="Potential savings"
+          title="Total Sales"
+          value={perf ? `$${(perf.sales ?? 0).toLocaleString()}` : latestSnapshot ? `$${(latestSnapshot.total_sales ?? 0).toLocaleString()}` : '—'}
+          subtitle={reportSummary ? 'Last 30 days' : 'Audit snapshot'}
           icon={ShoppingCart}
-          color="amber"
+          color="green"
         />
+        <MetricCard
+          title="Impressions"
+          value={perf?.impressions != null ? Number(perf.impressions).toLocaleString() : '—'}
+          subtitle="Last 30 days"
+          icon={Eye}
+          color="cyan"
+        />
+        <MetricCard
+          title="Clicks"
+          value={perf?.clicks != null ? Number(perf.clicks).toLocaleString() : '—'}
+          subtitle="Last 30 days"
+          icon={MousePointerClick}
+          color="purple"
+        />
+        <MetricCard
+          title="Avg CPC"
+          value={perf?.cpc != null ? `$${Number(perf.cpc).toFixed(2)}` : '—'}
+          subtitle="Spend per click"
+          color="amber"
+          icon={MousePointerClick}
+        />
+        <MetricCard
+          title="Conv. Rate"
+          value={perf?.cvr != null ? `${Number(perf.cvr).toFixed(2)}%` : '—'}
+          subtitle={perf?.top_of_search_impression_share != null ? `Top Search IS ${Number(perf.top_of_search_impression_share).toFixed(1)}%` : 'Orders / Clicks'}
+          icon={Percent}
+          color="emerald"
+        />
+      </div>
+
+      {/* Daily trend chart */}
+      <div className="card p-5">
+        <div className="flex items-start justify-between gap-3 mb-4">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-900">Daily Spend vs Sales</h2>
+            <p className="text-xs text-slate-400 mt-0.5">
+              {dashboardTrend.length > 0
+                ? dashboardTrendSource === 'range_history'
+                  ? `${dashboardTrend.length} points · approximate range-history fallback`
+                  : dashboardTrendSource === 'audit_snapshots'
+                    ? `${dashboardTrend.length} points · audit snapshot fallback`
+                    : `${dashboardTrend.length} points · true daily history`
+                : 'No trend data yet'}
+            </p>
+          </div>
+          <Link to="/reports" className="text-xs font-medium text-brand-600 hover:text-brand-700">
+            View reports
+          </Link>
+        </div>
+        {dashboardTrend.length > 0 ? (
+          <ResponsiveContainer width="100%" height={250}>
+            <AreaChart data={dashboardTrend}>
+              <defs>
+                <linearGradient id="dashSpend" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#4f46e5" stopOpacity={0.15} />
+                  <stop offset="95%" stopColor="#4f46e5" stopOpacity={0} />
+                </linearGradient>
+                <linearGradient id="dashSales" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#10b981" stopOpacity={0.15} />
+                  <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
+              <XAxis dataKey="date" tick={{ fontSize: 11, fill: '#94a3b8' }} tickLine={false} axisLine={false} />
+              <YAxis
+                tick={{ fontSize: 11, fill: '#94a3b8' }}
+                tickLine={false}
+                axisLine={false}
+                tickFormatter={(v) => {
+                  try {
+                    return new Intl.NumberFormat(undefined, { style: 'currency', currency: currencyCode, maximumFractionDigits: 0 }).format(Number(v || 0))
+                  } catch {
+                    return `$${Number(v || 0).toFixed(0)}`
+                  }
+                }}
+              />
+              <Tooltip
+                formatter={(v, name) => {
+                  try {
+                    return [new Intl.NumberFormat(undefined, { style: 'currency', currency: currencyCode, minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(v || 0)), name]
+                  } catch {
+                    return [`$${Number(v || 0).toFixed(2)}`, name]
+                  }
+                }}
+              />
+              <Legend iconType="circle" wrapperStyle={{ fontSize: 12 }} />
+              <Area type="monotone" dataKey="spend" name="Spend" stroke="#4f46e5" fill="url(#dashSpend)" strokeWidth={2} dot={{ r: 3 }} />
+              <Area type="monotone" dataKey="sales" name="Sales" stroke="#10b981" fill="url(#dashSales)" strokeWidth={2} dot={{ r: 3 }} />
+            </AreaChart>
+          </ResponsiveContainer>
+        ) : (
+          <div className="h-[250px] flex items-center justify-center text-sm text-slate-400">
+            <div className="text-center">
+              <BarChart3 size={28} className="mx-auto text-slate-300 mb-2" />
+              <p>Generate a report to populate daily trend data</p>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Quick actions + Activity feed */}

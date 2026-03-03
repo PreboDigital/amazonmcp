@@ -17,7 +17,13 @@ from app.mcp_client import create_mcp_client
 from app.services.token_service import get_mcp_client_with_fresh_token
 from app.services.harvest_service import HarvestService
 from app.services.campaign_creation_service import CampaignCreationService
-from app.utils import parse_uuid, utcnow
+from app.utils import (
+    parse_uuid,
+    utcnow,
+    normalize_mcp_call,
+    extract_mcp_error,
+    build_mcp_fallback_call,
+)
 
 router = APIRouter()
 
@@ -69,6 +75,33 @@ async def _get_cred(db: AsyncSession, cred_id: Optional[str] = None) -> Credenti
     if not cred:
         raise HTTPException(status_code=404, detail="No credential found.")
     return cred
+
+
+async def _call_tool_with_resilience(client, tool_name: str, arguments: dict):
+    """
+    Execute MCP call, then retry once with a safe fallback tool for known cases.
+    Raises a clear error if both attempts fail.
+    """
+    first_error = None
+    try:
+        result = await client.call_tool(tool_name, arguments)
+        parsed_error = extract_mcp_error(result)
+        if not parsed_error:
+            return result
+        first_error = parsed_error
+    except Exception as e:
+        first_error = str(e)
+
+    fallback = build_mcp_fallback_call(tool_name, arguments)
+    if not fallback:
+        raise RuntimeError(first_error or "MCP call failed")
+
+    fb_tool, fb_args = fallback
+    fb_result = await client.call_tool(fb_tool, fb_args)
+    fb_error = extract_mcp_error(fb_result)
+    if fb_error:
+        raise RuntimeError(f"{first_error or 'MCP call failed'} | fallback {fb_tool} failed: {fb_error}")
+    return fb_result
 
 
 # ── CRUD Endpoints ────────────────────────────────────────────────────
@@ -317,74 +350,96 @@ async def apply_approved_changes(
     if not changes:
         raise HTTPException(status_code=404, detail="No approved changes found to apply")
 
-    # Get credential for MCP client
-    cred_id = changes[0].credential_id
-    cred_result = await db.execute(select(Credential).where(Credential.id == cred_id))
-    cred = cred_result.scalar_one_or_none()
-    if not cred:
-        raise HTTPException(status_code=404, detail="Credential not found")
-
-    # Use profile_id from first change if set (ensures apply targets correct account)
-    profile_id = changes[0].profile_id or cred.profile_id
-    client = await get_mcp_client_with_fresh_token(cred, db, profile_id_override=profile_id)
-
-    # Apply each change via MCP
     applied = 0
     failed = 0
     results = []
-
+    cred_cache: dict = {}
+    grouped: dict[tuple[str, Optional[str]], list[PendingChange]] = {}
     for change in changes:
-        try:
-            mcp_payload = change.mcp_payload
-            tool_name = mcp_payload.get("tool", "")
-            arguments = mcp_payload.get("arguments", {})
+        key = (str(change.credential_id), change.profile_id)
+        grouped.setdefault(key, []).append(change)
 
-            if not tool_name or tool_name == "unknown":
+    for (cred_id_str, profile_id), group_changes in grouped.items():
+        cred_id = parse_uuid(cred_id_str, "credential_id")
+        cred = cred_cache.get(cred_id_str)
+        if cred is None:
+            cred_result = await db.execute(select(Credential).where(Credential.id == cred_id))
+            cred = cred_result.scalar_one_or_none()
+            cred_cache[cred_id_str] = cred
+
+        if not cred:
+            for change in group_changes:
                 change.status = "failed"
-                change.error_message = "Unknown MCP tool in payload"
+                change.error_message = "Credential not found"
                 failed += 1
-                results.append({"id": str(change.id), "status": "failed", "error": "Unknown tool"})
-                continue
+                results.append({"id": str(change.id), "status": "failed", "error": "Credential not found"})
+            continue
 
-            # Handle harvest "existing" mode: requires multi-step service execution
-            if tool_name == "_harvest_execute":
-                harvest_service = HarvestService(client)
-                mcp_result = await harvest_service.execute_harvest(
-                    source_campaign_id=arguments.get("source_campaign_id", ""),
-                    sales_threshold=arguments.get("sales_threshold", 1.0),
-                    acos_threshold=arguments.get("acos_threshold"),
-                    target_mode=arguments.get("target_mode", "existing"),
-                    target_campaign_id=arguments.get("target_campaign_id"),
-                    match_type=arguments.get("match_type"),
-                    negate_in_source=arguments.get("negate_in_source", True),
-                )
-            elif tool_name == "_ai_campaign_create":
-                # Full campaign creation: campaign → ad group → ad → targets
-                campaign_service = CampaignCreationService(client)
-                plan = arguments.get("plan", {})
-                mcp_result = await campaign_service.execute_plan(plan)
-            else:
-                mcp_result = await client.call_tool(tool_name, arguments)
+        client = await get_mcp_client_with_fresh_token(
+            cred, db, profile_id_override=profile_id or cred.profile_id
+        )
 
-            change.status = "applied"
-            change.applied_at = utcnow()
-            change.apply_result = mcp_result
-            applied += 1
-            results.append({"id": str(change.id), "status": "applied"})
+        for change in group_changes:
+            try:
+                mcp_payload = change.mcp_payload or {}
+                raw_tool_name = mcp_payload.get("tool", "")
+                raw_arguments = mcp_payload.get("arguments", {})
 
-        except Exception as e:
-            change.status = "failed"
-            change.error_message = str(e)
-            failed += 1
-            results.append({"id": str(change.id), "status": "failed", "error": str(e)})
+                if not raw_tool_name or raw_tool_name == "unknown":
+                    change.status = "failed"
+                    change.error_message = "Unknown MCP tool in payload"
+                    failed += 1
+                    results.append({"id": str(change.id), "status": "failed", "error": "Unknown tool"})
+                    continue
 
-    db.add(ActivityLog(
-        credential_id=cred.id,
-        action="changes_applied",
-        category="approvals",
-        description=f"Applied {applied} changes to Amazon Ads ({failed} failed)",
-        details={"applied": applied, "failed": failed, "results": results},
-    ))
+                if isinstance(raw_tool_name, str) and raw_tool_name.startswith("_"):
+                    tool_name, arguments = raw_tool_name, (raw_arguments or {})
+                else:
+                    tool_name, arguments = normalize_mcp_call(raw_tool_name, raw_arguments)
+
+                # Handle harvest "existing" mode: requires multi-step service execution
+                if tool_name == "_harvest_execute":
+                    harvest_service = HarvestService(client)
+                    mcp_result = await harvest_service.execute_harvest(
+                        source_campaign_id=arguments.get("source_campaign_id", ""),
+                        sales_threshold=arguments.get("sales_threshold", 1.0),
+                        acos_threshold=arguments.get("acos_threshold"),
+                        target_mode=arguments.get("target_mode", "existing"),
+                        target_campaign_id=arguments.get("target_campaign_id"),
+                        match_type=arguments.get("match_type"),
+                        negate_in_source=arguments.get("negate_in_source", True),
+                    )
+                elif tool_name == "_ai_campaign_create":
+                    # Full campaign creation: campaign → ad group → ad → targets
+                    campaign_service = CampaignCreationService(client)
+                    plan = arguments.get("plan", {})
+                    mcp_result = await campaign_service.execute_plan(plan)
+                else:
+                    mcp_result = await _call_tool_with_resilience(client, tool_name, arguments)
+
+                change.status = "applied"
+                change.applied_at = utcnow()
+                change.apply_result = mcp_result
+                applied += 1
+                results.append({"id": str(change.id), "status": "applied"})
+
+            except Exception as e:
+                change.status = "failed"
+                change.error_message = str(e)
+                failed += 1
+                results.append({"id": str(change.id), "status": "failed", "error": str(e)})
+
+    # Activity log per affected credential for clearer auditability.
+    for cred_id_str, cred in cred_cache.items():
+        if not cred:
+            continue
+        db.add(ActivityLog(
+            credential_id=cred.id,
+            action="changes_applied",
+            category="approvals",
+            description=f"Applied {applied} changes to Amazon Ads ({failed} failed)",
+            details={"applied": applied, "failed": failed, "results": results},
+        ))
 
     return {
         "applied": applied,

@@ -25,7 +25,14 @@ from app.services.ai_service import create_ai_service
 from app.services.search_term_service import get_search_term_summary
 from app.services.token_service import get_mcp_client_with_fresh_token
 from app.routers.settings import get_effective_api_keys
-from app.utils import parse_uuid, utcnow
+from app.utils import (
+    parse_uuid,
+    utcnow,
+    normalize_mcp_call,
+    normalize_state_value,
+    extract_mcp_error,
+    build_mcp_fallback_call,
+)
 
 router = APIRouter()
 settings = get_settings()
@@ -88,6 +95,15 @@ async def _get_cred(db: AsyncSession, cred_id: str = None) -> Credential:
     return cred
 
 
+def _scope_profile(query, model, profile_id: Optional[str]):
+    """Restrict a query to the active Amazon profile when present."""
+    if not hasattr(model, "profile_id"):
+        return query
+    if profile_id is not None:
+        return query.where(model.profile_id == profile_id)
+    return query.where(model.profile_id.is_(None))
+
+
 async def _get_account_context(db: AsyncSession, cred: Credential) -> dict:
     """
     Build a comprehensive context dict from the user's account data for AI.
@@ -108,9 +124,8 @@ async def _get_account_context(db: AsyncSession, cred: Credential) -> dict:
         active_profile = profile_result.scalar_one_or_none()
 
     # ── 2. All campaigns with performance ─────────────────────────────
-    campaigns_result = await db.execute(
-        select(Campaign).where(Campaign.credential_id == cred.id)
-    )
+    campaigns_query = select(Campaign).where(Campaign.credential_id == cred.id)
+    campaigns_result = await db.execute(_scope_profile(campaigns_query, Campaign, cred.profile_id))
     campaigns = campaigns_result.scalars().all()
 
     active = sum(1 for c in campaigns if c.state and c.state.upper() == "ENABLED")
@@ -122,7 +137,8 @@ async def _get_account_context(db: AsyncSession, cred: Credential) -> dict:
     perf_by_campaign: dict = {}
     if total_spend == 0 and campaigns:
         perf_result = await db.execute(
-            select(
+            _scope_profile(
+                select(
                 CampaignPerformanceDaily.amazon_campaign_id,
                 func.sum(CampaignPerformanceDaily.spend).label("spend"),
                 func.sum(CampaignPerformanceDaily.sales).label("sales"),
@@ -131,7 +147,10 @@ async def _get_account_context(db: AsyncSession, cred: Credential) -> dict:
                 func.sum(CampaignPerformanceDaily.orders).label("orders"),
             )
             .where(CampaignPerformanceDaily.credential_id == cred.id)
-            .group_by(CampaignPerformanceDaily.amazon_campaign_id)
+            .group_by(CampaignPerformanceDaily.amazon_campaign_id),
+                CampaignPerformanceDaily,
+                cred.profile_id,
+            )
         )
         for row in perf_result.all():
             perf_by_campaign[row.amazon_campaign_id] = {
@@ -184,9 +203,8 @@ async def _get_account_context(db: AsyncSession, cred: Credential) -> dict:
     all_campaigns.sort(key=lambda c: c["spend"] or 0, reverse=True)
 
     # ── 3. Ad groups ──────────────────────────────────────────────────
-    ad_groups_result = await db.execute(
-        select(AdGroup).where(AdGroup.credential_id == cred.id)
-    )
+    ad_groups_query = select(AdGroup).where(AdGroup.credential_id == cred.id)
+    ad_groups_result = await db.execute(_scope_profile(ad_groups_query, AdGroup, cred.profile_id))
     ad_groups = ad_groups_result.scalars().all()
 
     # Build a campaign name lookup for ad group context
@@ -205,9 +223,8 @@ async def _get_account_context(db: AsyncSession, cred: Credential) -> dict:
     ]
 
     # ── 4. Targets / keywords — comprehensive ────────────────────────
-    targets_result = await db.execute(
-        select(Target).where(Target.credential_id == cred.id)
-    )
+    targets_query = select(Target).where(Target.credential_id == cred.id)
+    targets_result = await db.execute(_scope_profile(targets_query, Target, cred.profile_id))
     targets = targets_result.scalars().all()
     target_count = len(targets)
 
@@ -324,13 +341,17 @@ async def _get_account_context(db: AsyncSession, cred: Credential) -> dict:
     today_str = utcnow().strftime("%Y-%m-%d")
 
     trend_result = await db.execute(
-        select(AccountPerformanceDaily)
-        .where(and_(
+        _scope_profile(
+            select(AccountPerformanceDaily)
+            .where(and_(
             AccountPerformanceDaily.credential_id == cred.id,
             AccountPerformanceDaily.date >= thirty_days_ago,
             AccountPerformanceDaily.date <= today_str,
         ))
-        .order_by(AccountPerformanceDaily.date.asc())
+            .order_by(AccountPerformanceDaily.date.asc()),
+            AccountPerformanceDaily,
+            cred.profile_id,
+        )
     )
     daily_trends = trend_result.scalars().all()
 
@@ -352,18 +373,26 @@ async def _get_account_context(db: AsyncSession, cred: Credential) -> dict:
 
     # ── 7. Pending changes (full details) ─────────────────────────────
     pending_result = await db.execute(
-        select(PendingChange)
-        .where(PendingChange.credential_id == cred.id)
-        .where(PendingChange.status == "pending")
-        .order_by(PendingChange.created_at.desc())
-        .limit(25)
+        _scope_profile(
+            select(PendingChange)
+            .where(PendingChange.credential_id == cred.id)
+            .where(PendingChange.status == "pending")
+            .order_by(PendingChange.created_at.desc())
+            .limit(25),
+            PendingChange,
+            cred.profile_id,
+        )
     )
     pending_changes = pending_result.scalars().all()
 
     pending_total_result = await db.execute(
-        select(func.count(PendingChange.id))
-        .where(PendingChange.credential_id == cred.id)
-        .where(PendingChange.status == "pending")
+        _scope_profile(
+            select(func.count(PendingChange.id))
+            .where(PendingChange.credential_id == cred.id)
+            .where(PendingChange.status == "pending"),
+            PendingChange,
+            cred.profile_id,
+        )
     )
     pending_total = pending_total_result.scalar() or 0
 
@@ -388,10 +417,14 @@ async def _get_account_context(db: AsyncSession, cred: Credential) -> dict:
 
     # ── 8. Bid rules and recent optimization runs ─────────────────────
     rules_result = await db.execute(
-        select(BidRule)
-        .where(BidRule.credential_id == cred.id)
-        .order_by(BidRule.updated_at.desc())
-        .limit(10)
+        _scope_profile(
+            select(BidRule)
+            .where(BidRule.credential_id == cred.id)
+            .order_by(BidRule.updated_at.desc())
+            .limit(10),
+            BidRule,
+            cred.profile_id,
+        )
     )
     bid_rules = rules_result.scalars().all()
 
@@ -414,10 +447,14 @@ async def _get_account_context(db: AsyncSession, cred: Credential) -> dict:
 
     # Latest optimization run
     latest_opt_result = await db.execute(
-        select(OptimizationRun)
-        .where(OptimizationRun.credential_id == cred.id)
-        .order_by(OptimizationRun.started_at.desc())
-        .limit(3)
+        _scope_profile(
+            select(OptimizationRun)
+            .where(OptimizationRun.credential_id == cred.id)
+            .order_by(OptimizationRun.started_at.desc())
+            .limit(3),
+            OptimizationRun,
+            cred.profile_id,
+        )
     )
     recent_opt_runs = latest_opt_result.scalars().all()
 
@@ -437,10 +474,14 @@ async def _get_account_context(db: AsyncSession, cred: Credential) -> dict:
 
     # ── 9. Harvest configs and recent harvested keywords ──────────────
     harvest_result = await db.execute(
-        select(HarvestConfig)
-        .where(HarvestConfig.credential_id == cred.id)
-        .order_by(HarvestConfig.updated_at.desc())
-        .limit(5)
+        _scope_profile(
+            select(HarvestConfig)
+            .where(HarvestConfig.credential_id == cred.id)
+            .order_by(HarvestConfig.updated_at.desc())
+            .limit(5),
+            HarvestConfig,
+            cred.profile_id,
+        )
     )
     harvest_configs = harvest_result.scalars().all()
 
@@ -482,10 +523,14 @@ async def _get_account_context(db: AsyncSession, cred: Credential) -> dict:
 
     # ── 10. Recent activity log ───────────────────────────────────────
     activity_result = await db.execute(
-        select(ActivityLog)
-        .where(ActivityLog.credential_id == cred.id)
-        .order_by(ActivityLog.created_at.desc())
-        .limit(20)
+        _scope_profile(
+            select(ActivityLog)
+            .where(ActivityLog.credential_id == cred.id)
+            .order_by(ActivityLog.created_at.desc())
+            .limit(20),
+            ActivityLog,
+            cred.profile_id,
+        )
     )
     recent_activity = activity_result.scalars().all()
 
@@ -573,6 +618,30 @@ async def _has_ai_config(db: AsyncSession) -> bool:
     return bool(openai_key or anthropic_key)
 
 
+async def _call_tool_with_resilience(client, tool_name: str, arguments: dict):
+    """Execute MCP call with a fallback to broader update tools when possible."""
+    first_error = None
+    try:
+        result = await client.call_tool(tool_name, arguments)
+        parsed_error = extract_mcp_error(result)
+        if not parsed_error:
+            return result
+        first_error = parsed_error
+    except Exception as e:
+        first_error = str(e)
+
+    fallback = build_mcp_fallback_call(tool_name, arguments)
+    if not fallback:
+        raise RuntimeError(first_error or "MCP call failed")
+
+    fb_tool, fb_args = fallback
+    fb_result = await client.call_tool(fb_tool, fb_args)
+    fb_error = extract_mcp_error(fb_result)
+    if fb_error:
+        raise RuntimeError(f"{first_error or 'MCP call failed'} | fallback {fb_tool} failed: {fb_error}")
+    return fb_result
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────
 
 @router.post("/chat")
@@ -631,8 +700,12 @@ async def ai_chat(payload: ChatRequest, db: AsyncSession = Depends(get_db)):
     if queue_actions:
         batch_id = str(uuid.uuid4())
         for act in queue_actions:
-            tool = act.get("tool", "")
-            args = act.get("arguments", {})
+            raw_tool = act.get("tool", "")
+            raw_args = act.get("arguments", {})
+            if isinstance(raw_tool, str) and raw_tool.startswith("_"):
+                tool, args = raw_tool, (raw_args or {})
+            else:
+                tool, args = normalize_mcp_call(raw_tool, raw_args)
             if not tool or tool == "unknown":
                 continue
             mcp_payload = {"tool": tool, "arguments": args}
@@ -706,8 +779,12 @@ async def apply_inline(payload: ApplyInlineRequest, db: AsyncSession = Depends(g
     results = []
 
     for act in payload.actions:
-        tool = act.get("tool", "")
-        arguments = act.get("arguments", {})
+        raw_tool = act.get("tool", "")
+        raw_arguments = act.get("arguments", {})
+        if isinstance(raw_tool, str) and raw_tool.startswith("_"):
+            tool, arguments = raw_tool, (raw_arguments or {})
+        else:
+            tool, arguments = normalize_mcp_call(raw_tool, raw_arguments)
         label = act.get("label", tool)
 
         if not tool or tool == "unknown":
@@ -716,7 +793,7 @@ async def apply_inline(payload: ApplyInlineRequest, db: AsyncSession = Depends(g
             continue
 
         try:
-            mcp_result = await client.call_tool(tool, arguments)
+            mcp_result = await _call_tool_with_resilience(client, tool, arguments)
             applied += 1
             results.append({"label": label, "status": "applied", "result": mcp_result})
 
@@ -770,14 +847,12 @@ async def generate_insights(payload: InsightsRequest, db: AsyncSession = Depends
     ai = create_ai_service(model_id=model_id, openai_api_key=openai_key, anthropic_api_key=anthropic_key)
 
     # Gather campaign data
-    campaigns_result = await db.execute(
-        select(Campaign).where(Campaign.credential_id == cred.id)
-    )
+    campaigns_query = select(Campaign).where(Campaign.credential_id == cred.id)
+    campaigns_result = await db.execute(_scope_profile(campaigns_query, Campaign, cred.profile_id))
     campaigns = campaigns_result.scalars().all()
 
-    targets_result = await db.execute(
-        select(Target).where(Target.credential_id == cred.id)
-    )
+    targets_query = select(Target).where(Target.credential_id == cred.id)
+    targets_result = await db.execute(_scope_profile(targets_query, Target, cred.profile_id))
     targets = targets_result.scalars().all()
 
     # Build data for AI
@@ -864,14 +939,12 @@ async def ai_optimize(payload: OptimizeRequest, db: AsyncSession = Depends(get_d
     ai = create_ai_service(model_id=model_id, openai_api_key=openai_key, anthropic_api_key=anthropic_key)
 
     # Gather data
-    campaigns_result = await db.execute(
-        select(Campaign).where(Campaign.credential_id == cred.id)
-    )
+    campaigns_query = select(Campaign).where(Campaign.credential_id == cred.id)
+    campaigns_result = await db.execute(_scope_profile(campaigns_query, Campaign, cred.profile_id))
     campaigns = campaigns_result.scalars().all()
 
-    targets_result = await db.execute(
-        select(Target).where(Target.credential_id == cred.id)
-    )
+    targets_query = select(Target).where(Target.credential_id == cred.id)
+    targets_result = await db.execute(_scope_profile(targets_query, Target, cred.profile_id))
     targets = targets_result.scalars().all()
 
     campaign_dicts = [
@@ -1194,20 +1267,22 @@ def _build_mcp_payload(recommendation: dict) -> dict:
             },
         }
     elif change_type == "campaign_state":
+        state_val = normalize_state_value(proposed)
         return {
             "tool": "campaign_management-update_campaign_state",
             "arguments": {
                 "body": {
-                    "campaigns": [{"campaignId": entity_id, "state": proposed}]
+                    "campaigns": [{"campaignId": entity_id, "state": state_val}]
                 }
             },
         }
     elif change_type == "target_state":
+        state_val = normalize_state_value(proposed)
         return {
             "tool": "campaign_management-update_target",
             "arguments": {
                 "body": {
-                    "targets": [{"targetId": entity_id, "state": proposed}]
+                    "targets": [{"targetId": entity_id, "state": state_val}]
                 }
             },
         }

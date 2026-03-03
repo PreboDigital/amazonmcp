@@ -24,10 +24,16 @@ from app.services.reporting_service import (
     compute_metrics, compute_deltas, enrich_campaigns, ReportingService,
     store_campaign_daily_data, store_account_daily_summary,
     query_campaign_daily, query_account_daily_trend,
+    query_account_range_key_trend,
     has_daily_data, find_encompassing_range_data, DATE_PRESETS,
     get_currency_for_marketplace,
 )
 from app.services.search_term_service import SearchTermService, get_search_term_summary
+from app.services.product_reporting_service import (
+    ProductReportingService,
+    query_product_rows,
+    get_product_summary,
+)
 from app.utils import parse_uuid, utcnow
 
 logger = logging.getLogger(__name__)
@@ -143,6 +149,35 @@ def _resolve_date_range(
     s, e = get_date_range(safe_preset)
     label = safe_preset.replace("_", " ").title()
     return s, e, label
+
+
+def _snapshot_rows_to_trend(snapshots: list[AuditSnapshot]) -> list[dict]:
+    """
+    Collapse snapshots to one point per day (latest snapshot for each day).
+    """
+    by_day = {}
+    for s in snapshots:
+        day = s.created_at.strftime("%Y-%m-%d")
+        prev = by_day.get(day)
+        if not prev or s.created_at > prev.created_at:
+            by_day[day] = s
+
+    trend = []
+    for day in sorted(by_day.keys()):
+        s = by_day[day]
+        trend.append({
+            "date": day,
+            "spend": s.total_spend or 0,
+            "sales": s.total_sales or 0,
+            "acos": s.avg_acos or 0,
+            "roas": s.avg_roas or 0,
+            "campaigns": s.campaigns_count or 0,
+            "active": s.active_campaigns or 0,
+            "waste": s.waste_identified or 0,
+            "issues": s.issues_count or 0,
+            "opportunities": s.opportunities_count or 0,
+        })
+    return trend
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -270,7 +305,10 @@ async def report_trends(
 ):
     """
     Daily trend data from account_performance_daily table.
-    Falls back to audit snapshots if no daily data exists yet.
+    Fallback order:
+      1) True daily history rows
+      2) Daily audit snapshots
+      3) Approximate range-key history
     """
     cred = await _get_cred(db, credential_id)
     logger.info("Reports trends: credential_id=%s profile_id=%s", str(cred.id), cred.profile_id)
@@ -288,31 +326,33 @@ async def report_trends(
     if daily_trend:
         return {"source": "daily_history", "data": daily_trend}
 
-    # Fallback: audit snapshots
+    # Fallback: audit snapshots (one point per day)
     result = await db.execute(
         select(AuditSnapshot)
-        .where(AuditSnapshot.credential_id == cred.id)
+        .where(
+            AuditSnapshot.credential_id == cred.id,
+            func.date(AuditSnapshot.created_at) >= start_date,
+            func.date(AuditSnapshot.created_at) <= end_date,
+        )
         .order_by(AuditSnapshot.created_at.asc())
-        .limit(limit)
     )
     snapshots = result.scalars().all()
+    fallback = _snapshot_rows_to_trend(snapshots)
+    if fallback:
+        if limit and len(fallback) > limit:
+            fallback = fallback[-limit:]
+        return {"source": "audit_snapshots", "data": fallback}
 
-    fallback = [
-        {
-            "date": s.created_at.strftime("%Y-%m-%d"),
-            "spend": s.total_spend or 0,
-            "sales": s.total_sales or 0,
-            "acos": s.avg_acos or 0,
-            "roas": s.avg_roas or 0,
-            "campaigns": s.campaigns_count or 0,
-            "active": s.active_campaigns or 0,
-            "waste": s.waste_identified or 0,
-            "issues": s.issues_count or 0,
-            "opportunities": s.opportunities_count or 0,
-        }
-        for s in snapshots
-    ]
-    return {"source": "audit_snapshots", "data": fallback}
+    # Last-resort fallback: approximate per-day trend built from range-key rows.
+    range_trend = await query_account_range_key_trend(
+        db, cred.id, start_date.isoformat(), end_date.isoformat(), profile_id=cred.profile_id
+    )
+    if range_trend:
+        if limit and len(range_trend) > limit:
+            range_trend = range_trend[-limit:]
+        return {"source": "range_history", "data": range_trend}
+
+    return {"source": "none", "data": []}
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -534,6 +574,21 @@ async def generate_report(
     daily_trend = await query_account_daily_trend(
         db, cred.id, start_str, end_str, profile_id=cred.profile_id
     )
+    if not daily_trend:
+        snap_result = await db.execute(
+            select(AuditSnapshot)
+            .where(
+                AuditSnapshot.credential_id == cred.id,
+                func.date(AuditSnapshot.created_at) >= start_date,
+                func.date(AuditSnapshot.created_at) <= end_date,
+            )
+            .order_by(AuditSnapshot.created_at.asc())
+        )
+        daily_trend = _snapshot_rows_to_trend(snap_result.scalars().all())
+    if not daily_trend:
+        daily_trend = await query_account_range_key_trend(
+            db, cred.id, start_str, end_str, profile_id=cred.profile_id
+        )
 
     # ── Compute summary ───────────────────────────────────────────────
     summary = compute_metrics(campaigns_data)
@@ -663,15 +718,32 @@ async def generate_report(
                 comp_source = "daily_history"
 
         if not comp_campaigns:
-            comp_campaigns = campaigns_data
-            comp_source = "fallback_same_period"
+            comp_source = "unavailable"
+            comp_summary = {}
+            deltas = {}
+            comp_daily_trend = []
+        else:
+            comp_summary = compute_metrics(comp_campaigns)
+            deltas = compute_deltas(summary, comp_summary)
 
-        comp_summary = compute_metrics(comp_campaigns)
-        deltas = compute_deltas(summary, comp_summary)
-
-        comp_daily_trend = await query_account_daily_trend(
-            db, cred.id, comp_start_str, comp_end_str, profile_id=cred.profile_id
-        )
+            comp_daily_trend = await query_account_daily_trend(
+                db, cred.id, comp_start_str, comp_end_str, profile_id=cred.profile_id
+            )
+            if not comp_daily_trend:
+                comp_snapshots = await db.execute(
+                    select(AuditSnapshot)
+                    .where(
+                        AuditSnapshot.credential_id == cred.id,
+                        func.date(AuditSnapshot.created_at) >= comp_start,
+                        func.date(AuditSnapshot.created_at) <= comp_end,
+                    )
+                    .order_by(AuditSnapshot.created_at.asc())
+                )
+                comp_daily_trend = _snapshot_rows_to_trend(comp_snapshots.scalars().all())
+            if not comp_daily_trend:
+                comp_daily_trend = await query_account_range_key_trend(
+                    db, cred.id, comp_start_str, comp_end_str, profile_id=cred.profile_id
+                )
 
         response["comparison"] = {
             "period": {
@@ -683,6 +755,7 @@ async def generate_report(
             "deltas": deltas,
             "daily_trend": comp_daily_trend,
             "source": comp_source,
+            "unavailable": comp_source == "unavailable",
         }
 
     # ── Save to reports table ─────────────────────────────────────────
@@ -947,3 +1020,159 @@ async def search_terms_summary(
     logger.info("Reports search-terms/summary: credential_id=%s profile_id=%s", str(cred.id), cred.profile_id)
     summary = await get_search_term_summary(db, cred.id, profile_id=cred.profile_id)
     return summary
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  PRODUCT / BUSINESS REPORTS — Sync and query product analytics
+# ══════════════════════════════════════════════════════════════════════
+
+class ProductSyncRequest(BaseModel):
+    credential_id: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    ad_product: str = "SPONSORED_PRODUCTS"
+    pending_report_id: Optional[str] = None
+
+
+@router.post("/products/sync")
+async def sync_product_reports(
+    payload: ProductSyncRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Trigger product/business report sync from Amazon Ads.
+    Stores daily per-product rows for analytics and comparisons.
+    """
+    cred = await _get_cred(db, payload.credential_id)
+    client = await get_mcp_client_with_fresh_token(cred, db)
+    if not client:
+        raise HTTPException(status_code=503, detail="Could not create MCP client. Check credentials.")
+
+    advertiser_account_id = await _resolve_advertiser_account_id(db, cred)
+    logger.info("Product report sync using advertiser_account_id: %s", advertiser_account_id)
+
+    service = ProductReportingService(client, advertiser_account_id)
+    result = await service.sync_products(
+        db=db,
+        credential_id=cred.id,
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+        ad_product=payload.ad_product,
+        pending_report_id=payload.pending_report_id,
+        profile_id=cred.profile_id,
+    )
+
+    db.add(ActivityLog(
+        credential_id=cred.id,
+        action="product_report_sync",
+        category="reporting",
+        description=f"Product report sync: {result.get('status', '?')} — {result.get('rows_stored', 0)} rows",
+        details=result,
+    ))
+    await db.flush()
+    return result
+
+
+@router.get("/products")
+async def get_products(
+    credential_id: Optional[str] = Query(None),
+    preset: Optional[str] = Query("this_month"),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    limit: int = Query(100),
+    sort_by: str = Query("sales"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Query stored product performance rows for the selected date range."""
+    cred = await _get_cred(db, credential_id)
+    start_d, end_d, _ = _resolve_date_range(preset or "this_month", start_date, end_date)
+    start_str = start_d.isoformat()
+    end_str = end_d.isoformat()
+
+    rows = await query_product_rows(
+        db=db,
+        credential_id=cred.id,
+        start_date=start_str,
+        end_date=end_str,
+        profile_id=cred.profile_id,
+        limit=limit,
+        sort_by=sort_by,
+    )
+    return {
+        "total": len(rows),
+        "products": rows,
+        "date_range": f"{start_str} to {end_str}",
+    }
+
+
+@router.get("/products/summary")
+async def product_summary(
+    credential_id: Optional[str] = Query(None),
+    preset: Optional[str] = Query("this_month"),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    compare: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Product analytics summary for the selected range with optional previous-period comparison.
+    """
+    cred = await _get_cred(db, credential_id)
+    start_d, end_d, _ = _resolve_date_range(preset or "this_month", start_date, end_date)
+    start_str = start_d.isoformat()
+    end_str = end_d.isoformat()
+
+    current = await get_product_summary(
+        db=db,
+        credential_id=cred.id,
+        start_date=start_str,
+        end_date=end_str,
+        profile_id=cred.profile_id,
+    )
+    response = {
+        **current,
+        "period": {
+            "start_date": start_str,
+            "end_date": end_str,
+            "preset": preset if preset and preset in DATE_PRESETS else "this_month",
+        },
+    }
+
+    if compare:
+        if start_date and end_date:
+            comp_start, comp_end = get_comparison_range_for_dates(start_d, end_d)
+        else:
+            comp_start, comp_end = get_comparison_range(preset if preset in DATE_PRESETS else "this_month")
+        comp_start_str = comp_start.isoformat()
+        comp_end_str = comp_end.isoformat()
+
+        previous = await get_product_summary(
+            db=db,
+            credential_id=cred.id,
+            start_date=comp_start_str,
+            end_date=comp_end_str,
+            profile_id=cred.profile_id,
+        )
+        if previous.get("has_data"):
+            deltas = compute_deltas(current.get("summary", {}), previous.get("summary", {}))
+            response["comparison"] = {
+                "period": {
+                    "start_date": comp_start_str,
+                    "end_date": comp_end_str,
+                },
+                "summary": previous.get("summary", {}),
+                "deltas": deltas,
+                "unavailable": False,
+            }
+        else:
+            response["comparison"] = {
+                "period": {
+                    "start_date": comp_start_str,
+                    "end_date": comp_end_str,
+                },
+                "summary": {},
+                "deltas": {},
+                "unavailable": True,
+            }
+
+    return response

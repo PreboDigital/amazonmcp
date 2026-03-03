@@ -823,6 +823,7 @@ class CampaignPerformanceDaily(Base):
     ctr: Mapped[float] = mapped_column(Float, nullable=True)
     cpc: Mapped[float] = mapped_column(Float, nullable=True)
     cvr: Mapped[float] = mapped_column(Float, nullable=True)
+    top_of_search_impression_share: Mapped[float] = mapped_column(Float, nullable=True)
     daily_budget: Mapped[float] = mapped_column(Float, nullable=True)
 
     # Metadata
@@ -830,8 +831,9 @@ class CampaignPerformanceDaily(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
     __table_args__ = (
-        UniqueConstraint("credential_id", "amazon_campaign_id", "date", name="uq_campaign_perf_daily"),
+        UniqueConstraint("credential_id", "profile_id", "amazon_campaign_id", "date", name="uq_campaign_perf_daily"),
         Index("ix_cpd_credential_id", "credential_id"),
+        Index("ix_cpd_profile_id", "profile_id"),
         Index("ix_cpd_campaign_id", "amazon_campaign_id"),
         Index("ix_cpd_date", "date"),
         Index("ix_cpd_credential_date", "credential_id", "date"),
@@ -865,6 +867,7 @@ class AccountPerformanceDaily(Base):
     avg_ctr: Mapped[float] = mapped_column(Float, nullable=True)
     avg_cpc: Mapped[float] = mapped_column(Float, nullable=True)
     avg_cvr: Mapped[float] = mapped_column(Float, nullable=True)
+    avg_top_of_search_impression_share: Mapped[float] = mapped_column(Float, nullable=True)
 
     # Counts
     total_campaigns: Mapped[int] = mapped_column(Integer, default=0)
@@ -876,10 +879,73 @@ class AccountPerformanceDaily(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
     __table_args__ = (
-        UniqueConstraint("credential_id", "date", name="uq_account_perf_daily"),
+        UniqueConstraint("credential_id", "profile_id", "date", name="uq_account_perf_daily"),
         Index("ix_apd_credential_id", "credential_id"),
+        Index("ix_apd_profile_id", "profile_id"),
         Index("ix_apd_date", "date"),
         Index("ix_apd_credential_date", "credential_id", "date"),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  PRODUCT PERFORMANCE DAILY — Historical per-product metrics
+# ══════════════════════════════════════════════════════════════════════
+
+class ProductPerformanceDaily(Base):
+    """
+    One row per product (ASIN/SKU) per date. Stores product-level performance
+    from Amazon product/business reports so product analytics and comparisons
+    are sourced from real report data (not campaign-level approximations).
+    """
+    __tablename__ = "product_performance_daily"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    credential_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("credentials.id", ondelete="CASCADE"), nullable=False)
+    profile_id: Mapped[str] = mapped_column(String(255), nullable=True)
+    date: Mapped[str] = mapped_column(String(25), nullable=False)  # YYYY-MM-DD
+
+    # Product identity
+    asin: Mapped[str] = mapped_column(String(50), nullable=True)
+    sku: Mapped[str] = mapped_column(String(255), nullable=True)
+    product_name: Mapped[str] = mapped_column(String(512), nullable=True)
+    ad_product: Mapped[str] = mapped_column(String(100), nullable=True)
+
+    # Aggregate metrics
+    impressions: Mapped[int] = mapped_column(BigInteger, default=0)
+    clicks: Mapped[int] = mapped_column(Integer, default=0)
+    spend: Mapped[float] = mapped_column(Float, default=0.0)
+    sales: Mapped[float] = mapped_column(Float, default=0.0)
+    orders: Mapped[int] = mapped_column(Integer, default=0)
+    units_sold: Mapped[int] = mapped_column(Integer, default=0)
+    ctr: Mapped[float] = mapped_column(Float, nullable=True)
+    cpc: Mapped[float] = mapped_column(Float, nullable=True)
+    acos: Mapped[float] = mapped_column(Float, nullable=True)
+    roas: Mapped[float] = mapped_column(Float, nullable=True)
+    cvr: Mapped[float] = mapped_column(Float, nullable=True)
+
+    # Metadata
+    report_date_start: Mapped[str] = mapped_column(String(25), nullable=True)
+    report_date_end: Mapped[str] = mapped_column(String(25), nullable=True)
+    source: Mapped[str] = mapped_column(String(50), default="product_report")
+    raw_data: Mapped[dict] = mapped_column(JSON, nullable=True)
+    synced_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "credential_id",
+            "profile_id",
+            "date",
+            "asin",
+            "sku",
+            "ad_product",
+            name="uq_product_perf_daily",
+        ),
+        Index("ix_ppd_credential_id", "credential_id"),
+        Index("ix_ppd_profile_id", "profile_id"),
+        Index("ix_ppd_date", "date"),
+        Index("ix_ppd_asin", "asin"),
+        Index("ix_ppd_sku", "sku"),
+        Index("ix_ppd_credential_date", "credential_id", "date"),
     )
 
 

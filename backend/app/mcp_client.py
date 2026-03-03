@@ -902,6 +902,96 @@ class AmazonAdsMCP:
             logger.error(f"Search term report creation failed: {resp.status_code} - {error_text}")
             raise MCPError(f"Search term report API error ({resp.status_code}): {error_text}")
 
+    async def create_advertised_product_report(
+        self,
+        start_date: str,
+        end_date: str,
+        ad_product: str = "SPONSORED_PRODUCTS",
+        advertiser_account_id: Optional[str] = None,
+        time_unit: str = "DAILY",
+        columns: list[str] = None,
+    ) -> dict:
+        """
+        Create an advertised product report via Amazon Ads v3 Reporting API.
+        This powers product/business analytics in the Reports page.
+        """
+        import httpx
+
+        report_type_map = {
+            "SPONSORED_PRODUCTS": "spAdvertisedProduct",
+            "SPONSORED_BRANDS": "sbAdvertisedProduct",
+        }
+        report_type_id = report_type_map.get(ad_product, "spAdvertisedProduct")
+        default_columns = [
+            "date",
+            "campaignId",
+            "campaignName",
+            "adGroupId",
+            "adGroupName",
+            "advertisedAsin",
+            "advertisedSku",
+            "impressions",
+            "clicks",
+            "cost",
+            "purchases7d",
+            "sales7d",
+            "unitsSoldClicks7d",
+        ]
+        if time_unit == "SUMMARY":
+            default_columns = [c for c in default_columns if c != "date"]
+
+        body = {
+            "startDate": start_date,
+            "endDate": end_date,
+            "configuration": {
+                "adProduct": ad_product,
+                "reportTypeId": report_type_id,
+                "groupBy": ["advertiser"],
+                "columns": columns or default_columns,
+                "timeUnit": time_unit,
+                "format": "GZIP_JSON",
+            },
+        }
+
+        api_base_urls = {
+            "na": "https://advertising-api.amazon.com",
+            "eu": "https://advertising-api-eu.amazon.com",
+            "fe": "https://advertising-api-fe.amazon.com",
+        }
+        base_url = api_base_urls.get(self.region, api_base_urls["na"])
+        headers = {
+            "Content-Type": "application/vnd.createasyncreportrequest.v3+json",
+            "Amazon-Advertising-API-ClientId": self.client_id,
+            "Authorization": f"Bearer {self.access_token}",
+        }
+        if self.profile_id:
+            headers["Amazon-Advertising-API-Scope"] = self.profile_id
+
+        logger.info(
+            "Creating product report via v3 API: %s/reporting/reports (%s, %s to %s)",
+            base_url,
+            ad_product,
+            start_date,
+            end_date,
+        )
+        if advertiser_account_id:
+            logger.debug("Advertiser account provided for product report: %s", advertiser_account_id)
+
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            resp = await http.post(
+                f"{base_url}/reporting/reports",
+                json=body,
+                headers=headers,
+            )
+
+        logger.info("Product report API response: %s", resp.status_code)
+        if resp.status_code in (200, 202):
+            data = resp.json()
+            return {"success": [{"report": data}]}
+        error_text = resp.text[:500]
+        logger.error("Product report creation failed: %s - %s", resp.status_code, error_text)
+        raise MCPError(f"Product report API error ({resp.status_code}): {error_text}")
+
     async def list_invoices(
         self,
         access_requested_account: dict = None,

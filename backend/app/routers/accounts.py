@@ -19,7 +19,14 @@ from app.models import (
 )
 from app.mcp_client import create_mcp_client, MCPError
 from app.services.token_service import get_mcp_client_with_fresh_token
-from app.utils import parse_uuid, safe_error_detail, utcnow, extract_target_expression
+from app.utils import (
+    parse_uuid,
+    safe_error_detail,
+    utcnow,
+    extract_target_expression,
+    normalize_amazon_date,
+    normalize_state_value,
+)
 
 router = APIRouter()
 
@@ -330,16 +337,10 @@ async def list_campaigns(
                     or str(uuid_mod.uuid4())
                 )
 
-                profile_cond = (
-                    Campaign.profile_id == cred.profile_id
-                    if cred.profile_id is not None
-                    else Campaign.profile_id.is_(None)
-                )
                 existing = await db.execute(
                     select(Campaign).where(
                         Campaign.credential_id == cred.id,
                         Campaign.amazon_campaign_id == str(amazon_id),
-                        profile_cond,
                     )
                 )
                 campaign = existing.scalar_one_or_none()
@@ -351,7 +352,7 @@ async def list_campaigns(
                 if not targeting and camp_data.get("autoCreationSettings"):
                     auto_targets = camp_data["autoCreationSettings"].get("autoCreateTargets", False)
                     targeting = "auto" if auto_targets else "manual"
-                state = camp_data.get("state") or camp_data.get("status")
+                state = normalize_state_value(camp_data.get("state") or camp_data.get("status"), for_storage=True)
                 # Extract daily budget from nested budgets array
                 budget = camp_data.get("dailyBudget") or camp_data.get("budget")
                 if not budget and camp_data.get("budgets"):
@@ -368,8 +369,8 @@ async def list_campaigns(
                     campaign.targeting_type = targeting or campaign.targeting_type
                     campaign.state = state or campaign.state
                     campaign.daily_budget = float(budget) if budget else campaign.daily_budget
-                    campaign.start_date = camp_data.get("startDate") or camp_data.get("startDateTime") or campaign.start_date
-                    campaign.end_date = camp_data.get("endDate") or camp_data.get("endDateTime") or campaign.end_date
+                    campaign.start_date = normalize_amazon_date(camp_data.get("startDate") or camp_data.get("startDateTime")) or campaign.start_date
+                    campaign.end_date = normalize_amazon_date(camp_data.get("endDate") or camp_data.get("endDateTime")) or campaign.end_date
                     campaign.raw_data = camp_data
                     campaign.synced_at = utcnow()
                 else:
@@ -382,8 +383,8 @@ async def list_campaigns(
                         targeting_type=targeting,
                         state=state,
                         daily_budget=float(budget) if budget else None,
-                        start_date=camp_data.get("startDate") or camp_data.get("startDateTime"),
-                        end_date=camp_data.get("endDate") or camp_data.get("endDateTime"),
+                        start_date=normalize_amazon_date(camp_data.get("startDate") or camp_data.get("startDateTime")),
+                        end_date=normalize_amazon_date(camp_data.get("endDate") or camp_data.get("endDateTime")),
                         raw_data=camp_data,
                     )
                     db.add(campaign)

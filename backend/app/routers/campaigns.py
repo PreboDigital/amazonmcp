@@ -13,7 +13,7 @@ from typing import Optional, Callable, Awaitable
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_, and_
+from sqlalchemy import select, func, or_, and_, case
 
 from app.database import get_db, async_session
 from app.auth import get_current_user
@@ -25,7 +25,16 @@ from app.models import (
 from app.services.token_service import get_mcp_client_with_fresh_token
 from app.services.reporting_service import get_date_range, DATE_PRESETS, resolve_perf_date_source
 from app.services.product_image_service import get_product_image_url
-from app.utils import parse_uuid, safe_error_detail, utcnow, extract_target_expression, extract_ad_asin_sku, extract_ad_display_name
+from app.utils import (
+    parse_uuid,
+    safe_error_detail,
+    utcnow,
+    extract_target_expression,
+    extract_ad_asin_sku,
+    extract_ad_display_name,
+    normalize_amazon_date,
+    normalize_state_value,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -61,6 +70,16 @@ def _extract_list(data, keys=None) -> list:
             if key in data and isinstance(data[key], list):
                 return data[key]
     return []
+
+
+def _normalized_updates_for_mcp(updates: dict) -> dict:
+    """Normalize mutable payload fields before calling MCP tools."""
+    if not isinstance(updates, dict):
+        return {}
+    out = dict(updates)
+    if "state" in out:
+        out["state"] = normalize_state_value(out.get("state"))
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -187,7 +206,7 @@ async def list_campaigns(
         else:  # acos — use spend/sales ratio; when sales=0 treat as high acos (999)
             agg_s = func.coalesce(perf_subq.c.agg_sales, Campaign.sales, 0)
             agg_c = func.coalesce(perf_subq.c.agg_spend, Campaign.spend, 0)
-            order_col = func.case((agg_s > 0, agg_c / agg_s * 100), else_=999.0)
+            order_col = case((agg_s > 0, agg_c / agg_s * 100), else_=999.0)
         query = base_query.order_by(order_col.asc() if sort_asc else order_col.desc()).offset(offset).limit(page_size)
     else:
         # Direct Campaign column sort
@@ -446,7 +465,8 @@ async def update_campaign(
 ):
     """Update a campaign. Routed through approval queue by default."""
     cred = await _get_credential(db, credential_id)
-    payload = {"campaignId": amazon_campaign_id, **req.updates}
+    normalized_updates = _normalized_updates_for_mcp(req.updates)
+    payload = {"campaignId": amazon_campaign_id, **normalized_updates}
 
     if req.skip_approval:
         client = await _make_client(cred, db)
@@ -461,12 +481,12 @@ async def update_campaign(
             )
             campaign = existing.scalar_one_or_none()
             if campaign:
-                if "name" in req.updates:
-                    campaign.campaign_name = req.updates["name"]
-                if "state" in req.updates:
-                    campaign.state = req.updates["state"]
-                if "dailyBudget" in req.updates:
-                    campaign.daily_budget = float(req.updates["dailyBudget"])
+                if "name" in normalized_updates:
+                    campaign.campaign_name = normalized_updates["name"]
+                if "state" in normalized_updates:
+                    campaign.state = normalize_state_value(normalized_updates["state"], for_storage=True)
+                if "dailyBudget" in normalized_updates:
+                    campaign.daily_budget = float(normalized_updates["dailyBudget"])
                 campaign.synced_at = utcnow()
 
             db.add(ActivityLog(
@@ -474,7 +494,7 @@ async def update_campaign(
                 category="campaigns",
                 description=f"Updated campaign {amazon_campaign_id}",
                 entity_type="campaign", entity_id=amazon_campaign_id,
-                details={"updates": req.updates, "result": result},
+                details={"updates": normalized_updates, "result": result},
             ))
             await db.flush()
             return {"status": "updated", "result": result}
@@ -499,8 +519,8 @@ async def update_campaign(
             campaign_id=amazon_campaign_id,
             campaign_name=campaign.campaign_name if campaign else None,
             current_value=str(campaign.raw_data) if campaign else None,
-            proposed_value=str(req.updates),
-            change_detail=req.updates,
+            proposed_value=str(normalized_updates),
+            change_detail=normalized_updates,
             mcp_payload={"tool": "campaign_management-update_campaign", "arguments": {"body": {"campaigns": [payload]}}},
             source="manual",
         )
@@ -853,7 +873,8 @@ async def update_ad_group(
 ):
     """Update an ad group (name, state, default bid)."""
     cred = await _get_credential(db, credential_id)
-    payload = {"adGroupId": amazon_ad_group_id, **req.updates}
+    normalized_updates = _normalized_updates_for_mcp(req.updates)
+    payload = {"adGroupId": amazon_ad_group_id, **normalized_updates}
 
     if req.skip_approval:
         client = await _make_client(cred, db)
@@ -867,12 +888,12 @@ async def update_ad_group(
             )
             ag = existing.scalar_one_or_none()
             if ag:
-                if "name" in req.updates:
-                    ag.ad_group_name = req.updates["name"]
-                if "state" in req.updates:
-                    ag.state = req.updates["state"]
-                if "defaultBid" in req.updates:
-                    ag.default_bid = float(req.updates["defaultBid"])
+                if "name" in normalized_updates:
+                    ag.ad_group_name = normalized_updates["name"]
+                if "state" in normalized_updates:
+                    ag.state = normalize_state_value(normalized_updates["state"], for_storage=True)
+                if "defaultBid" in normalized_updates:
+                    ag.default_bid = float(normalized_updates["defaultBid"])
                 ag.synced_at = utcnow()
 
             db.add(ActivityLog(
@@ -902,8 +923,8 @@ async def update_ad_group(
             entity_name=ag.ad_group_name if ag else amazon_ad_group_id,
             campaign_id=ag.amazon_campaign_id if ag else None,
             current_value=str(ag.raw_data) if ag else None,
-            proposed_value=str(req.updates),
-            change_detail=req.updates,
+            proposed_value=str(normalized_updates),
+            change_detail=normalized_updates,
             mcp_payload={"tool": "campaign_management-update_ad_group", "arguments": {"body": {"adGroups": [payload]}}},
             source="manual",
         )
@@ -973,6 +994,8 @@ async def list_targets(
     date_from: Optional[str] = Query(None, description="Filter performance by date (YYYY-MM-DD)"),
     date_to: Optional[str] = Query(None, description="Filter performance by date (YYYY-MM-DD)"),
     preset: Optional[str] = Query(None, description="Date preset when date_from/date_to not set"),
+    sort_by: Optional[str] = Query("expression_value", description="Sort by: expression_value, match_type, state, bid, clicks, spend, sales, acos"),
+    sort_dir: Optional[str] = Query("asc", description="Sort direction: asc or desc"),
     db: AsyncSession = Depends(get_db),
 ):
     """List targets/keywords for an ad group, enriched with performance from SearchTermPerformance (keyword_id = amazon_target_id)."""
@@ -1067,6 +1090,34 @@ async def list_targets(
             "synced_at": t.synced_at.isoformat() if t.synced_at else None,
         })
 
+    sort_col = (sort_by or "expression_value").lower()
+    reverse = (sort_dir or "asc").lower() == "desc"
+
+    def _num(v):
+        try:
+            return float(v or 0)
+        except Exception:
+            return 0.0
+
+    def _target_sort_key(item: dict):
+        if sort_col == "match_type":
+            return (item.get("match_type") or "").lower()
+        if sort_col == "state":
+            return (item.get("state") or "").lower()
+        if sort_col == "bid":
+            return _num(item.get("bid"))
+        if sort_col == "clicks":
+            return int(item.get("clicks") or 0)
+        if sort_col == "spend":
+            return _num(item.get("spend"))
+        if sort_col == "sales":
+            return _num(item.get("sales"))
+        if sort_col == "acos":
+            val = item.get("acos")
+            return _num(val) if val is not None else -1.0
+        return (item.get("expression_value") or "").lower()
+
+    target_list.sort(key=_target_sort_key, reverse=reverse)
     return {"targets": target_list, "count": len(targets)}
 
 
@@ -1131,7 +1182,8 @@ async def update_target(
 ):
     """Update a target (bid, state, etc.)."""
     cred = await _get_credential(db, credential_id)
-    payload = {"targetId": amazon_target_id, **req.updates}
+    normalized_updates = _normalized_updates_for_mcp(req.updates)
+    payload = {"targetId": amazon_target_id, **normalized_updates}
 
     if req.skip_approval:
         client = await _make_client(cred, db)
@@ -1145,10 +1197,10 @@ async def update_target(
             )
             target = existing.scalar_one_or_none()
             if target:
-                if "bid" in req.updates:
-                    target.bid = float(req.updates["bid"])
-                if "state" in req.updates:
-                    target.state = req.updates["state"]
+                if "bid" in normalized_updates:
+                    target.bid = float(normalized_updates["bid"])
+                if "state" in normalized_updates:
+                    target.state = normalize_state_value(normalized_updates["state"], for_storage=True)
                 target.synced_at = utcnow()
 
             db.add(ActivityLog(
@@ -1178,8 +1230,8 @@ async def update_target(
             entity_name=target.expression_value if target else amazon_target_id,
             campaign_id=target.amazon_campaign_id if target else None,
             current_value=str(target.bid) if target else None,
-            proposed_value=str(req.updates),
-            change_detail=req.updates,
+            proposed_value=str(normalized_updates),
+            change_detail=normalized_updates,
             mcp_payload={"tool": "campaign_management-update_target", "arguments": {"body": {"targets": [payload]}}},
             source="manual",
         )
@@ -1432,7 +1484,8 @@ async def update_ad(
 ):
     """Update an ad (name, state)."""
     cred = await _get_credential(db, credential_id)
-    payload = {"adId": amazon_ad_id, **req.updates}
+    normalized_updates = _normalized_updates_for_mcp(req.updates)
+    payload = {"adId": amazon_ad_id, **normalized_updates}
 
     if req.skip_approval:
         client = await _make_client(cred, db)
@@ -1446,10 +1499,10 @@ async def update_ad(
             )
             ad = existing.scalar_one_or_none()
             if ad:
-                if "name" in req.updates:
-                    ad.ad_name = req.updates["name"]
-                if "state" in req.updates:
-                    ad.state = req.updates["state"]
+                if "name" in normalized_updates:
+                    ad.ad_name = normalized_updates["name"]
+                if "state" in normalized_updates:
+                    ad.state = normalize_state_value(normalized_updates["state"], for_storage=True)
                 ad.synced_at = utcnow()
 
             db.add(ActivityLog(
@@ -1475,8 +1528,8 @@ async def update_ad(
             entity_id=amazon_ad_id,
             entity_name=ad.ad_name if ad else amazon_ad_id,
             current_value=str(ad.raw_data) if ad else None,
-            proposed_value=str(req.updates),
-            change_detail=req.updates,
+            proposed_value=str(normalized_updates),
+            change_detail=normalized_updates,
             mcp_payload={"tool": "campaign_management-update_ad", "arguments": {"body": {"ads": [payload]}}},
             source="manual",
         )
@@ -1597,8 +1650,10 @@ async def run_full_sync(
             camp_name = camp_data.get("name") or camp_data.get("campaignName")
             camp_type = camp_data.get("adProduct") or camp_data.get("campaignType")
             targeting = camp_data.get("targetingType") or camp_data.get("targeting")
-            state = camp_data.get("state") or camp_data.get("status")
+            state = normalize_state_value(camp_data.get("state") or camp_data.get("status"), for_storage=True)
             budget = camp_data.get("dailyBudget") or camp_data.get("budget")
+            start_date = normalize_amazon_date(camp_data.get("startDate") or camp_data.get("startDateTime"))
+            end_date = normalize_amazon_date(camp_data.get("endDate") or camp_data.get("endDateTime"))
             if not budget and camp_data.get("budgets"):
                 for b in camp_data["budgets"]:
                     if b.get("recurrenceTimePeriod") == "DAILY":
@@ -1607,22 +1662,28 @@ async def run_full_sync(
                         break
 
             if campaign:
+                campaign.profile_id = cred.profile_id
                 campaign.campaign_name = camp_name or campaign.campaign_name
                 campaign.campaign_type = camp_type or campaign.campaign_type
                 campaign.targeting_type = targeting or campaign.targeting_type
                 campaign.state = state or campaign.state
                 campaign.daily_budget = float(budget) if budget else campaign.daily_budget
+                campaign.start_date = start_date or campaign.start_date
+                campaign.end_date = end_date or campaign.end_date
                 campaign.raw_data = camp_data
                 campaign.synced_at = utcnow()
             else:
                 campaign = Campaign(
                     credential_id=cred.id,
+                    profile_id=cred.profile_id,
                     amazon_campaign_id=str(amazon_id),
                     campaign_name=camp_name,
                     campaign_type=camp_type,
                     targeting_type=targeting,
                     state=state,
                     daily_budget=float(budget) if budget else None,
+                    start_date=start_date,
+                    end_date=end_date,
                     raw_data=camp_data,
                 )
                 db.add(campaign)

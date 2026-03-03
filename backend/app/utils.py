@@ -1,9 +1,8 @@
-"""
-Shared utility functions.
-"""
+"""Shared utility functions."""
 
 import logging
-from typing import Optional
+import re
+from typing import Any, Optional
 import uuid as uuid_mod
 from datetime import datetime, timezone
 from fastapi import HTTPException
@@ -41,6 +40,292 @@ def utcnow() -> datetime:
     Naive datetimes are used because our DB columns are TIMESTAMP WITHOUT TIME ZONE.
     """
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def normalize_amazon_date(value: Optional[str]) -> Optional[str]:
+    """
+    Normalize Amazon date-like strings to YYYY-MM-DD where possible.
+    Supports:
+    - YYYYMMDD
+    - YYYY-MM-DD
+    - ISO datetimes (YYYY-MM-DDTHH:MM:SS...)
+    """
+    if not value:
+        return value
+    s = str(value).strip()
+    if not s:
+        return None
+    if re.fullmatch(r"\d{8}", s):
+        return f"{s[0:4]}-{s[4:6]}-{s[6:8]}"
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        return s
+    if len(s) >= 10 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", s[:10]):
+        return s[:10]
+    return s
+
+
+def normalize_state_value(value: Any, for_storage: bool = False) -> Any:
+    """Normalize campaign state values for MCP calls/storage."""
+    if not isinstance(value, str):
+        return value
+    v = value.strip()
+    if not v:
+        return value
+    up = v.upper()
+    if up in ("ENABLED", "PAUSED", "ARCHIVED"):
+        return up.lower() if for_storage else up
+    return v
+
+
+def normalize_mcp_tool_name(tool_name: str) -> str:
+    """Normalize common AI/generated tool name variants to canonical MCP names."""
+    if not isinstance(tool_name, str):
+        return tool_name
+    tool = tool_name.strip()
+    if not tool:
+        return tool
+
+    # Common namespace typos/variants
+    tool = tool.replace("campaign-management", "campaign_management")
+    tool = tool.replace("account-management", "account_management")
+    tool = tool.replace("reporting_", "reporting-")
+    tool = tool.replace("campaign_management_", "campaign_management-")
+    tool = tool.replace("account_management_", "account_management-")
+
+    return tool
+
+
+def _to_float(value: Any) -> Any:
+    """Best-effort currency/number parsing."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return value
+    s = value.strip().replace("$", "").replace(",", "")
+    try:
+        return float(s)
+    except ValueError:
+        return value
+
+
+def _ensure_body(arguments: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if not isinstance(arguments, dict):
+        return {}
+    if isinstance(arguments.get("body"), dict):
+        return dict(arguments["body"])
+    return dict(arguments)
+
+
+def normalize_mcp_arguments(tool_name: str, arguments: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """
+    Normalize MCP arguments so apply/inline actions are resilient to small
+    shape mistakes from UI/AI (missing body wrapper, single-item forms, case).
+    """
+    body = _ensure_body(arguments)
+
+    def _normalize_states(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            i = dict(item)
+            if "state" in i:
+                i["state"] = normalize_state_value(i["state"])
+            out.append(i)
+        return out
+
+    if tool_name == "campaign_management-update_campaign_budget":
+        if "campaignId" in body and "campaigns" not in body:
+            body = {"campaigns": [{"campaignId": body.get("campaignId"), "dailyBudget": _to_float(body.get("dailyBudget"))}]}
+        if isinstance(body.get("campaigns"), list):
+            body["campaigns"] = [
+                {**c, "dailyBudget": _to_float(c.get("dailyBudget"))}
+                for c in body["campaigns"] if isinstance(c, dict)
+            ]
+
+    elif tool_name in ("campaign_management-update_campaign_state", "campaign_management-update_campaign"):
+        if "campaignId" in body and "campaigns" not in body:
+            body = {"campaigns": [body]}
+        if isinstance(body.get("campaigns"), list):
+            campaigns = _normalize_states(body["campaigns"])
+            # Normalize budget if present on generic update payload
+            for c in campaigns:
+                if "dailyBudget" in c:
+                    c["dailyBudget"] = _to_float(c.get("dailyBudget"))
+            body["campaigns"] = campaigns
+
+    elif tool_name in ("campaign_management-update_target", "campaign_management-update_target_bid", "campaign_management-create_target"):
+        if "targetId" in body and "targets" not in body:
+            body = {"targets": [body]}
+        if isinstance(body.get("targets"), list):
+            targets = _normalize_states(body["targets"])
+            for t in targets:
+                if "bid" in t:
+                    t["bid"] = _to_float(t.get("bid"))
+            body["targets"] = targets
+
+    elif tool_name == "campaign_management-delete_target":
+        if "targetId" in body and "targetIds" not in body:
+            body = {"targetIds": [body["targetId"]]}
+
+    elif tool_name == "campaign_management-update_ad_group":
+        if "adGroupId" in body and "adGroups" not in body:
+            body = {"adGroups": [body]}
+        if isinstance(body.get("adGroups"), list):
+            groups = _normalize_states(body["adGroups"])
+            for g in groups:
+                if "defaultBid" in g:
+                    g["defaultBid"] = _to_float(g.get("defaultBid"))
+            body["adGroups"] = groups
+
+    elif tool_name == "campaign_management-update_ad":
+        if "adId" in body and "ads" not in body:
+            body = {"ads": [body]}
+        if isinstance(body.get("ads"), list):
+            body["ads"] = _normalize_states(body["ads"])
+
+    return {"body": body}
+
+
+def normalize_mcp_call(tool_name: str, arguments: Optional[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
+    """Return normalized MCP (tool_name, arguments) pair."""
+    normalized_tool = normalize_mcp_tool_name(tool_name)
+    normalized_args = normalize_mcp_arguments(normalized_tool, arguments)
+    return normalized_tool, normalized_args
+
+
+def extract_mcp_error(result: Any) -> Optional[str]:
+    """
+    Best-effort extraction of an MCP/tool execution error from parsed payloads.
+    Returns an error message when one is detected, otherwise None.
+    """
+    if result is None:
+        return None
+
+    if isinstance(result, str):
+        txt = result.strip()
+        low = txt.lower()
+        if any(token in low for token in ("error", "failed", "exception", "validation")):
+            return txt[:500]
+        return None
+
+    if isinstance(result, list):
+        for item in result:
+            err = extract_mcp_error(item)
+            if err:
+                return err
+        return None
+
+    if not isinstance(result, dict):
+        return None
+
+    # Common explicit error fields
+    for key in ("error", "errorMessage", "error_message"):
+        val = result.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()[:500]
+        if val:
+            return str(val)[:500]
+
+    errs = result.get("errors")
+    if errs:
+        return str(errs)[:500]
+
+    status = str(result.get("status") or "").upper()
+    if status in ("FAILED", "FAILURE", "ERROR", "CANCELLED"):
+        return str(result.get("message") or status)[:500]
+
+    # Recurse into common nested payloads
+    for key in ("result", "results", "success", "data", "items"):
+        nested = result.get(key)
+        err = extract_mcp_error(nested)
+        if err:
+            return err
+
+    return None
+
+
+def build_mcp_fallback_call(
+    tool_name: str,
+    arguments: Optional[dict[str, Any]],
+) -> Optional[tuple[str, dict[str, Any]]]:
+    """
+    Return a fallback MCP call for known flaky/specialized update tools.
+    Some accounts reject specialized tools but accept generic update_* payloads.
+    """
+    if not isinstance(tool_name, str) or tool_name.startswith("_"):
+        return None
+
+    args = arguments if isinstance(arguments, dict) else {}
+    body = args.get("body") if isinstance(args.get("body"), dict) else args
+
+    if tool_name == "campaign_management-update_campaign_budget":
+        campaigns = []
+        if isinstance(body.get("campaigns"), list):
+            for c in body["campaigns"]:
+                if not isinstance(c, dict):
+                    continue
+                cid = c.get("campaignId")
+                if not cid:
+                    continue
+                item = {"campaignId": cid}
+                if "dailyBudget" in c:
+                    item["dailyBudget"] = _to_float(c.get("dailyBudget"))
+                campaigns.append(item)
+        elif body.get("campaignId"):
+            campaigns.append({
+                "campaignId": body.get("campaignId"),
+                "dailyBudget": _to_float(body.get("dailyBudget")),
+            })
+        if campaigns:
+            return ("campaign_management-update_campaign", {"body": {"campaigns": campaigns}})
+        return None
+
+    if tool_name == "campaign_management-update_campaign_state":
+        campaigns = []
+        if isinstance(body.get("campaigns"), list):
+            for c in body["campaigns"]:
+                if not isinstance(c, dict):
+                    continue
+                cid = c.get("campaignId")
+                if not cid:
+                    continue
+                item = {"campaignId": cid}
+                if "state" in c:
+                    item["state"] = normalize_state_value(c.get("state"))
+                campaigns.append(item)
+        elif body.get("campaignId"):
+            campaigns.append({
+                "campaignId": body.get("campaignId"),
+                "state": normalize_state_value(body.get("state")),
+            })
+        if campaigns:
+            return ("campaign_management-update_campaign", {"body": {"campaigns": campaigns}})
+        return None
+
+    if tool_name == "campaign_management-update_target_bid":
+        targets = []
+        if isinstance(body.get("targets"), list):
+            for t in body["targets"]:
+                if not isinstance(t, dict):
+                    continue
+                tid = t.get("targetId")
+                if not tid:
+                    continue
+                item = {"targetId": tid}
+                if "bid" in t:
+                    item["bid"] = _to_float(t.get("bid"))
+                targets.append(item)
+        elif body.get("targetId"):
+            targets.append({
+                "targetId": body.get("targetId"),
+                "bid": _to_float(body.get("bid")),
+            })
+        if targets:
+            return ("campaign_management-update_target", {"body": {"targets": targets}})
+        return None
+
+    return None
 
 
 def _is_keyword_like(s: str) -> bool:

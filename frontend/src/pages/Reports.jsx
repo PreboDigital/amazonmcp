@@ -27,6 +27,7 @@ import {
   Download,
   Search,
   X,
+  Package,
   ChevronLeft,
   ChevronRight,
   ChevronsLeft,
@@ -341,6 +342,7 @@ const TABLE_COLUMNS = [
   { key: 'impressions', label: 'Impressions', sortable: true, format: 'compact' },
   { key: 'clicks', label: 'Clicks', sortable: true, format: 'compact' },
   { key: 'ctr', label: 'CTR', sortable: true, format: 'percent' },
+  { key: 'top_of_search_impression_share', label: 'Top Search IS', sortable: true, format: 'percent' },
   { key: 'orders', label: 'Orders', sortable: true },
   { key: 'cpc', label: 'CPC', sortable: true, format: 'currency' },
   { key: 'cvr', label: 'CVR', sortable: true, format: 'percent' },
@@ -972,6 +974,135 @@ function SearchTermsSection({ accountId, syncing, data, error, filter, onSync, o
 }
 
 
+function ProductPerformanceSection({
+  syncing,
+  loading,
+  summaryData,
+  rows,
+  error,
+  onSync,
+  onDismissError,
+  currencyCode = 'USD',
+  compareEnabled = false,
+}) {
+  const hasData = !!summaryData?.has_data
+  const summary = summaryData?.summary || {}
+  const hasComparison = compareEnabled && !!summaryData?.comparison && !summaryData?.comparison?.unavailable
+  const deltas = summaryData?.comparison?.deltas || {}
+
+  return (
+    <div className="card overflow-hidden">
+      <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-4">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="flex items-center justify-center w-9 h-9 rounded-lg bg-violet-50 text-violet-600 shrink-0">
+            <Package size={18} />
+          </div>
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold text-slate-900">Product Performance</h3>
+            <p className="text-xs text-slate-400 mt-0.5">
+              {hasData
+                ? `${(summary.total_products || 0).toLocaleString()} products · ${summaryData?.date_range || ''}`
+                : 'Sync product/business reports from Amazon to analyze ASIN performance'}
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={onSync}
+          disabled={syncing}
+          className={clsx(
+            'flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-all border shrink-0',
+            syncing
+              ? 'bg-slate-50 text-slate-400 border-slate-200 cursor-not-allowed'
+              : 'bg-violet-600 text-white border-violet-600 hover:bg-violet-700 shadow-sm'
+          )}
+        >
+          {syncing ? <><Loader2 size={15} className="animate-spin" /> Syncing...</> : <><RefreshCw size={15} /> Sync Products</>}
+        </button>
+      </div>
+
+      {error && (
+        <div className="px-5 py-3 bg-amber-50 border-b border-amber-100 flex items-center gap-3">
+          <AlertCircle size={14} className="text-amber-500 shrink-0" />
+          <p className="text-xs text-amber-700 flex-1">{error}</p>
+          <button onClick={onDismissError} className="text-amber-400 hover:text-amber-600 text-xs font-medium">Dismiss</button>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="py-10 text-center">
+          <Loader2 size={22} className="animate-spin text-violet-500 mx-auto" />
+          <p className="text-xs text-slate-400 mt-2">Loading product analytics...</p>
+        </div>
+      ) : !hasData ? (
+        <div className="px-5 py-10 text-center">
+          <Package size={30} className="mx-auto text-slate-300 mb-2" />
+          <p className="text-sm text-slate-600">No product report data yet</p>
+          <p className="text-xs text-slate-400 mt-1">Sync product reports to see ASIN-level spend, sales, and efficiency.</p>
+        </div>
+      ) : (
+        <>
+          <div className="px-5 py-3 grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="bg-slate-50 rounded-lg p-3">
+              <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Products</p>
+              <p className="text-lg font-bold text-slate-900 mt-1">{(summary.total_products || 0).toLocaleString()}</p>
+            </div>
+            <div className="bg-blue-50 rounded-lg p-3">
+              <p className="text-[10px] font-semibold text-blue-500 uppercase tracking-wider">Spend</p>
+              <p className="text-lg font-bold text-blue-700 mt-1">{fmtCurr(summary.spend || 0, currencyCode)}</p>
+              {hasComparison && <DeltaBadge value={deltas.spend} />}
+            </div>
+            <div className="bg-emerald-50 rounded-lg p-3">
+              <p className="text-[10px] font-semibold text-emerald-500 uppercase tracking-wider">Sales</p>
+              <p className="text-lg font-bold text-emerald-700 mt-1">{fmtCurr(summary.sales || 0, currencyCode)}</p>
+              {hasComparison && <DeltaBadge value={deltas.sales} />}
+            </div>
+            <div className="bg-amber-50 rounded-lg p-3">
+              <p className="text-[10px] font-semibold text-amber-500 uppercase tracking-wider">ACOS</p>
+              <p className="text-lg font-bold text-amber-700 mt-1">{Number(summary.acos || 0).toFixed(1)}%</p>
+              {hasComparison && <DeltaBadge value={deltas.acos} invert={true} />}
+            </div>
+          </div>
+
+          <div className="overflow-x-auto border-t border-slate-100">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-slate-50/50">
+                  <th className="px-3 py-2.5 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">Product</th>
+                  <th className="px-3 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-500">Spend</th>
+                  <th className="px-3 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-500">Sales</th>
+                  <th className="px-3 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-500">Orders</th>
+                  <th className="px-3 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-500">ACOS</th>
+                  <th className="px-3 py-2.5 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-500">ROAS</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-50">
+                {(rows || []).slice(0, 20).map((p, idx) => (
+                  <tr key={`${p.asin || 'na'}-${p.sku || 'ns'}-${idx}`} className="hover:bg-slate-50/50 transition-colors">
+                    <td className="px-3 py-2.5">
+                      <p className="text-sm font-medium text-slate-800">{p.product_name || p.asin || p.sku || 'Unknown Product'}</p>
+                      <p className="text-[10px] text-slate-400 mt-0.5">
+                        {p.asin ? `ASIN: ${p.asin}` : ''}
+                        {p.asin && p.sku ? ' · ' : ''}
+                        {p.sku ? `SKU: ${p.sku}` : ''}
+                      </p>
+                    </td>
+                    <td className="px-3 py-2.5 text-right text-xs tabular-nums">{fmtCurr(p.spend || 0, currencyCode)}</td>
+                    <td className="px-3 py-2.5 text-right text-xs tabular-nums font-medium text-emerald-600">{(p.sales || 0) > 0 ? fmtCurr(p.sales, currencyCode) : '—'}</td>
+                    <td className="px-3 py-2.5 text-right text-xs tabular-nums">{(p.orders || 0).toLocaleString()}</td>
+                    <td className="px-3 py-2.5 text-right text-xs tabular-nums">{p.acos != null ? `${Number(p.acos).toFixed(1)}%` : '—'}</td>
+                    <td className="px-3 py-2.5 text-right text-xs tabular-nums">{p.roas != null ? `${Number(p.roas).toFixed(2)}x` : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+
 // ── Main Reports Page ────────────────────────────────────────────────
 
 export default function Reports() {
@@ -1006,6 +1137,7 @@ export default function Reports() {
   const [reportData, setReportData] = useState(null)
   const [summaryData, setSummaryData] = useState(null)
   const [trendData, setTrendData] = useState([])
+  const [trendSource, setTrendSource] = useState('daily_history')
   const [error, setError] = useState(null)
 
   // Currency (driven by backend, based on active account's marketplace)
@@ -1023,6 +1155,12 @@ export default function Reports() {
   const stError = reportSearchTermsSync.error
   const [stData, setStData] = useState(null)
   const [stFilter, setStFilter] = useState('all') // all | converting | non_converting
+  const [productSummaryData, setProductSummaryData] = useState(null)
+  const [productRows, setProductRows] = useState([])
+  const [productLoading, setProductLoading] = useState(false)
+  const [productSyncing, setProductSyncing] = useState(false)
+  const [productPendingReportId, setProductPendingReportId] = useState(null)
+  const [productError, setProductError] = useState(null)
 
   const [reportHistory, setReportHistory] = useState([])
   const [reportHistoryLoading, setReportHistoryLoading] = useState(false)
@@ -1041,6 +1179,10 @@ export default function Reports() {
     setSummaryData(null)
     setTrendData([])
     setStData(null)
+    setProductSummaryData(null)
+    setProductRows([])
+    setProductPendingReportId(null)
+    setProductError(null)
     loadInitialData(dateRange)
     loadSearchTerms()
   }, [activeAccountId, activeAccount?.id])
@@ -1053,6 +1195,14 @@ export default function Reports() {
     }
     refreshForPreset(dateRange)
   }, [dateRange.preset, dateRange.start, dateRange.end])
+
+  useEffect(() => {
+    if (!activeAccountId) return
+    const opts = (dateRange?.preset === 'custom' && dateRange?.start && dateRange?.end)
+      ? { startDate: dateRange.start, endDate: dateRange.end }
+      : { preset: dateRange?.preset || 'this_month' }
+    loadProductAnalytics(opts, compare)
+  }, [compare])
 
   function reportOpts() {
     const useCustom = dateRange.preset === 'custom' || (dateRange.start && dateRange.end && dateRange.preset !== 'this_month' && !['today', 'yesterday', 'this_week', 'last_week', 'last_7_days', 'last_30_days', 'this_month', 'last_month', 'year_to_date'].includes(dateRange.preset))
@@ -1081,7 +1231,9 @@ export default function Reports() {
         // trends API now returns { source, data }
         const tVal = trends.value
         setTrendData(tVal?.data || tVal || [])
+        setTrendSource(tVal?.source || 'daily_history')
       }
+      await loadProductAnalytics(opts, compare)
     } catch (err) {
       console.error('Load failed:', err)
     } finally {
@@ -1106,7 +1258,9 @@ export default function Reports() {
       if (trends.status === 'fulfilled') {
         const tVal = trends.value
         setTrendData(tVal?.data || tVal || [])
+        setTrendSource(tVal?.source || 'daily_history')
       }
+      await loadProductAnalytics(opts, compare)
     } catch (err) {
       console.error('Preset refresh failed:', err)
     }
@@ -1117,6 +1271,28 @@ export default function Reports() {
       const data = await reports.searchTermsSummary(activeAccountId)
       setStData(data)
     } catch (err) { /* ignore — may not have data yet */ }
+  }
+
+  async function loadProductAnalytics(opts, withCompare = compare) {
+    setProductLoading(true)
+    try {
+      const [summaryRes, rowsRes] = await Promise.allSettled([
+        reports.productSummary(activeAccountId, { ...opts, compare: withCompare }),
+        reports.products(activeAccountId, { ...opts, limit: 100, sortBy: 'sales' }),
+      ])
+      if (summaryRes.status === 'fulfilled') {
+        setProductSummaryData(summaryRes.value)
+      }
+      if (rowsRes.status === 'fulfilled') {
+        setProductRows(rowsRes.value?.products || [])
+      } else {
+        setProductRows([])
+      }
+    } catch (err) {
+      setProductError(err.message || 'Failed to load product analytics')
+    } finally {
+      setProductLoading(false)
+    }
   }
 
   async function loadReportHistory() {
@@ -1141,12 +1317,47 @@ export default function Reports() {
     startReportSearchTermsSync(activeAccountId, reportSearchTermsSync.pendingReportId)
   }
 
+  async function syncProducts(pendingId = null) {
+    setProductSyncing(true)
+    setProductError(null)
+    try {
+      const opts = { startDate: dateRange.start, endDate: dateRange.end }
+      const result = await reports.productSync(activeAccountId, {
+        ...opts,
+        pendingReportId: pendingId || productPendingReportId || undefined,
+      })
+      if (result?.status === 'completed') {
+        setProductPendingReportId(null)
+        await loadProductAnalytics(opts, compare)
+      } else if (result?.status === 'pending' && result?._pending_report_id) {
+        setProductPendingReportId(result._pending_report_id)
+      } else if (result?.status === 'error') {
+        setProductPendingReportId(null)
+        setProductError(result.message || 'Failed to sync product reports')
+      }
+    } catch (err) {
+      setProductPendingReportId(null)
+      setProductError(err.message || 'Failed to sync product reports')
+    } finally {
+      setProductSyncing(false)
+    }
+  }
+
   // Refresh search terms when sync completes (persists across navigation)
   useEffect(() => {
     if (reportSearchTermsSync.status === 'completed' && reportSearchTermsSync.credentialId === activeAccountId) {
       loadSearchTerms()
     }
   }, [reportSearchTermsSync.status, reportSearchTermsSync.credentialId, activeAccountId])
+
+  // Poll pending product report until completion
+  useEffect(() => {
+    if (!productPendingReportId || productSyncing || !activeAccountId) return
+    const timer = setTimeout(() => {
+      syncProducts(productPendingReportId)
+    }, 10000)
+    return () => clearTimeout(timer)
+  }, [productPendingReportId, productSyncing, activeAccountId])
 
   async function generateReport() {
     setGenerating(true)
@@ -1161,6 +1372,7 @@ export default function Reports() {
       // Use daily_trend from the generate response if available
       if (data?.daily_trend?.length) {
         setTrendData(data.daily_trend)
+        setTrendSource('generated_report')
       }
       // If report still pending at Amazon, start background polling (persists across navigation)
       if (data?.report_pending) {
@@ -1168,9 +1380,13 @@ export default function Reports() {
           if (!mountedRef.current) return
           setReportData(updatedData)
           if (updatedData?.currency_code) setCurrencyCode(updatedData.currency_code)
-          if (updatedData?.daily_trend?.length) setTrendData(updatedData.daily_trend)
+          if (updatedData?.daily_trend?.length) {
+            setTrendData(updatedData.daily_trend)
+            setTrendSource('generated_report')
+          }
         })
       }
+      await loadProductAnalytics(opts, compare)
     } catch (err) {
       setError(err.message || 'Failed to generate report')
     } finally {
@@ -1193,7 +1409,7 @@ export default function Reports() {
     preset: dateRange.preset,
   }
 
-  const hasComparison = compare && !!reportData?.comparison
+  const hasComparison = compare && !!reportData?.comparison && !reportData?.comparison?.unavailable
   const hasData = activeSummary && Object.keys(activeSummary).length > 0
   const isEmptyApiResult = reportData?.report_source === 'amazon_ads_api' && (!reportData?.campaigns?.length)
   const isCacheData = reportData?.report_source === 'campaign_cache'
@@ -1411,6 +1627,26 @@ export default function Reports() {
         </div>
       )}
 
+      {compare && reportData?.comparison?.unavailable && (
+        <div className="card bg-amber-50 border-amber-200 p-4 flex items-center gap-3">
+          <AlertTriangle size={16} className="text-amber-500 shrink-0" />
+          <p className="text-sm text-amber-800 flex-1">
+            Comparison data is unavailable for the selected previous period.
+            Generate additional reports or sync more history to enable date-range comparison.
+          </p>
+        </div>
+      )}
+
+      {compare && productSummaryData?.comparison?.unavailable && (
+        <div className="card bg-amber-50 border-amber-200 p-4 flex items-center gap-3">
+          <AlertTriangle size={16} className="text-amber-500 shrink-0" />
+          <p className="text-sm text-amber-800 flex-1">
+            Product comparison data is unavailable for the selected previous period.
+            Sync product reports for both periods to compare ASIN performance.
+          </p>
+        </div>
+      )}
+
       {/* No data for this date range */}
       {isEmptyApiResult && (
         <div className="card bg-blue-50 border-blue-200 p-4 flex items-center gap-3">
@@ -1538,7 +1774,15 @@ export default function Reports() {
         {/* Spend vs Sales Trend */}
         <ChartCard
           title="Spend vs Sales Trend"
-          subtitle={trendData.length > 0 ? `${trendData.length} data point${trendData.length > 1 ? 's' : ''} — more audits build richer trends` : 'Run audits to build trend data'}
+          subtitle={
+            trendData.length > 0
+              ? trendSource === 'range_history'
+                ? `${trendData.length} data point${trendData.length > 1 ? 's' : ''} — built from saved report ranges (approx.)`
+                : trendSource === 'audit_snapshots'
+                  ? `${trendData.length} data point${trendData.length > 1 ? 's' : ''} — built from audit snapshots`
+                : `${trendData.length} data point${trendData.length > 1 ? 's' : ''} — daily trend history`
+              : 'Run audits or generate reports to build trend data'
+          }
         >
           {trendData.length > 0 ? (
             <ResponsiveContainer width="100%" height={280}>
@@ -1691,6 +1935,22 @@ export default function Reports() {
         </div>
       )}
 
+      {/* ── Product Performance Section ───────────────────────────── */}
+      <ProductPerformanceSection
+        syncing={productSyncing || !!productPendingReportId}
+        loading={productLoading}
+        summaryData={productSummaryData}
+        rows={productRows}
+        error={productError || (productPendingReportId ? 'Product report is still processing at Amazon. Sync will retry automatically.' : null)}
+        onSync={() => syncProducts(productPendingReportId)}
+        onDismissError={() => {
+          setProductError(null)
+          setProductPendingReportId(null)
+        }}
+        currencyCode={currencyCode}
+        compareEnabled={compare}
+      />
+
       {/* ── Search Terms Section ──────────────────────────────────── */}
       <SearchTermsSection
         accountId={activeAccountId}
@@ -1735,7 +1995,7 @@ export default function Reports() {
 
       {/* ── Additional Metrics Cards ────────────────────────────────── */}
       {hasData && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
           <KpiCard
             title="Avg CPC"
             value={activeSummary.cpc}
@@ -1753,6 +2013,14 @@ export default function Reports() {
             icon={Percent}
             color="emerald"
             delta={hasComparison ? deltas.cvr : undefined}
+          />
+          <KpiCard
+            title="Top Search IS"
+            value={activeSummary.top_of_search_impression_share}
+            format="percent"
+            icon={Eye}
+            color="cyan"
+            delta={hasComparison ? deltas.top_of_search_impression_share : undefined}
           />
           <KpiCard
             title="Active Campaigns"

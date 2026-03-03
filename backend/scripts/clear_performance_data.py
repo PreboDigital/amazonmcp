@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Clear only performance data tables (campaign_performance_daily, account_performance_daily).
-Use this to remove stale or incorrect report data before re-generating.
+Clear only performance data tables (campaign_performance_daily, account_performance_daily,
+product_performance_daily) and zero Campaign table metrics.
+Reports page falls back to Campaign when daily is empty.
 
 Run from backend directory:
   python scripts/clear_performance_data.py
@@ -31,10 +32,14 @@ async def clear_performance_data(
     include_reports: bool = True,
     dry_run: bool = False,
 ):
-    """Clear campaign_performance_daily, account_performance_daily, and optionally reports."""
+    """Clear campaign_performance_daily, account_performance_daily, product_performance_daily,
+    optionally reports,
+    and zero out Campaign table metrics (Reports page fallback uses campaigns when daily is empty).
+    """
     tables = [
         ("campaign_performance_daily", "credential_id"),
         ("account_performance_daily", "credential_id"),
+        ("product_performance_daily", "credential_id"),
     ]
     if include_reports:
         tables.append(("reports", "credential_id"))
@@ -64,10 +69,44 @@ async def clear_performance_data(
                 scope = f"credential_id={credential_id}" if credential_id else "all"
                 print(f"  Cleared {table}: {deleted} rows ({scope})")
 
+        # Zero out Campaign table metrics — Reports page fallback uses campaigns when daily is empty
+        has_metrics_where = (
+            "(spend IS NOT NULL AND spend != 0) OR (sales IS NOT NULL AND sales != 0) "
+            "OR (impressions IS NOT NULL AND impressions != 0) OR (clicks IS NOT NULL AND clicks != 0) "
+            "OR (orders IS NOT NULL AND orders != 0)"
+        )
+        if dry_run:
+            if credential_id:
+                result = await conn.execute(
+                    text(f"SELECT COUNT(*) FROM campaigns WHERE ({has_metrics_where}) AND credential_id = :cid"),
+                    {"cid": credential_id},
+                )
+            else:
+                result = await conn.execute(text(f"SELECT COUNT(*) FROM campaigns WHERE {has_metrics_where}"))
+            count = result.scalar()
+            scope = f"credential_id={credential_id}" if credential_id else "all"
+            print(f"  [DRY-RUN] Would zero campaigns metrics: {count} rows ({scope})")
+        else:
+            if credential_id:
+                zero_sql = text(
+                    f"UPDATE campaigns SET spend = 0, sales = 0, impressions = 0, clicks = 0, orders = 0, acos = NULL, roas = NULL "
+                    f"WHERE ({has_metrics_where}) AND credential_id = :cid"
+                )
+                result = await conn.execute(zero_sql, {"cid": credential_id})
+            else:
+                zero_sql = text(
+                    f"UPDATE campaigns SET spend = 0, sales = 0, impressions = 0, clicks = 0, orders = 0, acos = NULL, roas = NULL "
+                    f"WHERE {has_metrics_where}"
+                )
+                result = await conn.execute(zero_sql)
+            updated = result.rowcount
+            scope = f"credential_id={credential_id}" if credential_id else "all"
+            print(f"  Zeroed campaigns metrics: {updated} rows ({scope})")
+
 
 async def main():
     parser = argparse.ArgumentParser(
-        description="Clear only performance data (campaign_performance_daily, account_performance_daily)"
+        description="Clear only performance data (campaign/account/product daily tables)"
     )
     parser.add_argument(
         "--credential-id",

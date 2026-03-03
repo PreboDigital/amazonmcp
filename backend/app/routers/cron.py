@@ -83,36 +83,40 @@ async def cron_reports(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Scheduled report generation (last 7 days). Call from QStash:
+    Scheduled daily report generation (yesterday). Call from QStash:
     POST https://your-app.railway.app/api/cron/reports
     Header: X-Cron-Secret: <CRON_SECRET>
     """
     try:
         cred = await _get_cred(db, None)
-        end_d = date.today()
-        start_d = end_d - timedelta(days=6)
-        start_str = start_d.isoformat()
-        end_str = end_d.isoformat()
+        report_day = date.today() - timedelta(days=1)
+        day_str = report_day.isoformat()
 
         client = await get_mcp_client_with_fresh_token(cred, db)
         adv_id = await _resolve_advertiser_account_id(db, cred)
         service = ReportingService(client, advertiser_account_id=adv_id)
 
         mcp_result = await service.generate_mcp_report(
-            start_str, end_str, max_wait=180
+            day_str, day_str, max_wait=180
         )
         if mcp_result.get("_pending_report_id"):
-            return {"status": "pending", "report_id": mcp_result["_pending_report_id"]}
+            return {
+                "status": "pending",
+                "report_id": mcp_result["_pending_report_id"],
+                "date": day_str,
+            }
 
         parsed = service.parse_report_campaigns(mcp_result)
         if parsed:
             await sync_campaigns_to_db(db, cred.id, parsed, profile_id=cred.profile_id)
-            for d in (start_d + timedelta(days=i) for i in range(7)):
-                ds = d.isoformat()
-                await store_campaign_daily_data(db, cred.id, parsed, ds, source="cron", profile_id=cred.profile_id)
-                await store_account_daily_summary(db, cred.id, parsed, ds, source="cron", profile_id=cred.profile_id)
+            await store_campaign_daily_data(
+                db, cred.id, parsed, day_str, source="cron_daily", profile_id=cred.profile_id
+            )
+            await store_account_daily_summary(
+                db, cred.id, parsed, day_str, source="cron_daily", profile_id=cred.profile_id
+            )
 
-        return {"status": "ok", "rows": len(parsed) if parsed else 0}
+        return {"status": "ok", "rows": len(parsed) if parsed else 0, "date": day_str}
     except Exception as e:
         logger.exception("Cron reports failed")
         raise HTTPException(500, str(e))
@@ -153,26 +157,26 @@ async def cron_search_terms(
 # ── Admin-only manual trigger (no CRON_SECRET) ──────────────────────────
 
 async def _run_reports(db: AsyncSession):
-    """Shared logic for reports cron."""
+    """Shared logic for daily reports cron."""
     cred = await _get_cred(db, None)
-    end_d = date.today()
-    start_d = end_d - timedelta(days=6)
-    start_str = start_d.isoformat()
-    end_str = end_d.isoformat()
+    report_day = date.today() - timedelta(days=1)
+    day_str = report_day.isoformat()
     client = await get_mcp_client_with_fresh_token(cred, db)
     adv_id = await _resolve_advertiser_account_id(db, cred)
     service = ReportingService(client, advertiser_account_id=adv_id)
-    mcp_result = await service.generate_mcp_report(start_str, end_str, max_wait=180)
+    mcp_result = await service.generate_mcp_report(day_str, day_str, max_wait=180)
     if mcp_result.get("_pending_report_id"):
-        return {"status": "pending", "report_id": mcp_result["_pending_report_id"]}
+        return {"status": "pending", "report_id": mcp_result["_pending_report_id"], "date": day_str}
     parsed = service.parse_report_campaigns(mcp_result)
     if parsed:
         await sync_campaigns_to_db(db, cred.id, parsed, profile_id=cred.profile_id)
-        for d in (start_d + timedelta(days=i) for i in range(7)):
-            ds = d.isoformat()
-            await store_campaign_daily_data(db, cred.id, parsed, ds, source="cron", profile_id=cred.profile_id)
-            await store_account_daily_summary(db, cred.id, parsed, ds, source="cron", profile_id=cred.profile_id)
-    return {"status": "ok", "rows": len(parsed) if parsed else 0}
+        await store_campaign_daily_data(
+            db, cred.id, parsed, day_str, source="cron_daily", profile_id=cred.profile_id
+        )
+        await store_account_daily_summary(
+            db, cred.id, parsed, day_str, source="cron_daily", profile_id=cred.profile_id
+        )
+    return {"status": "ok", "rows": len(parsed) if parsed else 0, "date": day_str}
 
 
 async def _run_search_terms(db: AsyncSession):
