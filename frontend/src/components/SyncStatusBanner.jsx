@@ -15,6 +15,8 @@ export default function SyncStatusBanner() {
     dismissCampaignSync,
     reportSearchTermsSync,
     dismissReportSearchTermsSync,
+    productReportSync,
+    dismissProductReportSync,
     reportGenerateSync,
     dismissReportGenerateSync,
     COMPLETED_BANNER_DURATION_MS,
@@ -24,22 +26,29 @@ export default function SyncStatusBanner() {
 
   // Auto-dismiss completed banners after duration
   useEffect(() => {
-    const completedAt = campaignSync.completedAt || reportSearchTermsSync.completedAt || reportGenerateSync.completedAt
+    const completedAt =
+      campaignSync.completedAt ||
+      reportSearchTermsSync.completedAt ||
+      productReportSync.completedAt ||
+      reportGenerateSync.completedAt
     if (!completedAt) return
     const remaining = COMPLETED_BANNER_DURATION_MS - (now - completedAt)
     if (remaining <= 0) return
     const t = setTimeout(() => setNow(Date.now()), Math.min(remaining, 1000))
     return () => clearTimeout(t)
-  }, [campaignSync.completedAt, reportSearchTermsSync.completedAt, reportGenerateSync.completedAt, now, COMPLETED_BANNER_DURATION_MS])
+  }, [campaignSync.completedAt, reportSearchTermsSync.completedAt, productReportSync.completedAt, reportGenerateSync.completedAt, now, COMPLETED_BANNER_DURATION_MS])
 
   const campaignCompletedAgo = campaignSync.completedAt ? now - campaignSync.completedAt : Infinity
   const reportStCompletedAgo = reportSearchTermsSync.completedAt ? now - reportSearchTermsSync.completedAt : Infinity
+  const productReportCompletedAgo = productReportSync.completedAt ? now - productReportSync.completedAt : Infinity
   const reportGenCompletedAgo = reportGenerateSync.completedAt ? now - reportGenerateSync.completedAt : Infinity
 
   const showCampaignCompleted = campaignSync.status === 'completed' && campaignCompletedAgo < COMPLETED_BANNER_DURATION_MS
   const showCampaignFailed = campaignSync.status === 'failed'
   const showReportStCompleted = reportSearchTermsSync.status === 'completed' && reportStCompletedAgo < COMPLETED_BANNER_DURATION_MS
   const showReportStFailed = reportSearchTermsSync.status === 'failed'
+  const showProductReportCompleted = productReportSync.status === 'completed' && productReportCompletedAgo < COMPLETED_BANNER_DURATION_MS
+  const showProductReportFailed = productReportSync.status === 'failed'
   const showReportGenCompleted = reportGenerateSync.status === 'completed' && reportGenCompletedAgo < COMPLETED_BANNER_DURATION_MS
   const showReportGenFailed = reportGenerateSync.status === 'failed'
   const matchesActiveProfile = (syncState) => !syncState?.profileId || !activeProfileId || syncState.profileId === activeProfileId
@@ -134,6 +143,50 @@ export default function SyncStatusBanner() {
           </div>
           <button
             onClick={dismissReportSearchTermsSync}
+            className="shrink-0 p-1 rounded hover:bg-black/5 text-slate-500 hover:text-slate-700"
+            aria-label="Dismiss"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // Product sync banner
+  if (matchesActiveProfile(productReportSync) && (productReportSync.status === 'running' || showProductReportCompleted || showProductReportFailed)) {
+    const isRunning = productReportSync.status === 'running'
+    const isSuccess = productReportSync.status === 'completed'
+    const isFailed = productReportSync.status === 'failed'
+
+    return (
+      <div
+        className={clsx(
+          'card px-5 py-4',
+          isRunning && 'bg-violet-50 border-violet-200',
+          isSuccess && 'bg-emerald-50 border-emerald-200',
+          isFailed && 'bg-red-50 border-red-200'
+        )}
+      >
+        <div className="flex items-center gap-3">
+          {isRunning && <Loader2 size={18} className="animate-spin text-violet-600 shrink-0" />}
+          {isSuccess && <Check size={18} className="text-emerald-600 shrink-0" />}
+          {isFailed && <AlertTriangle size={18} className="text-red-600 shrink-0" />}
+          <div className="flex-1 min-w-0">
+            {isRunning && (
+              <p className="text-sm font-medium text-violet-900">
+                Syncing product performance report from Amazon... You can navigate away.
+              </p>
+            )}
+            {isSuccess && (
+              <p className="text-sm font-medium text-emerald-800">Product sync complete</p>
+            )}
+            {isFailed && (
+              <p className="text-sm font-medium text-red-800">{productReportSync.error || 'Product sync failed'}</p>
+            )}
+          </div>
+          <button
+            onClick={dismissProductReportSync}
             className="shrink-0 p-1 rounded hover:bg-black/5 text-slate-500 hover:text-slate-700"
             aria-label="Dismiss"
           >

@@ -1148,6 +1148,9 @@ export default function Reports() {
     reportSearchTermsSync,
     startReportSearchTermsSync,
     dismissReportSearchTermsSync,
+    productReportSync,
+    startProductReportSync,
+    dismissProductReportSync,
     reportGenerateSync,
     startReportGenerateSync,
   } = useSync()
@@ -1158,8 +1161,6 @@ export default function Reports() {
   const [productSummaryData, setProductSummaryData] = useState(null)
   const [productRows, setProductRows] = useState([])
   const [productLoading, setProductLoading] = useState(false)
-  const [productSyncing, setProductSyncing] = useState(false)
-  const [productPendingReportId, setProductPendingReportId] = useState(null)
   const [productError, setProductError] = useState(null)
 
   const [reportHistory, setReportHistory] = useState([])
@@ -1181,7 +1182,6 @@ export default function Reports() {
     setStData(null)
     setProductSummaryData(null)
     setProductRows([])
-    setProductPendingReportId(null)
     setProductError(null)
     loadInitialData(dateRange)
     loadSearchTerms()
@@ -1318,29 +1318,9 @@ export default function Reports() {
   }
 
   async function syncProducts(pendingId = null) {
-    setProductSyncing(true)
     setProductError(null)
-    try {
-      const opts = { startDate: dateRange.start, endDate: dateRange.end }
-      const result = await reports.productSync(activeAccountId, {
-        ...opts,
-        pendingReportId: pendingId || productPendingReportId || undefined,
-      })
-      if (result?.status === 'completed') {
-        setProductPendingReportId(null)
-        await loadProductAnalytics(opts, compare)
-      } else if (result?.status === 'pending' && result?._pending_report_id) {
-        setProductPendingReportId(result._pending_report_id)
-      } else if (result?.status === 'error') {
-        setProductPendingReportId(null)
-        setProductError(result.message || 'Failed to sync product reports')
-      }
-    } catch (err) {
-      setProductPendingReportId(null)
-      setProductError(err.message || 'Failed to sync product reports')
-    } finally {
-      setProductSyncing(false)
-    }
+    const opts = { startDate: dateRange.start, endDate: dateRange.end }
+    startProductReportSync(activeAccountId, activeProfileId, opts, pendingId || productReportSync.pendingReportId)
   }
 
   // Refresh search terms when sync completes (persists across navigation)
@@ -1354,14 +1334,25 @@ export default function Reports() {
     }
   }, [reportSearchTermsSync.status, reportSearchTermsSync.credentialId, reportSearchTermsSync.profileId, activeAccountId, activeProfileId])
 
-  // Poll pending product report until completion
   useEffect(() => {
-    if (!productPendingReportId || productSyncing || !activeAccountId) return
-    const timer = setTimeout(() => {
-      syncProducts(productPendingReportId)
-    }, 10000)
-    return () => clearTimeout(timer)
-  }, [productPendingReportId, productSyncing, activeAccountId])
+    if (
+      productReportSync.status === 'completed' &&
+      productReportSync.credentialId === activeAccountId &&
+      productReportSync.profileId === activeProfileId
+    ) {
+      loadProductAnalytics(reportOpts(), compare)
+    }
+  }, [productReportSync.status, productReportSync.credentialId, productReportSync.profileId, activeAccountId, activeProfileId, compare])
+
+  useEffect(() => {
+    if (
+      productReportSync.status === 'failed' &&
+      productReportSync.credentialId === activeAccountId &&
+      productReportSync.profileId === activeProfileId
+    ) {
+      setProductError(productReportSync.error || 'Failed to sync product reports')
+    }
+  }, [productReportSync.status, productReportSync.error, productReportSync.credentialId, productReportSync.profileId, activeAccountId, activeProfileId])
 
   async function generateReport() {
     setGenerating(true)
@@ -1937,15 +1928,15 @@ export default function Reports() {
 
       {/* ── Product Performance Section ───────────────────────────── */}
       <ProductPerformanceSection
-        syncing={productSyncing || !!productPendingReportId}
+        syncing={productReportSync.status === 'running'}
         loading={productLoading}
         summaryData={productSummaryData}
         rows={productRows}
-        error={productError || (productPendingReportId ? 'Product report is still processing at Amazon. Sync will retry automatically.' : null)}
-        onSync={() => syncProducts(productPendingReportId)}
+        error={productError || productReportSync.error || (productReportSync.status === 'running' ? 'Product report is still processing at Amazon. Sync will retry automatically.' : null)}
+        onSync={() => syncProducts(productReportSync.pendingReportId)}
         onDismissError={() => {
           setProductError(null)
-          setProductPendingReportId(null)
+          dismissProductReportSync()
         }}
         currencyCode={currencyCode}
         compareEnabled={compare}

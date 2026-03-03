@@ -13,6 +13,7 @@ const SyncContext = createContext(null)
 
 const CAMPAIGN_POLL_INTERVAL = 2000
 const REPORT_SEARCH_TERMS_POLL_INTERVAL = 10000
+const REPORT_PRODUCTS_POLL_INTERVAL = 10000
 const REPORT_GENERATE_POLL_INTERVAL = 8000
 const COMPLETED_BANNER_DURATION_MS = 60000 // Show completed banner for 60s or until dismiss
 
@@ -43,6 +44,17 @@ export function SyncProvider({ children }) {
     completedAt: null,
   })
 
+  // Product report sync
+  const [productReportSync, setProductReportSync] = useState({
+    pendingReportId: null,
+    status: null, // 'running' | 'completed' | 'failed'
+    credentialId: null,
+    profileId: null,
+    opts: null,
+    error: null,
+    completedAt: null,
+  })
+
   // Report generate (when report_pending from Amazon)
   const [reportGenerateSync, setReportGenerateSync] = useState({
     status: null, // 'running' | 'completed' | 'failed'
@@ -55,6 +67,7 @@ export function SyncProvider({ children }) {
 
   const campaignPollRef = useRef(null)
   const reportStPollRef = useRef(null)
+  const productReportPollRef = useRef(null)
   const reportGenPollRef = useRef(null)
   const hasBrowserNotifRef = useRef(false)
 
@@ -283,6 +296,128 @@ export function SyncProvider({ children }) {
     }
   }, [reportSearchTermsSync.status, reportSearchTermsSync.pendingReportId, reportSearchTermsSync.credentialId, notifySuccess, notifyError, showBrowserNotification])
 
+  // ── Product report sync ────────────────────────────────────────────
+  const startProductReportSync = useCallback(async (credentialId, profileId = null, opts = {}, pendingReportId = null) => {
+    if (productReportSync.status === 'running') return
+    setProductReportSync({
+      pendingReportId: pendingReportId || null,
+      status: 'running',
+      credentialId,
+      profileId,
+      opts,
+      error: null,
+      completedAt: null,
+    })
+    hasBrowserNotifRef.current = await requestBrowserNotificationPermission()
+
+    try {
+      const result = await reports.productSync(credentialId, {
+        ...opts,
+        pendingReportId: pendingReportId || undefined,
+      })
+      if (result.status === 'completed') {
+        setProductReportSync(prev => ({
+          ...prev,
+          status: 'completed',
+          pendingReportId: null,
+          completedAt: Date.now(),
+        }))
+        notifySuccess('Product sync complete', 'Product performance data has been synced.')
+        if (hasBrowserNotifRef.current) {
+          showBrowserNotification('Product sync complete', { body: 'Product performance data has been synced.' })
+        }
+      } else if (result.status === 'pending' && result._pending_report_id) {
+        setProductReportSync(prev => ({
+          ...prev,
+          pendingReportId: result._pending_report_id,
+        }))
+      } else if (result.status === 'error') {
+        setProductReportSync(prev => ({
+          ...prev,
+          status: 'failed',
+          error: result.message || 'Failed to sync product reports',
+          completedAt: Date.now(),
+        }))
+        notifyError('Product sync failed', result.message || 'Failed to sync product reports')
+      }
+    } catch (err) {
+      setProductReportSync(prev => ({
+        ...prev,
+        status: 'failed',
+        error: err.message || 'Failed to sync product reports',
+        completedAt: Date.now(),
+      }))
+      notifyError('Product sync failed', err.message)
+    }
+  }, [productReportSync.status, notifySuccess, notifyError, requestBrowserNotificationPermission, showBrowserNotification])
+
+  const dismissProductReportSync = useCallback(() => {
+    setProductReportSync({
+      pendingReportId: null,
+      status: null,
+      credentialId: null,
+      profileId: null,
+      opts: null,
+      error: null,
+      completedAt: null,
+    })
+  }, [])
+
+  useEffect(() => {
+    if (
+      productReportSync.status !== 'running' ||
+      !productReportSync.pendingReportId ||
+      !productReportSync.credentialId ||
+      !productReportSync.opts
+    ) return
+
+    const poll = async () => {
+      try {
+        const result = await reports.productSync(productReportSync.credentialId, {
+          ...productReportSync.opts,
+          pendingReportId: productReportSync.pendingReportId,
+        })
+        if (result.status === 'completed') {
+          setProductReportSync(prev => ({
+            ...prev,
+            status: 'completed',
+            pendingReportId: null,
+            completedAt: Date.now(),
+          }))
+          notifySuccess('Product sync complete', 'Product performance data has been synced.')
+          if (hasBrowserNotifRef.current) {
+            showBrowserNotification('Product sync complete', { body: 'Product performance data has been synced.' })
+          }
+          return
+        }
+        if (result.status === 'error') {
+          setProductReportSync(prev => ({
+            ...prev,
+            status: 'failed',
+            error: result.message || 'Failed to sync product reports',
+            completedAt: Date.now(),
+          }))
+          notifyError('Product sync failed', result.message || 'Failed')
+          return
+        }
+        productReportPollRef.current = setTimeout(poll, REPORT_PRODUCTS_POLL_INTERVAL)
+      } catch (err) {
+        setProductReportSync(prev => ({
+          ...prev,
+          status: 'failed',
+          error: err.message,
+          completedAt: Date.now(),
+        }))
+        notifyError('Product sync failed', err.message)
+      }
+    }
+
+    productReportPollRef.current = setTimeout(poll, REPORT_PRODUCTS_POLL_INTERVAL)
+    return () => {
+      if (productReportPollRef.current) clearTimeout(productReportPollRef.current)
+    }
+  }, [productReportSync.status, productReportSync.pendingReportId, productReportSync.credentialId, productReportSync.opts, notifySuccess, notifyError, showBrowserNotification])
+
   // ── Report generate (when report_pending) ────────────────────────────
   const startReportGenerateSync = useCallback((credentialId, profileId = null, opts, onComplete) => {
     if (reportGenerateSync.status === 'running') return
@@ -394,6 +529,12 @@ export function SyncProvider({ children }) {
     }
   }, [reportGenerateSync.status, reportGenerateSync.profileId, activeProfileId, dismissReportGenerateSync])
 
+  useEffect(() => {
+    if (productReportSync.status === 'running' && productReportSync.profileId && activeProfileId && productReportSync.profileId !== activeProfileId) {
+      dismissProductReportSync()
+    }
+  }, [productReportSync.status, productReportSync.profileId, activeProfileId, dismissProductReportSync])
+
   return (
     <SyncContext.Provider
       value={{
@@ -405,6 +546,10 @@ export function SyncProvider({ children }) {
         reportSearchTermsSync,
         startReportSearchTermsSync,
         dismissReportSearchTermsSync,
+
+        productReportSync,
+        startProductReportSync,
+        dismissProductReportSync,
 
         reportGenerateSync,
         startReportGenerateSync,
