@@ -1123,7 +1123,6 @@ class ReportingService:
                     "reports": [
                         {
                             "format": "GZIP_JSON",
-                            "timeUnit": "DAILY",
                             "periods": [
                                 {"datePeriod": {"startDate": start_date, "endDate": end_date}}
                             ],
