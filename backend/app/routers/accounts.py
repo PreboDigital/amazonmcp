@@ -18,6 +18,7 @@ from app.models import (
     Credential, Account, Campaign, AdGroup, Target, Ad, ActivityLog,
 )
 from app.mcp_client import create_mcp_client, MCPError
+from app.services.account_scope import resolve_campaign_sync_scope
 from app.services.token_service import get_mcp_client_with_fresh_token
 from app.utils import (
     parse_uuid,
@@ -323,6 +324,9 @@ async def list_campaigns(
     cred = await _get_credential(db, credential_id)
 
     if sync:
+        _, scope_error = await resolve_campaign_sync_scope(db, cred)
+        if scope_error:
+            raise HTTPException(status_code=400, detail=scope_error)
         client = await _make_client(cred, db)
         try:
             # Fetch all ad product types (SP, SB, SD) for complete coverage

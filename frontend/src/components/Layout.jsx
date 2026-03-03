@@ -26,6 +26,7 @@ import SyncStatusBanner from './SyncStatusBanner'
 import { useAccount } from '../lib/AccountContext'
 import { useAuth } from '../lib/AuthContext'
 import { approvals, accounts as accountsApi } from '../lib/api'
+import { getAccountScopeMeta } from '../lib/accountScope'
 
 const baseNavigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
@@ -76,7 +77,12 @@ function AccountSwitcher({ variant = 'sidebar' }) {
   const isSidebar = variant === 'sidebar'
   const displayName = activeAccount?.account_name || activeAccount?.name || 'Select Account'
   const flag = COUNTRY_FLAGS[activeAccount?.marketplace] || ''
-  const subtitle = activeAccount?.marketplace
+  const activeScope = getAccountScopeMeta(activeAccount)
+  const subtitle = activeScope.isGlobalRoot
+    ? 'Global root · select marketplace child'
+    : activeScope.isCredentialPlaceholder
+      ? 'Credentials only · discover accounts'
+      : activeAccount?.marketplace
     ? `${activeAccount.marketplace} · ${activeAccount.account_status || 'active'}`
     : activeAccount?.region?.toUpperCase() || ''
 
@@ -138,6 +144,7 @@ function AccountSwitcher({ variant = 'sidebar' }) {
             const acctName = acct.account_name || acct.name || 'Unknown'
             const acctFlag = COUNTRY_FLAGS[acct.marketplace] || ''
             const isActive = activeAccount?.id === acct.id
+            const acctScope = getAccountScopeMeta(acct)
 
             return (
               <button
@@ -170,7 +177,7 @@ function AccountSwitcher({ variant = 'sidebar' }) {
                     'text-[10px] truncate',
                     isSidebar ? 'text-slate-500' : 'text-slate-400'
                   )}>
-                    {[acct.marketplace, acct.account_type, acct.account_status].filter(Boolean).join(' · ')}
+                    {[acct.marketplace, acctScope.statusLabel, acct.account_status].filter(Boolean).join(' · ')}
                   </p>
                 </div>
                 {isActive && (
@@ -223,6 +230,7 @@ function AccountSwitcher({ variant = 'sidebar' }) {
 export default function Layout({ children }) {
   const { user, isAdmin, logout } = useAuth()
   const { activeAccount, activeAccountId, activeProfileId } = useAccount()
+  const activeScope = getAccountScopeMeta(activeAccount)
   const [pendingCount, setPendingCount] = useState(0)
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const userMenuRef = useRef(null)
@@ -387,6 +395,11 @@ export default function Layout({ children }) {
       <main className="flex-1 overflow-y-auto lg:pt-0 pt-14 pb-20 lg:pb-0">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-4">
           <SyncStatusBanner />
+          {activeAccountId && activeAccount && !activeScope.canSyncCampaigns && activeScope.warning && (
+            <div className="card bg-amber-50 border-amber-200 px-4 py-3 text-sm text-amber-800">
+              {activeScope.warning}
+            </div>
+          )}
           {children}
         </div>
       </main>

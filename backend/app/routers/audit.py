@@ -17,6 +17,7 @@ from app.models import (
     Report, ActivityLog, Account,
 )
 from app.mcp_client import create_mcp_client
+from app.services.account_scope import resolve_campaign_sync_scope
 from app.services.token_service import get_mcp_client_with_fresh_token
 from app.services.audit_service import AuditService
 from app.utils import parse_uuid, safe_error_detail, utcnow
@@ -78,6 +79,9 @@ async def run_audit(payload: AuditRequest, db: AsyncSession = Depends(get_db)):
             status_code=400,
             detail="No account profile selected. Use the account dropdown to select an account, or run Discover Accounts first.",
         )
+    _, scope_error = await resolve_campaign_sync_scope(db, cred)
+    if scope_error:
+        raise HTTPException(status_code=400, detail=scope_error)
     client = await get_mcp_client_with_fresh_token(cred, db)
     adv_account_id = await _resolve_advertiser_account_id(db, cred)
 
@@ -210,6 +214,9 @@ async def create_report(payload: ReportRequest, db: AsyncSession = Depends(get_d
             status_code=400,
             detail="No account profile selected. Use the account dropdown to select an account, or run Discover Accounts first.",
         )
+    _, scope_error = await resolve_campaign_sync_scope(db, cred)
+    if scope_error:
+        raise HTTPException(status_code=400, detail=scope_error)
     client = await get_mcp_client_with_fresh_token(cred, db)
     adv_account_id = await _resolve_advertiser_account_id(db, cred)
     service = AuditService(client, advertiser_account_id=adv_account_id)

@@ -33,6 +33,7 @@ import StatusBadge from '../components/StatusBadge'
 import EmptyState from '../components/EmptyState'
 import { harvest } from '../lib/api'
 import { useAccount } from '../lib/AccountContext'
+import { getAccountScopeMeta } from '../lib/accountScope'
 
 // ── Campaign Multi-Select Dropdown ────────────────────────────────────
 
@@ -256,6 +257,7 @@ function CampaignOption({ campaign, selected, onToggle }) {
 
 export default function Harvester() {
   const { activeAccount, activeAccountId } = useAccount()
+  const activeScope = getAccountScopeMeta(activeAccount)
   const [configs, setConfigs] = useState([])
   const [loading, setLoading] = useState(true)
   const [showCreate, setShowCreate] = useState(false)
@@ -303,6 +305,10 @@ export default function Harvester() {
   }
 
   function openCreateModal() {
+    if (!activeScope.canSyncCampaigns) {
+      setError(activeScope.warning || 'Select a marketplace child profile before creating a harvest rule.')
+      return
+    }
     setForm({ name: '', source_campaigns: [], target_mode: 'new', target_campaign: null, negate_in_source: true, sales_threshold: 1.0, acos_threshold: '', clicks_threshold: '', match_type: '', lookback_days: 30 })
     setCreateStep(1)
     setEditingConfig(null)
@@ -374,6 +380,10 @@ export default function Harvester() {
   }
 
   async function runHarvest(configId) {
+    if (!activeScope.canSyncCampaigns) {
+      setError(activeScope.warning || 'Select a marketplace child profile before running harvest.')
+      return
+    }
     setRunningId(configId)
     setError(null)
     try {
@@ -415,11 +425,15 @@ export default function Harvester() {
             </p>
           </div>
         </div>
-        <button onClick={openCreateModal} disabled={!activeAccount} className="btn-primary"><Plus size={16} /> New Harvest Rule</button>
+        <button onClick={openCreateModal} disabled={!activeAccount || !activeScope.canSyncCampaigns} title={!activeScope.canSyncCampaigns ? activeScope.warning : undefined} className="btn-primary"><Plus size={16} /> New Harvest Rule</button>
       </div>
 
       {!activeAccount && (
         <div className="card bg-amber-50 border-amber-200 p-4 text-sm text-amber-800">Add and select an account in Settings before configuring harvest rules.</div>
+      )}
+
+      {activeAccount && !activeScope.canSyncCampaigns && activeScope.warning && (
+        <div className="card bg-amber-50 border-amber-200 p-4 text-sm text-amber-800">{activeScope.warning}</div>
       )}
 
       {/* How it works — clearer */}
@@ -763,7 +777,7 @@ export default function Harvester() {
       ) : configs.length === 0 ? (
         <EmptyState icon={Sparkles} title="No harvest rules configured"
           description={activeAccount ? `Create a harvest rule for ${activeAccount.account_name || activeAccount.name} to start migrating high-performing keywords.` : 'Select an account, then create a harvest rule.'}
-          action={activeAccount && (<button onClick={openCreateModal} className="btn-primary"><Plus size={16} /> Create First Rule</button>)}
+          action={activeAccount && (<button onClick={openCreateModal} disabled={!activeScope.canSyncCampaigns} title={!activeScope.canSyncCampaigns ? activeScope.warning : undefined} className="btn-primary"><Plus size={16} /> Create First Rule</button>)}
         />
       ) : (
         <div className="space-y-3">
@@ -851,7 +865,7 @@ export default function Harvester() {
 
                     {/* Actions */}
                     <div className="flex items-center gap-1.5 ml-4 shrink-0">
-                      <button onClick={() => runHarvest(config.id)} disabled={runningId === config.id} className="btn-primary text-xs" title="Run harvest (sends to approval queue)">
+                      <button onClick={() => runHarvest(config.id)} disabled={runningId === config.id || !activeScope.canSyncCampaigns} className="btn-primary text-xs" title={!activeScope.canSyncCampaigns ? activeScope.warning : 'Run harvest (sends to approval queue)'}>
                         {runningId === config.id ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />} Run & Review
                       </button>
                       <button onClick={() => openEditModal(config)} className="p-2 rounded-lg hover:bg-slate-100 text-slate-400 transition-colors" title="Edit"><Edit3 size={14} /></button>

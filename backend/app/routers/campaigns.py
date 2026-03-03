@@ -22,6 +22,7 @@ from app.models import (
     ActivityLog, PendingChange, CampaignPerformanceDaily, SearchTermPerformance,
     AppSettings, SyncJob, User,
 )
+from app.services.account_scope import resolve_campaign_sync_scope
 from app.services.token_service import get_mcp_client_with_fresh_token
 from app.services.reporting_service import get_date_range, DATE_PRESETS, resolve_perf_date_source
 from app.services.product_image_service import get_product_image_url
@@ -1626,6 +1627,9 @@ async def run_full_sync(
     When job_id and on_progress are provided, updates SyncJob after each step.
     """
     cred = await _get_credential(db, credential_id)
+    _, scope_error = await resolve_campaign_sync_scope(db, cred)
+    if scope_error:
+        raise HTTPException(status_code=400, detail=scope_error)
     client = await _make_client(cred, db)
     stats = {"campaigns": 0, "ad_groups": 0, "targets": 0, "ads": 0}
 
@@ -2008,6 +2012,9 @@ async def sync_start(
     Poll GET /sync/{job_id} for progress. Email sent on completion.
     """
     cred = await _get_credential(db, credential_id)
+    scoped_account, scope_error = await resolve_campaign_sync_scope(db, cred)
+    if scope_error:
+        raise HTTPException(status_code=400, detail=scope_error)
     job = SyncJob(
         credential_id=cred.id,
         user_id=user.id,
@@ -2020,13 +2027,8 @@ async def sync_start(
 
     # Get account name for email — use active profile (cred.profile_id) so email matches the account actually synced
     account_name = None
-    q = select(Account).where(Account.credential_id == cred.id)
-    if cred.profile_id:
-        q = q.where(Account.profile_id == cred.profile_id)
-    acc_result = await db.execute(q.limit(1))
-    acc = acc_result.scalar_one_or_none()
-    if acc:
-        account_name = acc.account_name or acc.amazon_account_id
+    if scoped_account:
+        account_name = scoped_account.account_name or scoped_account.amazon_account_id
 
     asyncio.create_task(_run_sync_background(
         job.id, credential_id, user.email, account_name,

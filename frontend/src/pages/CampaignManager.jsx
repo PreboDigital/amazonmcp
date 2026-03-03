@@ -34,6 +34,7 @@ import {
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useAccount } from '../lib/AccountContext'
+import { getAccountScopeMeta } from '../lib/accountScope'
 import { useSync } from '../lib/SyncContext'
 import { campaignManager, accounts } from '../lib/api'
 import StatusBadge from '../components/StatusBadge'
@@ -357,6 +358,7 @@ function SingleshotModal({ products = [], onSave, onClose, saving }) {
 
 export default function CampaignManager() {
   const { activeAccountId, activeAccount, activeProfileId, loading: accountLoading } = useAccount()
+  const activeScope = getAccountScopeMeta(activeAccount)
 
   // Navigation state: which level are we viewing?
   const [view, setView] = useState('campaigns') // campaigns | ad-groups | targets | ads
@@ -601,6 +603,10 @@ export default function CampaignManager() {
   }, [campaignSync.status, campaignSync.credentialId, campaignSync.profileId, activeAccountId, activeProfileId, loadStats, loadCampaigns])
 
   function handleSync() {
+    if (!activeScope.canSyncCampaigns) {
+      setError(activeScope.warning || 'Select a marketplace child profile before syncing campaigns.')
+      return
+    }
     startCampaignSync(activeAccountId, activeProfileId)
   }
 
@@ -1194,11 +1200,23 @@ export default function CampaignManager() {
               <ArrowLeft size={16} /> Back
             </button>
           )}
-          <button onClick={handleSync} disabled={syncing || !activeAccountId} className="btn-secondary text-sm">
+          <button
+            onClick={handleSync}
+            disabled={syncing || !activeAccountId || !activeScope.canSyncCampaigns}
+            title={!activeScope.canSyncCampaigns ? activeScope.warning : undefined}
+            className="btn-secondary text-sm"
+          >
             {syncing ? <><Loader2 size={14} className="animate-spin" /> Syncing...</> : <><RefreshCw size={14} /> Sync Data</>}
           </button>
         </div>
       </div>
+
+      {activeAccountId && activeAccount && !activeScope.canSyncCampaigns && activeScope.warning && (
+        <div className="card bg-amber-50 border-amber-200 px-4 py-3 text-sm text-amber-800 flex items-center gap-2">
+          <AlertTriangle size={16} className="shrink-0" />
+          <span>{activeScope.warning}</span>
+        </div>
+      )}
 
       {/* No account selected — show setup prompt instead of errors */}
       {!accountLoading && !activeAccountId && (

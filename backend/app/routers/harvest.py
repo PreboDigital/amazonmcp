@@ -17,6 +17,7 @@ from app.models import (
     HarvestedKeyword, ActivityLog, PendingChange,
 )
 from app.mcp_client import create_mcp_client
+from app.services.account_scope import resolve_campaign_sync_scope
 from app.services.token_service import get_mcp_client_with_fresh_token
 from app.services.harvest_service import HarvestService
 from app.utils import parse_uuid, safe_error_detail, utcnow
@@ -654,15 +655,21 @@ async def list_auto_campaigns(
         )
 
     # Try to return from DB cache first
-    query = select(Campaign).where(
-        Campaign.credential_id == cred.id,
-    ).order_by(Campaign.campaign_name)
+    query = select(Campaign).where(Campaign.credential_id == cred.id)
+    if cred.profile_id is not None:
+        query = query.where(Campaign.profile_id == cred.profile_id)
+    else:
+        query = query.where(Campaign.profile_id.is_(None))
+    query = query.order_by(Campaign.campaign_name)
 
     result = await db.execute(query)
     campaigns = result.scalars().all()
 
     # If no cached campaigns, fetch from MCP and store
     if not campaigns:
+        _, scope_error = await resolve_campaign_sync_scope(db, cred)
+        if scope_error:
+            raise HTTPException(status_code=400, detail=scope_error)
         client = await get_mcp_client_with_fresh_token(cred, db)
         try:
             raw_campaigns = await client.query_campaigns()
@@ -701,6 +708,7 @@ async def list_auto_campaigns(
 
                 campaign = Campaign(
                     credential_id=cred.id,
+                    profile_id=cred.profile_id,
                     amazon_campaign_id=str(amazon_id),
                     campaign_name=camp_data.get("name") or camp_data.get("campaignName"),
                     campaign_type=camp_type,
@@ -715,11 +723,7 @@ async def list_auto_campaigns(
 
             await db.flush()
 
-            result = await db.execute(
-                select(Campaign).where(
-                    Campaign.credential_id == cred.id,
-                ).order_by(Campaign.campaign_name)
-            )
+            result = await db.execute(query)
             campaigns = result.scalars().all()
         except Exception as e:
             raise HTTPException(status_code=502, detail=safe_error_detail(e, "Harvest operation failed. Please try again."))

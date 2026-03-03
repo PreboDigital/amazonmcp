@@ -19,6 +19,7 @@ from app.models import (
     Credential, Campaign, AuditSnapshot, Report, ActivityLog, Account,
     SearchTermPerformance, CampaignPerformanceDaily, AccountPerformanceDaily,
 )
+from app.services.account_scope import resolve_campaign_sync_scope
 from app.services.token_service import get_mcp_client_with_fresh_token
 from app.services.reporting_service import (
     get_date_range, get_comparison_range, get_comparison_range_for_dates,
@@ -626,14 +627,18 @@ async def generate_report(
         camp_count_query = camp_count_query.where(Campaign.profile_id.is_(None))
     camp_count_result = await db.execute(camp_count_query)
     if (camp_count_result.scalar() or 0) == 0:
-        try:
-            client = await get_mcp_client_with_fresh_token(cred, db)
-            raw_campaigns = await client.query_campaigns()
-            from app.services.reporting_service import sync_campaigns_to_db
-            await sync_campaigns_to_db(db, cred.id, raw_campaigns, profile_id=cred.profile_id)
-            logger.info("Auto-synced campaigns to Campaign table during report generation")
-        except Exception as e:
-            logger.warning(f"Campaign auto-sync failed: {e}")
+        _, scope_error = await resolve_campaign_sync_scope(db, cred)
+        if scope_error:
+            logger.info("Skipping campaign metadata auto-sync during report generation: %s", scope_error)
+        else:
+            try:
+                client = await get_mcp_client_with_fresh_token(cred, db)
+                raw_campaigns = await client.query_campaigns()
+                from app.services.reporting_service import sync_campaigns_to_db
+                await sync_campaigns_to_db(db, cred.id, raw_campaigns, profile_id=cred.profile_id)
+                logger.info("Auto-synced campaigns to Campaign table during report generation")
+            except Exception as e:
+                logger.warning(f"Campaign auto-sync failed: {e}")
 
     logger.info("Report generate: date range %s to %s (preset=%s)", start_str, end_str, preset)
     exact_daily_ready, synced_days, expected_days = await _get_exact_daily_coverage(

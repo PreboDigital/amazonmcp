@@ -23,6 +23,7 @@ import StatusBadge from '../components/StatusBadge'
 import EmptyState from '../components/EmptyState'
 import { audit } from '../lib/api'
 import { useAccount } from '../lib/AccountContext'
+import { getAccountScopeMeta } from '../lib/accountScope'
 
 // ── Utility ──────────────────────────────────────────────────────────
 function formatDateRange(startDate, endDate) {
@@ -261,6 +262,7 @@ function MiniMetric({ icon: Icon, label, value, color = 'slate' }) {
 
 export default function Audit() {
   const { activeAccount, activeAccountId } = useAccount()
+  const activeScope = getAccountScopeMeta(activeAccount)
   const [running, setRunning] = useState(false)
   const [result, setResult] = useState(null)
   const [snapshots, setSnapshots] = useState([])
@@ -284,6 +286,10 @@ export default function Audit() {
   }
 
   async function runAudit() {
+    if (!activeScope.canSyncCampaigns) {
+      setError(activeScope.warning || 'Select a marketplace child profile before running an audit.')
+      return
+    }
     setRunning(true)
     setError(null)
     try {
@@ -351,7 +357,8 @@ export default function Audit() {
         </div>
         <button
           onClick={runAudit}
-          disabled={running || !activeAccount}
+          disabled={running || !activeAccount || !activeScope.canSyncCampaigns}
+          title={!activeScope.canSyncCampaigns ? activeScope.warning : undefined}
           className="btn-primary"
         >
           {running ? (
@@ -365,6 +372,12 @@ export default function Audit() {
       {!activeAccount && (
         <div className="card bg-amber-50 border-amber-200 p-4 text-sm text-amber-800">
           Add and select an account in Settings before running an audit.
+        </div>
+      )}
+
+      {activeAccount && !activeScope.canSyncCampaigns && activeScope.warning && (
+        <div className="card bg-amber-50 border-amber-200 p-4 text-sm text-amber-800">
+          {activeScope.warning}
         </div>
       )}
 
@@ -467,7 +480,7 @@ export default function Audit() {
               ? `Run your first audit for ${activeAccount.account_name || activeAccount.name} to see campaign performance data here.`
               : 'Select an account and run your first audit.'}
             action={activeAccount && (
-              <button onClick={runAudit} disabled={running} className="btn-primary">
+              <button onClick={runAudit} disabled={running || !activeScope.canSyncCampaigns} title={!activeScope.canSyncCampaigns ? activeScope.warning : undefined} className="btn-primary">
                 {running ? 'Running...' : 'Run First Audit'}
               </button>
             )}
