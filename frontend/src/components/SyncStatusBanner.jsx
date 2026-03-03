@@ -218,9 +218,25 @@ export default function SyncStatusBanner() {
           {isFailed && <AlertTriangle size={18} className="text-red-600 shrink-0" />}
           <div className="flex-1 min-w-0">
             {isRunning && (
-              <p className="text-sm font-medium text-cyan-900">
-                Syncing exact daily campaign performance... You can navigate away.
-              </p>
+              <>
+                <p className="text-sm font-medium text-cyan-900">
+                  Syncing exact daily campaign performance... You can navigate away.
+                </p>
+                <p className="text-xs text-cyan-700 mt-0.5">
+                  {reportGenerateSync.step || 'Preparing exact daily sync...'}
+                </p>
+                <div className="mt-2 h-1.5 bg-cyan-100 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-cyan-500 transition-all duration-300"
+                    style={{ width: `${reportGenerateSync.progressPct || 0}%` }}
+                  />
+                </div>
+                <p className="text-[10px] text-cyan-600 mt-1.5">
+                  {reportGenerateSync.daysTotal > 0
+                    ? `Synced ${reportGenerateSync.daysSynced || 0} of ${reportGenerateSync.daysTotal} days${reportGenerateSync.currentDate ? ` · current ${reportGenerateSync.currentDate}` : ''}`
+                    : 'Waiting for Amazon to return exact daily data.'}
+                </p>
+              </>
             )}
             {isSuccess && (
               <p className="text-sm font-medium text-emerald-800">Report ready</p>

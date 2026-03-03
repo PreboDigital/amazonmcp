@@ -61,6 +61,11 @@ export function SyncProvider({ children }) {
     credentialId: null,
     profileId: null,
     opts: null,
+    step: '',
+    progressPct: 0,
+    daysSynced: 0,
+    daysTotal: 0,
+    currentDate: null,
     error: null,
     completedAt: null,
   })
@@ -426,6 +431,11 @@ export function SyncProvider({ children }) {
       credentialId,
       profileId,
       opts,
+      step: 'Queued exact daily sync...',
+      progressPct: 0,
+      daysSynced: 0,
+      daysTotal: 0,
+      currentDate: null,
       error: null,
       completedAt: null,
     })
@@ -441,6 +451,8 @@ export function SyncProvider({ children }) {
         setReportGenerateSync(prev => ({
           ...prev,
           status: 'completed',
+          step: '',
+          progressPct: 100,
           completedAt: Date.now(),
         }))
         const cb = reportGenerateSyncOnCompleteRef.current
@@ -452,11 +464,22 @@ export function SyncProvider({ children }) {
         }
         return true
       }
+      const progress = data?.sync_progress || {}
+      setReportGenerateSync(prev => ({
+        ...prev,
+        status: 'running',
+        step: progress.step || 'Syncing exact daily campaign performance...',
+        progressPct: progress.progress_pct ?? 0,
+        daysSynced: progress.days_synced ?? 0,
+        daysTotal: progress.days_total ?? 0,
+        currentDate: progress.current_date || null,
+      }))
       return false
     } catch (err) {
       setReportGenerateSync(prev => ({
         ...prev,
         status: 'failed',
+        step: '',
         error: err.message,
         completedAt: Date.now(),
       }))
@@ -471,6 +494,11 @@ export function SyncProvider({ children }) {
       credentialId: null,
       profileId: null,
       opts: null,
+      step: '',
+      progressPct: 0,
+      daysSynced: 0,
+      daysTotal: 0,
+      currentDate: null,
       error: null,
       completedAt: null,
     })

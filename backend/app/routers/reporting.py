@@ -8,7 +8,7 @@ account_performance_daily tables.
 import asyncio
 import uuid
 import logging
-from datetime import date as date_type, timedelta
+from datetime import date as date_type, datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, delete
@@ -39,6 +39,8 @@ from app.utils import parse_uuid, utcnow
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+REPORT_SYNC_STALE_SECONDS = 600
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -160,6 +162,68 @@ async def _find_report_sync_job(
     return None
 
 
+def _parse_report_sync_timestamp(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_report_sync_progress(sync_job: Optional[Report]) -> Optional[dict]:
+    if not sync_job:
+        return None
+    raw = dict(sync_job.raw_response or {})
+    return {
+        "job_id": str(sync_job.id),
+        "status": sync_job.status,
+        "step": raw.get("step"),
+        "progress_pct": raw.get("progress_pct") or 0,
+        "days_synced": raw.get("days_synced") or 0,
+        "days_total": raw.get("days_total") or 0,
+        "current_date": raw.get("current_date"),
+        "heartbeat_at": raw.get("heartbeat_at"),
+        "started_at": raw.get("started_at"),
+    }
+
+
+def _is_report_sync_job_stale(sync_job: Optional[Report]) -> bool:
+    if not sync_job or sync_job.status not in ("pending", "running"):
+        return False
+
+    raw = dict(sync_job.raw_response or {})
+    last_heartbeat = (
+        _parse_report_sync_timestamp(raw.get("heartbeat_at"))
+        or _parse_report_sync_timestamp(raw.get("started_at"))
+        or sync_job.created_at
+    )
+    if not last_heartbeat:
+        return False
+
+    age_seconds = (utcnow() - last_heartbeat).total_seconds()
+    return age_seconds > REPORT_SYNC_STALE_SECONDS
+
+
+async def _mark_report_sync_job_stale(
+    db: AsyncSession,
+    sync_job: Report,
+    reason: str = "Exact daily sync stopped reporting progress and was restarted.",
+) -> None:
+    raw = dict(sync_job.raw_response or {})
+    raw.update({
+        "step": "Failed",
+        "error": reason,
+        "heartbeat_at": utcnow().isoformat(),
+        "stale": True,
+    })
+    sync_job.status = "failed"
+    sync_job.completed_at = utcnow()
+    sync_job.raw_response = raw
+    sync_job.report_data = {"status": "failed", "message": reason}
+    await db.commit()
+
+
 async def _finalize_report_sync_job_if_ready(
     db: AsyncSession,
     sync_job: Optional[Report],
@@ -192,6 +256,7 @@ async def _finalize_report_sync_job_if_ready(
         "progress_pct": 100,
         "days_synced": synced_days,
         "days_total": expected_days,
+        "heartbeat_at": utcnow().isoformat(),
     })
     sync_job.raw_response = raw
     await db.commit()
@@ -277,9 +342,15 @@ async def _run_report_sync_background(report_id: uuid.UUID) -> None:
                 "progress_pct": 0,
                 "days_synced": 0,
                 "days_total": total_days,
+                "started_at": utcnow().isoformat(),
+                "heartbeat_at": utcnow().isoformat(),
             })
             report.raw_response = raw
             await db.commit()
+            logger.info(
+                "Performance report sync started: report_id=%s profile_id=%s range=%s..%s total_days=%d",
+                str(report.id), profile_id, start_date, end_date, total_days,
+            )
 
             client = await get_mcp_client_with_fresh_token(
                 cred,
@@ -306,15 +377,27 @@ async def _run_report_sync_background(report_id: uuid.UUID) -> None:
                     "days_synced": synced_days,
                     "days_total": total_days,
                     "current_date": day_str,
+                    "heartbeat_at": utcnow().isoformat(),
                 })
                 report.raw_response = raw
                 await db.commit()
+                logger.info(
+                    "Performance report sync progress: report_id=%s day=%s (%d/%d)",
+                    str(report.id), day_str, synced_days, total_days,
+                )
 
                 pending_report_id = None
                 day_result = {}
                 attempts = 0
                 while attempts < 3:
                     attempts += 1
+                    raw = dict(report.raw_response or {})
+                    raw.update({
+                        "step": f"Fetching Amazon report for {day_str} (attempt {attempts}/3)",
+                        "heartbeat_at": utcnow().isoformat(),
+                    })
+                    report.raw_response = raw
+                    await db.commit()
                     day_result = await service.generate_mcp_report(
                         day_str,
                         day_str,
@@ -358,9 +441,14 @@ async def _run_report_sync_background(report_id: uuid.UUID) -> None:
                 raw.update({
                     "days_synced": synced_days,
                     "progress_pct": min(99, int((synced_days / max(total_days, 1)) * 100)),
+                    "heartbeat_at": utcnow().isoformat(),
                 })
                 report.raw_response = raw
                 await db.commit()
+                logger.info(
+                    "Performance report sync stored: report_id=%s day=%s synced_days=%d/%d rows=%d",
+                    str(report.id), day_str, synced_days, total_days, len(day_rows),
+                )
                 current += timedelta(days=1)
 
             await _clear_legacy_range_slice(db, cred.id, start_date, end_date, profile_id)
@@ -379,6 +467,7 @@ async def _run_report_sync_background(report_id: uuid.UUID) -> None:
                 "progress_pct": 100,
                 "days_synced": synced_days,
                 "days_total": total_days,
+                "heartbeat_at": utcnow().isoformat(),
             })
             report.raw_response = raw
             db.add(ActivityLog(
@@ -401,6 +490,7 @@ async def _run_report_sync_background(report_id: uuid.UUID) -> None:
                 raw.update({
                     "step": "Failed",
                     "error": str(exc),
+                    "heartbeat_at": utcnow().isoformat(),
                 })
                 failed_report.status = "failed"
                 failed_report.completed_at = utcnow()
@@ -652,6 +742,7 @@ async def generate_report(
     report_source = "database"
     report_pending_id = None
     sync_error = None
+    sync_progress = None
 
     # For single-day ranges, use plain ISO date; for multi-day, use range key
     is_single_day = start_str == end_str
@@ -692,6 +783,17 @@ async def generate_report(
         end_str,
         profile_id=cred.profile_id,
     )
+    if _is_report_sync_job_stale(sync_job):
+        logger.warning(
+            "Performance report sync stale; restarting: report_id=%s profile_id=%s range=%s..%s",
+            str(sync_job.id), cred.profile_id, start_str, end_str,
+        )
+        await _mark_report_sync_job_stale(
+            db,
+            sync_job,
+            reason="Exact daily sync stopped reporting progress and was restarted.",
+        )
+        sync_job = None
 
     if exact_daily_ready:
         await _finalize_report_sync_job_if_ready(
@@ -726,9 +828,11 @@ async def generate_report(
         )
         if sync_job and sync_job.status in ("pending", "running"):
             report_pending_id = str(sync_job.id)
+            sync_progress = _get_report_sync_progress(sync_job)
         elif recent_failed:
             sync_error = (sync_job.report_data or {}).get("message") or (sync_job.raw_response or {}).get("error")
             report_source = "sync_failed"
+            sync_progress = _get_report_sync_progress(sync_job)
         else:
             sync_job = Report(
                 credential_id=cred.id,
@@ -743,6 +847,8 @@ async def generate_report(
                     "progress_pct": 0,
                     "days_synced": synced_days,
                     "days_total": expected_days,
+                    "queued_at": utcnow().isoformat(),
+                    "heartbeat_at": utcnow().isoformat(),
                 },
             )
             db.add(sync_job)
@@ -750,6 +856,7 @@ async def generate_report(
             report_pending_id = str(sync_job.id)
             await db.commit()
             asyncio.create_task(_run_report_sync_background(sync_job.id))
+            sync_progress = _get_report_sync_progress(sync_job)
 
         campaigns_data = []
         daily_trend = []
@@ -819,6 +926,7 @@ async def generate_report(
         "generated_at": utcnow().isoformat(),
         "report_pending": report_pending_id is not None,
         "report_pending_id": report_pending_id,
+        "sync_progress": sync_progress,
         "data_may_not_match_range": data_may_not_match,
         "sync_error": sync_error,
     }
@@ -848,6 +956,17 @@ async def generate_report(
             comp_end_str,
             profile_id=cred.profile_id,
         )
+        if _is_report_sync_job_stale(comp_job):
+            logger.warning(
+                "Comparison performance report sync stale; restarting: report_id=%s profile_id=%s range=%s..%s",
+                str(comp_job.id), cred.profile_id, comp_start_str, comp_end_str,
+            )
+            await _mark_report_sync_job_stale(
+                db,
+                comp_job,
+                reason="Comparison exact daily sync stopped reporting progress and was restarted.",
+            )
+            comp_job = None
 
         if comp_exact_ready:
             await _finalize_report_sync_job_if_ready(
@@ -891,6 +1010,8 @@ async def generate_report(
                         "progress_pct": 0,
                         "days_synced": comp_synced_days,
                         "days_total": comp_expected_days,
+                        "queued_at": utcnow().isoformat(),
+                        "heartbeat_at": utcnow().isoformat(),
                     },
                 )
                 db.add(comp_job)
