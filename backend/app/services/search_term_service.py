@@ -356,6 +356,8 @@ async def get_search_term_summary(
     min_clicks: int = 0,
     max_results: int = 100,
     profile_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
 ) -> dict:
     """
     Query stored search term data for the AI context.
@@ -367,6 +369,9 @@ async def get_search_term_summary(
         q = q.where(SearchTermPerformance.profile_id == profile_id)
     else:
         q = q.where(SearchTermPerformance.profile_id.is_(None))
+    if start_date and end_date:
+        q = q.where(SearchTermPerformance.report_date_start <= end_date)
+        q = q.where(SearchTermPerformance.report_date_end >= start_date)
     result = await db.execute(q)
     all_terms = result.scalars().all()
 

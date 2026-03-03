@@ -1176,12 +1176,20 @@ async def get_search_terms(
 @router.get("/search-terms/summary")
 async def search_terms_summary(
     credential_id: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None, description="Filter by report range start (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="Filter by report range end (YYYY-MM-DD)"),
     db: AsyncSession = Depends(get_db),
 ):
     """Get a summary of stored search term data for the account."""
     cred = await _get_cred(db, credential_id)
     logger.info("Reports search-terms/summary: credential_id=%s profile_id=%s", str(cred.id), cred.profile_id)
-    summary = await get_search_term_summary(db, cred.id, profile_id=cred.profile_id)
+    summary = await get_search_term_summary(
+        db,
+        cred.id,
+        profile_id=cred.profile_id,
+        start_date=start_date,
+        end_date=end_date,
+    )
     return summary
 
 

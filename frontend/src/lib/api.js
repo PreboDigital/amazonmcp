@@ -392,8 +392,14 @@ export const reports = {
     const qs = params.toString()
     return request(`/reports/search-terms${qs ? `?${qs}` : ''}`)
   },
-  searchTermsSummary: (credentialId) =>
-    request(`/reports/search-terms/summary${credentialId ? `?credential_id=${credentialId}` : ''}`),
+  searchTermsSummary: (credentialId, opts = {}) => {
+    const params = new URLSearchParams()
+    if (credentialId) params.set('credential_id', credentialId)
+    if (opts.startDate) params.set('start_date', opts.startDate)
+    if (opts.endDate) params.set('end_date', opts.endDate)
+    const qs = params.toString()
+    return request(`/reports/search-terms/summary${qs ? `?${qs}` : ''}`)
+  },
   // Product/business reports
   productSync: (credentialId, opts = {}) => request('/reports/products/sync', {
     method: 'POST',

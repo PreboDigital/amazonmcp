@@ -1184,7 +1184,7 @@ export default function Reports() {
     setProductRows([])
     setProductError(null)
     loadInitialData(dateRange)
-    loadSearchTerms()
+    loadSearchTerms(dateRange)
   }, [activeAccountId, activeAccount?.id])
 
   // Re-fetch when date range changes — shows cached data for the selected range
@@ -1234,6 +1234,7 @@ export default function Reports() {
         setTrendSource(tVal?.source || 'daily_history')
       }
       await loadProductAnalytics(opts, compare)
+      await loadSearchTerms(range)
     } catch (err) {
       console.error('Load failed:', err)
     } finally {
@@ -1261,14 +1262,20 @@ export default function Reports() {
         setTrendSource(tVal?.source || 'daily_history')
       }
       await loadProductAnalytics(opts, compare)
+      await loadSearchTerms(range)
     } catch (err) {
       console.error('Preset refresh failed:', err)
     }
   }
 
-  async function loadSearchTerms() {
+  async function loadSearchTerms(range = dateRange) {
     try {
-      const data = await reports.searchTermsSummary(activeAccountId)
+      const opts = {}
+      if (range?.start && range?.end) {
+        opts.startDate = range.start
+        opts.endDate = range.end
+      }
+      const data = await reports.searchTermsSummary(activeAccountId, opts)
       setStData(data)
     } catch (err) { /* ignore — may not have data yet */ }
   }
@@ -1330,9 +1337,9 @@ export default function Reports() {
       reportSearchTermsSync.credentialId === activeAccountId &&
       reportSearchTermsSync.profileId === activeProfileId
     ) {
-      loadSearchTerms()
+      loadSearchTerms(dateRange)
     }
-  }, [reportSearchTermsSync.status, reportSearchTermsSync.credentialId, reportSearchTermsSync.profileId, activeAccountId, activeProfileId])
+  }, [reportSearchTermsSync.status, reportSearchTermsSync.credentialId, reportSearchTermsSync.profileId, activeAccountId, activeProfileId, dateRange.start, dateRange.end])
 
   useEffect(() => {
     if (
