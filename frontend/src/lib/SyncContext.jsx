@@ -7,6 +7,7 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react'
 import { campaignManager, reports } from './api'
 import { useNotifications } from './NotificationContext'
+import { useAccount } from './AccountContext'
 
 const SyncContext = createContext(null)
 
@@ -17,6 +18,7 @@ const COMPLETED_BANNER_DURATION_MS = 60000 // Show completed banner for 60s or u
 
 export function SyncProvider({ children }) {
   const { success: notifySuccess, error: notifyError, requestBrowserNotificationPermission, showBrowserNotification } = useNotifications()
+  const { activeProfileId } = useAccount()
 
   // Campaign sync
   const [campaignSync, setCampaignSync] = useState({
@@ -27,6 +29,7 @@ export function SyncProvider({ children }) {
     stats: null,
     error: null,
     credentialId: null,
+    profileId: null,
     completedAt: null,
   })
 
@@ -35,6 +38,7 @@ export function SyncProvider({ children }) {
     pendingReportId: null,
     status: null, // 'running' | 'completed' | 'failed'
     credentialId: null,
+    profileId: null,
     error: null,
     completedAt: null,
   })
@@ -43,6 +47,7 @@ export function SyncProvider({ children }) {
   const [reportGenerateSync, setReportGenerateSync] = useState({
     status: null, // 'running' | 'completed' | 'failed'
     credentialId: null,
+    profileId: null,
     opts: null,
     error: null,
     completedAt: null,
@@ -54,7 +59,7 @@ export function SyncProvider({ children }) {
   const hasBrowserNotifRef = useRef(false)
 
   // ── Campaign sync ───────────────────────────────────────────────────
-  const startCampaignSync = useCallback(async (credentialId) => {
+  const startCampaignSync = useCallback(async (credentialId, profileId = null) => {
     if (campaignSync.status === 'running') return
     setCampaignSync({
       jobId: null,
@@ -64,6 +69,7 @@ export function SyncProvider({ children }) {
       stats: null,
       error: null,
       credentialId,
+      profileId,
       completedAt: null,
     })
     hasBrowserNotifRef.current = await requestBrowserNotificationPermission()
@@ -94,6 +100,7 @@ export function SyncProvider({ children }) {
       stats: null,
       error: null,
       credentialId: null,
+      profileId: null,
       completedAt: null,
     })
   }, [])
@@ -163,12 +170,13 @@ export function SyncProvider({ children }) {
   }, [campaignSync.status, campaignSync.jobId, notifySuccess, notifyError, showBrowserNotification])
 
   // ── Report search terms sync ────────────────────────────────────────
-  const startReportSearchTermsSync = useCallback(async (credentialId, pendingReportId = null) => {
+  const startReportSearchTermsSync = useCallback(async (credentialId, profileId = null, pendingReportId = null) => {
     if (reportSearchTermsSync.status === 'running') return
     setReportSearchTermsSync({
       pendingReportId: pendingReportId || null,
       status: 'running',
       credentialId,
+      profileId,
       error: null,
       completedAt: null,
     })
@@ -219,6 +227,7 @@ export function SyncProvider({ children }) {
       pendingReportId: null,
       status: null,
       credentialId: null,
+      profileId: null,
       error: null,
       completedAt: null,
     })
@@ -275,11 +284,12 @@ export function SyncProvider({ children }) {
   }, [reportSearchTermsSync.status, reportSearchTermsSync.pendingReportId, reportSearchTermsSync.credentialId, notifySuccess, notifyError, showBrowserNotification])
 
   // ── Report generate (when report_pending) ────────────────────────────
-  const startReportGenerateSync = useCallback((credentialId, opts, onComplete) => {
+  const startReportGenerateSync = useCallback((credentialId, profileId = null, opts, onComplete) => {
     if (reportGenerateSync.status === 'running') return
     setReportGenerateSync({
       status: 'running',
       credentialId,
+      profileId,
       opts,
       error: null,
       completedAt: null,
@@ -324,6 +334,7 @@ export function SyncProvider({ children }) {
     setReportGenerateSync({
       status: null,
       credentialId: null,
+      profileId: null,
       opts: null,
       error: null,
       completedAt: null,
@@ -348,7 +359,7 @@ export function SyncProvider({ children }) {
   }, [reportGenerateSync.status, reportGenerateSync.credentialId, reportGenerateSync.opts, pollReportGenerate])
 
   // ── Resume on mount (check syncLatest for campaigns) ─────────────────
-  const resumeCampaignSyncIfNeeded = useCallback(async (credentialId) => {
+  const resumeCampaignSyncIfNeeded = useCallback(async (credentialId, profileId = null) => {
     if (!credentialId || campaignSync.status === 'running') return
     try {
       const { job } = await campaignManager.syncLatest(credentialId)
@@ -361,11 +372,27 @@ export function SyncProvider({ children }) {
           stats: null,
           error: null,
           credentialId,
+          profileId,
           completedAt: null,
         })
       }
     } catch { /* ignore */ }
   }, [campaignSync.status])
+
+  // Search-term/report polling depends on the backend credential profile scope.
+  // If the user switches accounts, stop profile-scoped polling so it cannot resume
+  // against a different advertiser under the same credential.
+  useEffect(() => {
+    if (reportSearchTermsSync.status === 'running' && reportSearchTermsSync.profileId && activeProfileId && reportSearchTermsSync.profileId !== activeProfileId) {
+      dismissReportSearchTermsSync()
+    }
+  }, [reportSearchTermsSync.status, reportSearchTermsSync.profileId, activeProfileId, dismissReportSearchTermsSync])
+
+  useEffect(() => {
+    if (reportGenerateSync.status === 'running' && reportGenerateSync.profileId && activeProfileId && reportGenerateSync.profileId !== activeProfileId) {
+      dismissReportGenerateSync()
+    }
+  }, [reportGenerateSync.status, reportGenerateSync.profileId, activeProfileId, dismissReportGenerateSync])
 
   return (
     <SyncContext.Provider

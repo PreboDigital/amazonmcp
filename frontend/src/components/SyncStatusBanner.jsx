@@ -6,8 +6,10 @@ import { useEffect, useState } from 'react'
 import { Loader2, Check, X, AlertTriangle } from 'lucide-react'
 import clsx from 'clsx'
 import { useSync } from '../lib/SyncContext'
+import { useAccount } from '../lib/AccountContext'
 
 export default function SyncStatusBanner() {
+  const { activeProfileId } = useAccount()
   const {
     campaignSync,
     dismissCampaignSync,
@@ -40,9 +42,10 @@ export default function SyncStatusBanner() {
   const showReportStFailed = reportSearchTermsSync.status === 'failed'
   const showReportGenCompleted = reportGenerateSync.status === 'completed' && reportGenCompletedAgo < COMPLETED_BANNER_DURATION_MS
   const showReportGenFailed = reportGenerateSync.status === 'failed'
+  const matchesActiveProfile = (syncState) => !syncState?.profileId || !activeProfileId || syncState.profileId === activeProfileId
 
   // Campaign sync banner
-  if (campaignSync.status === 'running' || showCampaignCompleted || showCampaignFailed) {
+  if (matchesActiveProfile(campaignSync) && (campaignSync.status === 'running' || showCampaignCompleted || showCampaignFailed)) {
     const isRunning = campaignSync.status === 'running'
     const isSuccess = campaignSync.status === 'completed'
     const isFailed = campaignSync.status === 'failed'
@@ -98,7 +101,7 @@ export default function SyncStatusBanner() {
   }
 
   // Report search terms sync banner
-  if (reportSearchTermsSync.status === 'running' || showReportStCompleted || showReportStFailed) {
+  if (matchesActiveProfile(reportSearchTermsSync) && (reportSearchTermsSync.status === 'running' || showReportStCompleted || showReportStFailed)) {
     const isRunning = reportSearchTermsSync.status === 'running'
     const isSuccess = reportSearchTermsSync.status === 'completed'
     const isFailed = reportSearchTermsSync.status === 'failed'
@@ -142,7 +145,7 @@ export default function SyncStatusBanner() {
   }
 
   // Report generate (report_pending) banner
-  if (reportGenerateSync.status === 'running' || showReportGenCompleted || showReportGenFailed) {
+  if (matchesActiveProfile(reportGenerateSync) && (reportGenerateSync.status === 'running' || showReportGenCompleted || showReportGenFailed)) {
     const isRunning = reportGenerateSync.status === 'running'
     const isSuccess = reportGenerateSync.status === 'completed'
     const isFailed = reportGenerateSync.status === 'failed'

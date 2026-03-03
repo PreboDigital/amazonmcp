@@ -1106,7 +1106,7 @@ function ProductPerformanceSection({
 // ── Main Reports Page ────────────────────────────────────────────────
 
 export default function Reports() {
-  const { activeAccount, activeAccountId } = useAccount()
+  const { activeAccount, activeAccountId, activeProfileId } = useAccount()
 
   // UI state
   const [dateRange, setDateRange] = useState({
@@ -1314,7 +1314,7 @@ export default function Reports() {
   }
 
   function syncSearchTerms() {
-    startReportSearchTermsSync(activeAccountId, reportSearchTermsSync.pendingReportId)
+    startReportSearchTermsSync(activeAccountId, activeProfileId, reportSearchTermsSync.pendingReportId)
   }
 
   async function syncProducts(pendingId = null) {
@@ -1345,10 +1345,14 @@ export default function Reports() {
 
   // Refresh search terms when sync completes (persists across navigation)
   useEffect(() => {
-    if (reportSearchTermsSync.status === 'completed' && reportSearchTermsSync.credentialId === activeAccountId) {
+    if (
+      reportSearchTermsSync.status === 'completed' &&
+      reportSearchTermsSync.credentialId === activeAccountId &&
+      reportSearchTermsSync.profileId === activeProfileId
+    ) {
       loadSearchTerms()
     }
-  }, [reportSearchTermsSync.status, reportSearchTermsSync.credentialId, activeAccountId])
+  }, [reportSearchTermsSync.status, reportSearchTermsSync.credentialId, reportSearchTermsSync.profileId, activeAccountId, activeProfileId])
 
   // Poll pending product report until completion
   useEffect(() => {
@@ -1376,7 +1380,7 @@ export default function Reports() {
       }
       // If report still pending at Amazon, start background polling (persists across navigation)
       if (data?.report_pending) {
-        startReportGenerateSync(activeAccountId, opts, (updatedData) => {
+        startReportGenerateSync(activeAccountId, activeProfileId, opts, (updatedData) => {
           if (!mountedRef.current) return
           setReportData(updatedData)
           if (updatedData?.currency_code) setCurrencyCode(updatedData.currency_code)

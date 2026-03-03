@@ -356,7 +356,7 @@ function SingleshotModal({ products = [], onSave, onClose, saving }) {
 // ══════════════════════════════════════════════════════════════════════
 
 export default function CampaignManager() {
-  const { activeAccountId, activeAccount, loading: accountLoading } = useAccount()
+  const { activeAccountId, activeAccount, activeProfileId, loading: accountLoading } = useAccount()
 
   // Navigation state: which level are we viewing?
   const [view, setView] = useState('campaigns') // campaigns | ad-groups | targets | ads
@@ -583,20 +583,25 @@ export default function CampaignManager() {
   const prevCampaignSyncStatusRef = useRef(campaignSync.status)
 
   useEffect(() => {
-    resumeCampaignSyncIfNeeded(activeAccountId)
-  }, [activeAccountId, resumeCampaignSyncIfNeeded])
+    resumeCampaignSyncIfNeeded(activeAccountId, activeProfileId)
+  }, [activeAccountId, activeProfileId, resumeCampaignSyncIfNeeded])
 
   // Refresh data when sync completes (user on this page or returns)
   useEffect(() => {
-    if (prevCampaignSyncStatusRef.current !== 'completed' && campaignSync.status === 'completed' && campaignSync.credentialId === activeAccountId) {
+    if (
+      prevCampaignSyncStatusRef.current !== 'completed' &&
+      campaignSync.status === 'completed' &&
+      campaignSync.credentialId === activeAccountId &&
+      campaignSync.profileId === activeProfileId
+    ) {
       loadStats()
       loadCampaigns(1)
     }
     prevCampaignSyncStatusRef.current = campaignSync.status
-  }, [campaignSync.status, campaignSync.credentialId, activeAccountId, loadStats, loadCampaigns])
+  }, [campaignSync.status, campaignSync.credentialId, campaignSync.profileId, activeAccountId, activeProfileId, loadStats, loadCampaigns])
 
   function handleSync() {
-    startCampaignSync(activeAccountId)
+    startCampaignSync(activeAccountId, activeProfileId)
   }
 
   // ── Campaign actions ────────────────────────────────────────────
