@@ -22,7 +22,7 @@ from app.services.token_service import get_mcp_client_with_fresh_token
 from app.services.reporting_service import (
     get_date_range, get_comparison_range, get_comparison_range_for_dates,
     compute_metrics, compute_deltas, enrich_campaigns, ReportingService,
-    store_campaign_daily_data, store_account_daily_summary,
+    store_campaign_rows_by_date,
     query_campaign_daily, query_account_daily_trend,
     query_account_range_key_trend,
     has_daily_data, find_encompassing_range_data, DATE_PRESETS,
@@ -207,19 +207,15 @@ async def report_summary(
     end_str = end_d.isoformat()
 
     # Try historical daily performance data first (stored from reports)
-    # For single-day ranges, also check the exact date as storage key
     is_single_day = start_str == end_str
-    storage_key = start_str if is_single_day else f"{start_str}__{end_str}"
 
-    # Try exact storage key first, then smart range matching, then date-range aggregation
-    # 1. Exact key: matches range rows (e.g. "2026-02-01__2026-02-12") or single-day rows
-    daily_campaigns = await query_campaign_daily(db, cred.id, storage_key, storage_key, profile_id=cred.profile_id)
-    if not daily_campaigns:
-        # 2. Encompassing range: matches stored range keys that overlap the period
-        daily_campaigns = await find_encompassing_range_data(db, cred.id, start_str, end_str, profile_id=cred.profile_id)
+    # Prefer true daily rows when available; fall back to legacy range keys.
+    daily_campaigns = await query_campaign_daily(
+        db, cred.id, start_str, end_str, profile_id=cred.profile_id
+    )
     if not daily_campaigns and not is_single_day:
-        # 3. Date-range aggregation: matches single-day rows (from audit) stored as YYYY-MM-DD
-        daily_campaigns = await query_campaign_daily(db, cred.id, start_str, end_str, profile_id=cred.profile_id)
+        # Legacy range-key fallback: stored report ranges that overlap the period
+        daily_campaigns = await find_encompassing_range_data(db, cred.id, start_str, end_str, profile_id=cred.profile_id)
 
     has_history = len(daily_campaigns) > 0
     last_synced = None
@@ -463,6 +459,7 @@ async def generate_report(
             await db.flush()
             report_pending_id = pending_report_id
 
+        parsed_rows = service.parse_report_campaign_rows(mcp_result)
         parsed = service.parse_report_campaigns(mcp_result)
         # "campaigns" key present means MCP completed (even if 0 rows = no data for range)
         mcp_had_campaigns_key = "campaigns" in mcp_result
@@ -509,42 +506,34 @@ async def generate_report(
                 pending.completed_at = utcnow()
 
             # Persist to daily tables (only if there's data)
-            if campaigns_data:
-                # Store under proper key: plain date for single-day, range key for multi-day
-                await store_campaign_daily_data(
-                    db, cred.id, campaigns_data, storage_key, source="mcp_report", profile_id=cred.profile_id
+            if parsed_rows:
+                stored_groups = await store_campaign_rows_by_date(
+                    db, cred.id, parsed_rows, storage_key, source="mcp_report", profile_id=cred.profile_id
                 )
-                await store_account_daily_summary(
-                    db, cred.id, campaigns_data, storage_key, source="mcp_report", profile_id=cred.profile_id
+                logger.info(
+                    "Stored %d report rows across %d date key(s) from MCP",
+                    len(parsed_rows),
+                    stored_groups,
                 )
-                logger.info(f"Stored {len(campaigns_data)} campaign rows for key '{storage_key}' from MCP")
     except Exception as e:
         logger.warning(f"MCP report failed, trying fallback: {e}")
 
     # ── Step 2: If MCP failed entirely (not resolved), check daily tables ──
     if campaigns_data is None:
-        # Try 1: exact storage key match (plain date for single-day, range key for multi-day)
-        cached = await query_campaign_daily(db, cred.id, storage_key, storage_key, profile_id=cred.profile_id)
+        # Prefer real daily rows when available.
+        cached = await query_campaign_daily(db, cred.id, start_str, end_str, profile_id=cred.profile_id)
         if cached:
             campaigns_data = cached
             report_source = "daily_history"
-            logger.info(f"Found {len(campaigns_data)} campaigns in daily cache for key '{storage_key}'")
+            logger.info(f"Found {len(campaigns_data)} campaigns in daily cache for {start_str} to {end_str}")
 
-        # Try 2: smart range matching (encompassing or best-overlap)
+        # Try legacy range-key matching when no daily rows exist.
         if not cached:
             encompassing = await find_encompassing_range_data(db, cred.id, start_str, end_str, profile_id=cred.profile_id)
             if encompassing:
                 campaigns_data = encompassing
                 report_source = "daily_history"
                 logger.info(f"Found {len(campaigns_data)} campaigns from range match")
-
-        # Try 3: date-range aggregation (single-day rows from audit, e.g. YYYY-MM-DD)
-        if campaigns_data is None and not is_single_day:
-            range_cached = await query_campaign_daily(db, cred.id, start_str, end_str, profile_id=cred.profile_id)
-            if range_cached:
-                campaigns_data = range_cached
-                report_source = "daily_history"
-                logger.info(f"Found {len(campaigns_data)} campaigns from date-range aggregation")
 
     # ── Step 3: Fallback to cached campaigns table ────────────────────
     # Only if MCP failed entirely (campaigns_data is still None).
@@ -685,31 +674,22 @@ async def generate_report(
         try:
             if report_source == "amazon_ads_api":
                 comp_result = await service.generate_mcp_report(comp_start_str, comp_end_str)
+                comp_rows = service.parse_report_campaign_rows(comp_result)
                 comp_parsed = service.parse_report_campaigns(comp_result)
                 if comp_parsed:
                     comp_campaigns = comp_parsed
                     comp_source = "amazon_ads_api"
-                    await store_campaign_daily_data(
-                        db, cred.id, comp_campaigns, comp_storage_key, source="mcp_report", profile_id=cred.profile_id
-                    )
-                    await store_account_daily_summary(
-                        db, cred.id, comp_campaigns, comp_storage_key, source="mcp_report", profile_id=cred.profile_id
+                    await store_campaign_rows_by_date(
+                        db, cred.id, comp_rows or comp_campaigns, comp_storage_key, source="mcp_report", profile_id=cred.profile_id
                     )
         except Exception as e:
             logger.warning(f"Comparison MCP report failed: {e}")
 
         # Fallback to cached daily tables
         if not comp_campaigns:
-            # Try exact storage key first
             comp_campaigns = await query_campaign_daily(
-                db, cred.id, comp_storage_key, comp_storage_key, profile_id=cred.profile_id
+                db, cred.id, comp_start_str, comp_end_str, profile_id=cred.profile_id
             )
-            # Try date range query
-            if not comp_campaigns:
-                comp_campaigns = await query_campaign_daily(
-                    db, cred.id, comp_start_str, comp_end_str, profile_id=cred.profile_id
-                )
-            # Try encompassing range
             if not comp_campaigns:
                 comp_campaigns = await find_encompassing_range_data(
                     db, cred.id, comp_start_str, comp_end_str, profile_id=cred.profile_id

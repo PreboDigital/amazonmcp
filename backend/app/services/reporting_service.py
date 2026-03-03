@@ -502,6 +502,36 @@ async def store_account_daily_summary(
     logger.info(f"Stored account daily summary for {report_date}")
 
 
+async def store_campaign_rows_by_date(
+    db: AsyncSession,
+    credential_id: uuid.UUID,
+    campaigns: list,
+    default_report_date: str,
+    source: str = "mcp_report",
+    profile_id: Optional[str] = None,
+) -> int:
+    """
+    Persist campaign rows grouped by their report_date when available.
+    Falls back to default_report_date for legacy aggregated rows.
+    """
+    rows_by_date: dict[str, list] = {}
+    for campaign in campaigns or []:
+        report_date = campaign.get("report_date") or default_report_date
+        rows_by_date.setdefault(report_date, []).append(campaign)
+
+    stored_groups = 0
+    for report_date, rows in rows_by_date.items():
+        await store_campaign_daily_data(
+            db, credential_id, rows, report_date, source=source, profile_id=profile_id
+        )
+        await store_account_daily_summary(
+            db, credential_id, rows, report_date, source=source, profile_id=profile_id
+        )
+        stored_groups += 1
+
+    return stored_groups
+
+
 async def persist_campaign_daily(
     db: AsyncSession,
     credential_id: uuid.UUID,
@@ -543,10 +573,15 @@ async def query_campaign_daily(
         else CampaignPerformanceDaily.profile_id.is_(None),
     ]
 
-    # Range query: prefer exact range key to avoid mixing with single-day rows
+    # Range query: prefer true single-day rows when they exist.
+    # Fall back to exact legacy range keys only when daily data is unavailable.
     if start_date != end_date:
-        range_key = f"{start_date}__{end_date}"
-        exact_result = await db.execute(
+        range_where = base_where + [
+            CampaignPerformanceDaily.date >= start_date,
+            CampaignPerformanceDaily.date <= end_date,
+            func.strpos(CampaignPerformanceDaily.date, "__") <= 0,  # single-day only
+        ]
+        result = await db.execute(
             select(
                 CampaignPerformanceDaily.amazon_campaign_id,
                 func.max(CampaignPerformanceDaily.campaign_name).label("campaign_name"),
@@ -561,21 +596,14 @@ async def query_campaign_daily(
                 func.avg(CampaignPerformanceDaily.top_of_search_impression_share).label("top_of_search_impression_share"),
                 func.max(CampaignPerformanceDaily.daily_budget).label("daily_budget"),
             )
-            .where(and_(*base_where, CampaignPerformanceDaily.date == range_key))
+            .where(and_(*range_where))
             .group_by(CampaignPerformanceDaily.amazon_campaign_id)
             .order_by(func.sum(CampaignPerformanceDaily.spend).desc())
         )
-        exact_rows = exact_result.all()
-        if exact_rows:
-            rows = exact_rows
-        else:
-            # No exact range key — use single-day rows only (exclude range keys to avoid double-count)
-            range_where = base_where + [
-                CampaignPerformanceDaily.date >= start_date,
-                CampaignPerformanceDaily.date <= end_date,
-                func.strpos(CampaignPerformanceDaily.date, "__") <= 0,  # single-day only
-            ]
-            result = await db.execute(
+        rows = result.all()
+        if not rows:
+            range_key = f"{start_date}__{end_date}"
+            exact_result = await db.execute(
                 select(
                     CampaignPerformanceDaily.amazon_campaign_id,
                     func.max(CampaignPerformanceDaily.campaign_name).label("campaign_name"),
@@ -590,11 +618,11 @@ async def query_campaign_daily(
                     func.avg(CampaignPerformanceDaily.top_of_search_impression_share).label("top_of_search_impression_share"),
                     func.max(CampaignPerformanceDaily.daily_budget).label("daily_budget"),
                 )
-                .where(and_(*range_where))
+                .where(and_(*base_where, CampaignPerformanceDaily.date == range_key))
                 .group_by(CampaignPerformanceDaily.amazon_campaign_id)
                 .order_by(func.sum(CampaignPerformanceDaily.spend).desc())
             )
-            rows = result.all()
+            rows = exact_result.all()
     else:
         # Single-day or exact key match — use exact date to avoid mixing with range keys
         result = await db.execute(
@@ -838,18 +866,7 @@ async def resolve_perf_date_source(
         else CampaignPerformanceDaily.profile_id.is_(None),
     ]
 
-    # 1. Exact range key exists?
-    if perf_start != perf_end:
-        range_key = f"{perf_start}__{perf_end}"
-        check = await db.execute(
-            select(func.count()).select_from(CampaignPerformanceDaily).where(
-                and_(*base_where, CampaignPerformanceDaily.date == range_key)
-            )
-        )
-        if (check.scalar() or 0) > 0:
-            return ("exact_range", range_key, None)
-
-    # 2. Single-day rows exist for this range?
+    # 1. Single-day rows exist for this range?
     single_where = base_where + [
         CampaignPerformanceDaily.date >= perf_start,
         CampaignPerformanceDaily.date <= perf_end,
@@ -860,6 +877,17 @@ async def resolve_perf_date_source(
     )
     if (check.scalar() or 0) > 0:
         return ("single_day", perf_start, perf_end)
+
+    # 2. Exact legacy range key exists?
+    if perf_start != perf_end:
+        range_key = f"{perf_start}__{perf_end}"
+        check = await db.execute(
+            select(func.count()).select_from(CampaignPerformanceDaily).where(
+                and_(*base_where, CampaignPerformanceDaily.date == range_key)
+            )
+        )
+        if (check.scalar() or 0) > 0:
+            return ("exact_range", range_key, None)
 
     # 3. Best overlapping range key?
     range_where = base_where + [func.strpos(CampaignPerformanceDaily.date, "__") > 0]
@@ -1095,6 +1123,7 @@ class ReportingService:
                     "reports": [
                         {
                             "format": "GZIP_JSON",
+                            "timeUnit": "DAILY",
                             "periods": [
                                 {"datePeriod": {"startDate": start_date, "endDate": end_date}}
                             ],
@@ -1229,9 +1258,34 @@ class ReportingService:
         return []
 
     @staticmethod
-    def parse_report_campaigns(report_data: dict) -> list:
+    def _extract_report_date(row: dict) -> Optional[str]:
+        """Extract a concrete YYYY-MM-DD date from a report row when present."""
+        for key in ("date", "metric.date", "reportDate", "date.value"):
+            value = row.get(key)
+            if isinstance(value, str):
+                try:
+                    date.fromisoformat(value)
+                    return value
+                except ValueError:
+                    continue
+
+        date_range_value = row.get("dateRange.value") or row.get("dateRange")
+        if isinstance(date_range_value, str) and "/" in date_range_value:
+            start, end = date_range_value.split("/", 1)
+            try:
+                date.fromisoformat(start)
+                date.fromisoformat(end)
+            except ValueError:
+                return None
+            if start == end:
+                return start
+        return None
+
+    @classmethod
+    def parse_report_campaign_rows(cls, report_data: dict) -> list:
         """
-        Normalise MCP report data into a flat campaign list.
+        Normalise MCP report data into campaign rows.
+        Preserves report_date when Amazon returns daily-granularity data.
         Handles:
          - {"success": [{"report": {"completedReportParts": [{"url": ...}], ...}}]}
          - {"campaigns": [...]} or {"results": [...]} etc.
@@ -1338,5 +1392,66 @@ class ReportingService:
                 ),
                 "targeting_type": c.get("targetingType") or c.get("targeting_type") or "",
                 "campaign_type": c.get("campaignType") or c.get("campaign_type") or "",
+                "report_date": cls._extract_report_date(c),
             })
         return enrich_campaigns(normalised)
+
+    @classmethod
+    def parse_report_campaigns(cls, report_data: dict) -> list:
+        """
+        Aggregate normalised report rows into one entry per campaign.
+        This keeps summaries/top-performers stable even when the report is daily.
+        """
+        rows = cls.parse_report_campaign_rows(report_data)
+        if not rows:
+            return []
+
+        grouped: dict[str, dict] = {}
+        for row in rows:
+            campaign_id = row.get("campaign_id") or ""
+            key = campaign_id or f"__name__:{row.get('campaign_name') or 'Unknown'}"
+            existing = grouped.get(key)
+            if not existing:
+                grouped[key] = {
+                    "campaign_id": campaign_id,
+                    "campaign_name": row.get("campaign_name") or "Unknown",
+                    "state": row.get("state") or "",
+                    "spend": float(row.get("spend") or 0),
+                    "sales": float(row.get("sales") or 0),
+                    "impressions": int(row.get("impressions") or 0),
+                    "clicks": int(row.get("clicks") or 0),
+                    "orders": int(row.get("orders") or 0),
+                    "daily_budget": float(row.get("daily_budget") or 0),
+                    "targeting_type": row.get("targeting_type") or "",
+                    "campaign_type": row.get("campaign_type") or "",
+                    "_tos_weighted_sum": float(row.get("top_of_search_impression_share") or 0)
+                    * max(int(row.get("impressions") or 0), 1)
+                    if row.get("top_of_search_impression_share") is not None
+                    else 0.0,
+                    "_tos_weighted_den": max(int(row.get("impressions") or 0), 1)
+                    if row.get("top_of_search_impression_share") is not None
+                    else 0,
+                }
+                continue
+
+            existing["spend"] += float(row.get("spend") or 0)
+            existing["sales"] += float(row.get("sales") or 0)
+            existing["impressions"] += int(row.get("impressions") or 0)
+            existing["clicks"] += int(row.get("clicks") or 0)
+            existing["orders"] += int(row.get("orders") or 0)
+            existing["state"] = existing["state"] or row.get("state") or ""
+            existing["campaign_type"] = existing["campaign_type"] or row.get("campaign_type") or ""
+            existing["targeting_type"] = existing["targeting_type"] or row.get("targeting_type") or ""
+            existing["daily_budget"] = existing["daily_budget"] or float(row.get("daily_budget") or 0)
+            if row.get("top_of_search_impression_share") is not None:
+                weight = max(int(row.get("impressions") or 0), 1)
+                existing["_tos_weighted_sum"] += float(row.get("top_of_search_impression_share") or 0) * weight
+                existing["_tos_weighted_den"] += weight
+
+        aggregated = []
+        for row in grouped.values():
+            den = row.pop("_tos_weighted_den", 0)
+            weighted_sum = row.pop("_tos_weighted_sum", 0.0)
+            row["top_of_search_impression_share"] = round(weighted_sum / den, 2) if den > 0 else None
+            aggregated.append(row)
+        return enrich_campaigns(aggregated)
