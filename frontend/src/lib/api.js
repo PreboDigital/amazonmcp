@@ -651,14 +651,48 @@ export const usersApi = {
 
 // ── Cron / Data Sync (admin) ──────────────────────────────────────────
 export const cronApi = {
-  triggerSync: () => request('/cron/trigger/sync', { method: 'POST' }),
-  triggerReports: () => request('/cron/trigger/reports', { method: 'POST' }),
-  triggerSearchTerms: () => request('/cron/trigger/search-terms', { method: 'POST' }),
+  triggerSync: (opts = {}) => {
+    const params = new URLSearchParams()
+    if (opts.credentialId) params.set('credential_id', opts.credentialId)
+    if (opts.profileId) params.set('profile_id', opts.profileId)
+    const qs = params.toString()
+    return request(`/cron/trigger/sync${qs ? `?${qs}` : ''}`, { method: 'POST' })
+  },
+  triggerReports: (opts = {}) => {
+    const params = new URLSearchParams()
+    if (opts.credentialId) params.set('credential_id', opts.credentialId)
+    if (opts.profileId) params.set('profile_id', opts.profileId)
+    if (opts.rangePreset) params.set('range_preset', opts.rangePreset)
+    const qs = params.toString()
+    return request(`/cron/trigger/reports${qs ? `?${qs}` : ''}`, { method: 'POST' })
+  },
+  triggerSearchTerms: (opts = {}) => {
+    const params = new URLSearchParams()
+    if (opts.credentialId) params.set('credential_id', opts.credentialId)
+    if (opts.profileId) params.set('profile_id', opts.profileId)
+    if (opts.rangePreset) params.set('range_preset', opts.rangePreset)
+    const qs = params.toString()
+    return request(`/cron/trigger/search-terms${qs ? `?${qs}` : ''}`, { method: 'POST' })
+  },
+  triggerProducts: (opts = {}) => {
+    const params = new URLSearchParams()
+    if (opts.credentialId) params.set('credential_id', opts.credentialId)
+    if (opts.profileId) params.set('profile_id', opts.profileId)
+    if (opts.rangePreset) params.set('range_preset', opts.rangePreset)
+    const qs = params.toString()
+    return request(`/cron/trigger/products${qs ? `?${qs}` : ''}`, { method: 'POST' })
+  },
   listSchedules: () => request('/cron/schedules'),
-  createSchedule: (job, cron) =>
+  createSchedule: (job, cron, opts = {}) =>
     request('/cron/schedules', {
       method: 'POST',
-      body: JSON.stringify({ job, cron }),
+      body: JSON.stringify({
+        job,
+        cron,
+        credential_id: opts.credentialId || null,
+        profile_id: opts.profileId || null,
+        range_preset: opts.rangePreset || null,
+      }),
     }),
   deleteSchedule: (scheduleId) =>
     request(`/cron/schedules/${encodeURIComponent(scheduleId)}`, { method: 'DELETE' }),

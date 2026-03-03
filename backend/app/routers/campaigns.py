@@ -57,8 +57,12 @@ async def _get_credential(db: AsyncSession, cred_id: Optional[str] = None) -> Cr
     return cred
 
 
-async def _make_client(cred: Credential, db: AsyncSession):
-    return await get_mcp_client_with_fresh_token(cred, db)
+async def _make_client(
+    cred: Credential,
+    db: AsyncSession,
+    profile_id_override: Optional[str] = None,
+):
+    return await get_mcp_client_with_fresh_token(cred, db, profile_id_override=profile_id_override)
 
 
 def _extract_list(data, keys=None) -> list:
@@ -1621,16 +1625,18 @@ async def run_full_sync(
     credential_id: Optional[str] = None,
     job_id: Optional[uuid_mod.UUID] = None,
     on_progress: Optional[Callable[[str, int, dict], Awaitable[None]]] = None,
+    profile_id_override: Optional[str] = None,
 ) -> dict:
     """
     Run full campaign/ad group/target/ad sync. Used by POST /sync, cron, and background job.
     When job_id and on_progress are provided, updates SyncJob after each step.
     """
     cred = await _get_credential(db, credential_id)
-    _, scope_error = await resolve_campaign_sync_scope(db, cred)
+    active_profile_id = profile_id_override if profile_id_override is not None else cred.profile_id
+    _, scope_error = await resolve_campaign_sync_scope(db, cred, profile_id_override=active_profile_id)
     if scope_error:
         raise HTTPException(status_code=400, detail=scope_error)
-    client = await _make_client(cred, db)
+    client = await _make_client(cred, db, profile_id_override=active_profile_id)
     stats = {"campaigns": 0, "ad_groups": 0, "targets": 0, "ads": 0}
 
     async def _progress(step: str, pct: int, s: dict) -> None:
@@ -1666,7 +1672,7 @@ async def run_full_sync(
                         break
 
             if campaign:
-                campaign.profile_id = cred.profile_id
+                campaign.profile_id = active_profile_id
                 campaign.campaign_name = camp_name or campaign.campaign_name
                 campaign.campaign_type = camp_type or campaign.campaign_type
                 campaign.targeting_type = targeting or campaign.targeting_type
@@ -1679,7 +1685,7 @@ async def run_full_sync(
             else:
                 campaign = Campaign(
                     credential_id=cred.id,
-                    profile_id=cred.profile_id,
+                    profile_id=active_profile_id,
                     amazon_campaign_id=str(amazon_id),
                     campaign_name=camp_name,
                     campaign_type=camp_type,
