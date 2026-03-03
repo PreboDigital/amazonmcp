@@ -1165,6 +1165,46 @@ class ReportingService:
             logger.warning(f"MCP report generation failed: {e}")
             return {}
 
+    async def generate_daily_report_rows(
+        self,
+        start_date: str,
+        end_date: str,
+        max_wait_per_day: int = 45,
+    ) -> list[dict]:
+        """
+        Backfill exact per-day campaign rows by issuing one report request per day.
+        This is slower than a range request, but it avoids fabricated trends when
+        Amazon only returns aggregate multi-day rows for a range.
+        """
+        try:
+            current = date.fromisoformat(start_date)
+            end = date.fromisoformat(end_date)
+        except ValueError:
+            return []
+
+        daily_rows: list[dict] = []
+        while current <= end:
+            day_str = current.isoformat()
+            logger.info("Backfilling exact daily campaign report for %s", day_str)
+            day_result = await self.generate_mcp_report(
+                day_str,
+                day_str,
+                max_wait=max_wait_per_day,
+            )
+            if day_result.get("_pending_report_id"):
+                logger.warning(
+                    "Daily backfill report for %s is still pending; skipping exact daily backfill",
+                    day_str,
+                )
+                return []
+            day_rows = self.parse_report_campaign_rows(day_result)
+            for row in day_rows:
+                row["report_date"] = row.get("report_date") or day_str
+            daily_rows.extend(day_rows)
+            current += timedelta(days=1)
+
+        return daily_rows
+
     @staticmethod
     async def _download_report_data(report_response: dict) -> list:
         """
@@ -1403,6 +1443,11 @@ class ReportingService:
         This keeps summaries/top-performers stable even when the report is daily.
         """
         rows = cls.parse_report_campaign_rows(report_data)
+        return cls.aggregate_campaign_rows(rows)
+
+    @staticmethod
+    def aggregate_campaign_rows(rows: list[dict]) -> list:
+        """Aggregate normalised campaign rows into one entry per campaign."""
         if not rows:
             return []
 

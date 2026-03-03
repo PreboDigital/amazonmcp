@@ -388,6 +388,7 @@ async def generate_report(
     mcp_report_raw = {}
     report_source = "database"
     report_pending_id = None  # Track pending report ID for frontend UX
+    service = None
 
     # For single-day ranges, use plain ISO date; for multi-day, use range key
     is_single_day = start_str == end_str
@@ -461,6 +462,23 @@ async def generate_report(
 
         parsed_rows = service.parse_report_campaign_rows(mcp_result)
         parsed = service.parse_report_campaigns(mcp_result)
+        has_exact_daily_rows = any(r.get("report_date") for r in parsed_rows)
+
+        if parsed_rows and not is_single_day and not has_exact_daily_rows:
+            backfilled_rows = await service.generate_daily_report_rows(
+                start_str,
+                end_str,
+                max_wait_per_day=45,
+            )
+            if backfilled_rows:
+                parsed_rows = backfilled_rows
+                parsed = service.aggregate_campaign_rows(parsed_rows)
+                logger.info(
+                    "Replaced aggregate range report with %d exact daily row(s) across %s to %s",
+                    len(parsed_rows),
+                    start_str,
+                    end_str,
+                )
         # "campaigns" key present means MCP completed (even if 0 rows = no data for range)
         mcp_had_campaigns_key = "campaigns" in mcp_result
         if parsed or mcp_had_campaigns_key:
@@ -519,6 +537,30 @@ async def generate_report(
         logger.warning(f"MCP report failed, trying fallback: {e}")
 
     # ── Step 2: If MCP failed entirely (not resolved), check daily tables ──
+    if campaigns_data is None:
+        if not is_single_day and service is not None:
+            try:
+                backfilled_rows = await service.generate_daily_report_rows(
+                    start_str,
+                    end_str,
+                    max_wait_per_day=45,
+                )
+            except Exception as e:
+                logger.warning(f"Exact daily backfill failed: {e}")
+                backfilled_rows = []
+            if backfilled_rows:
+                campaigns_data = service.aggregate_campaign_rows(backfilled_rows)
+                report_source = "amazon_ads_api"
+                await store_campaign_rows_by_date(
+                    db, cred.id, backfilled_rows, storage_key, source="mcp_report", profile_id=cred.profile_id
+                )
+                logger.info(
+                    "Backfilled %d exact daily row(s) for %s to %s after range report miss",
+                    len(backfilled_rows),
+                    start_str,
+                    end_str,
+                )
+
     if campaigns_data is None:
         # Prefer real daily rows when available.
         cached = await query_campaign_daily(db, cred.id, start_str, end_str, profile_id=cred.profile_id)
@@ -676,6 +718,15 @@ async def generate_report(
                 comp_result = await service.generate_mcp_report(comp_start_str, comp_end_str)
                 comp_rows = service.parse_report_campaign_rows(comp_result)
                 comp_parsed = service.parse_report_campaigns(comp_result)
+                if comp_rows and comp_start_str != comp_end_str and not any(r.get("report_date") for r in comp_rows):
+                    backfilled_comp_rows = await service.generate_daily_report_rows(
+                        comp_start_str,
+                        comp_end_str,
+                        max_wait_per_day=45,
+                    )
+                    if backfilled_comp_rows:
+                        comp_rows = backfilled_comp_rows
+                        comp_parsed = service.aggregate_campaign_rows(comp_rows)
                 if comp_parsed:
                     comp_campaigns = comp_parsed
                     comp_source = "amazon_ads_api"
