@@ -19,7 +19,7 @@ from datetime import date, timedelta
 from typing import Optional
 from urllib.parse import quote, urlencode
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -275,6 +275,27 @@ async def _queue_exact_daily_schedule_sync(
 def _get_cron_secret() -> str:
     import os
     return os.environ.get("CRON_SECRET", "")
+
+
+def _resolve_public_base_url(request: Request, configured_url: str) -> str:
+    """
+    Prefer an explicit PUBLIC_URL/RAILWAY_PUBLIC_DOMAIN, but fall back to the
+    actual incoming request host when schedule creation runs behind a proxy.
+    """
+    base_url = (configured_url or "").strip().rstrip("/")
+    if base_url.startswith(("http://", "https://")) and "localhost" not in base_url:
+        return base_url
+
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "https").split(",")[0].strip()
+    forwarded_host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",")[0].strip()
+    if forwarded_host:
+        return f"{forwarded_proto}://{forwarded_host}".rstrip("/")
+
+    request_base = str(request.base_url).rstrip("/")
+    if request_base:
+        return request_base
+
+    return base_url
 
 
 async def _require_cron_secret(
@@ -850,6 +871,7 @@ async def list_schedules(_: User = Depends(require_admin)):
 @router.post("/schedules")
 async def create_schedule(
     body: CreateScheduleRequest,
+    request: Request,
     _: User = Depends(require_admin),
 ):
     """Create a QStash schedule. Admin only. Requires QSTASH_TOKEN and CRON_SECRET."""
@@ -868,7 +890,7 @@ async def create_schedule(
     secret = _get_cron_secret()
     if not secret:
         raise HTTPException(500, "CRON_SECRET not configured")
-    base_url = settings.effective_public_url
+    base_url = _resolve_public_base_url(request, settings.effective_public_url)
     params = {}
     if body.credential_id:
         params["credential_id"] = body.credential_id
