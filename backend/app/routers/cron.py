@@ -37,6 +37,7 @@ from app.routers.reporting import (
     _resolve_advertiser_account_id,
     _run_report_sync_background,
 )
+from app.services.reporting_service import DATE_PRESETS, get_date_range
 from app.services.product_reporting_service import ProductReportingService
 from app.services.search_term_service import SearchTermService
 from app.services.token_service import get_mcp_client_with_fresh_token
@@ -47,9 +48,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/cron", tags=["Cron"])
 
 SCHEDULE_RANGE_PRESETS = {
+    "today": "Today",
     "yesterday": "Yesterday",
-    "last_7_days": "Last 7 complete days",
-    "last_30_days": "Last 30 complete days",
+    "last_7_days": "Last 7 days",
+    "this_week": "This week",
+    "last_week": "Last week",
+    "last_30_days": "Last 30 days",
+    "this_month": "This month",
+    "last_month": "Last month",
+    "year_to_date": "Year-to-date",
     "month_to_yesterday": "Month to yesterday",
 }
 
@@ -72,22 +79,15 @@ def _get_schedule_range_preset(job: str, range_preset: Optional[str]) -> Optiona
     return preset
 
 
-def _resolve_complete_day_range(range_preset: str) -> tuple[str, str]:
+def _resolve_schedule_range(range_preset: str) -> tuple[str, str]:
     today = date.today()
     yesterday = today - timedelta(days=1)
 
-    if range_preset == "yesterday":
-        start_d = yesterday
-        end_d = yesterday
-    elif range_preset == "last_7_days":
-        start_d = yesterday - timedelta(days=6)
-        end_d = yesterday
-    elif range_preset == "last_30_days":
-        start_d = yesterday - timedelta(days=29)
-        end_d = yesterday
-    elif range_preset == "month_to_yesterday":
+    if range_preset == "month_to_yesterday":
         end_d = yesterday
         start_d = end_d.replace(day=1)
+    elif range_preset in DATE_PRESETS:
+        start_d, end_d = get_date_range(range_preset)
     else:
         raise HTTPException(
             400,
@@ -333,7 +333,7 @@ async def cron_reports(
     try:
         cred, selected_profile_id = await _get_cred_and_profile(db, credential_id, profile_id)
         selected_range = _get_schedule_range_preset("reports", range_preset)
-        start_date, end_date = _resolve_complete_day_range(selected_range)
+        start_date, end_date = _resolve_schedule_range(selected_range)
         result = await _queue_exact_daily_schedule_sync(
             db,
             cred,
@@ -367,7 +367,7 @@ async def cron_search_terms(
     try:
         cred, selected_profile_id = await _get_cred_and_profile(db, credential_id, profile_id)
         selected_range = _get_schedule_range_preset("search-terms", range_preset)
-        start_date, end_date = _resolve_complete_day_range(selected_range)
+        start_date, end_date = _resolve_schedule_range(selected_range)
         job = await _find_aux_schedule_job(
             db,
             cred.id,
@@ -468,7 +468,7 @@ async def cron_products(
     try:
         cred, selected_profile_id = await _get_cred_and_profile(db, credential_id, profile_id)
         selected_range = _get_schedule_range_preset("products", range_preset)
-        start_date, end_date = _resolve_complete_day_range(selected_range)
+        start_date, end_date = _resolve_schedule_range(selected_range)
         job = await _find_aux_schedule_job(
             db,
             cred.id,
@@ -568,7 +568,7 @@ async def _run_reports(
     """Shared logic for scheduled exact-daily reports."""
     cred, selected_profile_id = await _get_cred_and_profile(db, credential_id, profile_id)
     selected_range = _get_schedule_range_preset("reports", range_preset)
-    start_date, end_date = _resolve_complete_day_range(selected_range)
+    start_date, end_date = _resolve_schedule_range(selected_range)
     return await _queue_exact_daily_schedule_sync(
         db,
         cred,
@@ -588,7 +588,7 @@ async def _run_search_terms(
     """Shared logic for search term cron with resume support."""
     cred, selected_profile_id = await _get_cred_and_profile(db, credential_id, profile_id)
     selected_range = _get_schedule_range_preset("search-terms", range_preset)
-    start_date, end_date = _resolve_complete_day_range(selected_range)
+    start_date, end_date = _resolve_schedule_range(selected_range)
     job = await _find_aux_schedule_job(
         db,
         cred.id,
@@ -665,7 +665,7 @@ async def _run_products(
     """Shared logic for product cron with resume support."""
     cred, selected_profile_id = await _get_cred_and_profile(db, credential_id, profile_id)
     selected_range = _get_schedule_range_preset("products", range_preset)
-    start_date, end_date = _resolve_complete_day_range(selected_range)
+    start_date, end_date = _resolve_schedule_range(selected_range)
     job = await _find_aux_schedule_job(
         db,
         cred.id,

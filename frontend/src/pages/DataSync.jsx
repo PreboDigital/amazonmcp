@@ -12,25 +12,22 @@ const JOB_OPTIONS = [
   { value: 'products', label: 'Products' },
 ]
 
+const STANDARD_RANGE_OPTIONS = [
+  { value: 'today', label: 'Today' },
+  { value: 'yesterday', label: 'Yesterday' },
+  { value: 'last_7_days', label: 'Last 7 days' },
+  { value: 'this_week', label: 'This week' },
+  { value: 'last_week', label: 'Last week' },
+  { value: 'last_30_days', label: 'Last 30 days' },
+  { value: 'this_month', label: 'This month' },
+  { value: 'last_month', label: 'Last month' },
+  { value: 'year_to_date', label: 'Year-to-date' },
+]
+
 const RANGE_OPTIONS = {
-  reports: [
-    { value: 'yesterday', label: 'Yesterday' },
-    { value: 'last_7_days', label: 'Last 7 complete days' },
-    { value: 'last_30_days', label: 'Last 30 complete days' },
-    { value: 'month_to_yesterday', label: 'Month to yesterday' },
-  ],
-  'search-terms': [
-    { value: 'yesterday', label: 'Yesterday' },
-    { value: 'last_7_days', label: 'Last 7 complete days' },
-    { value: 'last_30_days', label: 'Last 30 complete days' },
-    { value: 'month_to_yesterday', label: 'Month to yesterday' },
-  ],
-  products: [
-    { value: 'yesterday', label: 'Yesterday' },
-    { value: 'last_7_days', label: 'Last 7 complete days' },
-    { value: 'last_30_days', label: 'Last 30 complete days' },
-    { value: 'month_to_yesterday', label: 'Month to yesterday' },
-  ],
+  reports: STANDARD_RANGE_OPTIONS,
+  'search-terms': STANDARD_RANGE_OPTIONS,
+  products: STANDARD_RANGE_OPTIONS,
 }
 
 const DEFAULT_RANGE_BY_JOB = {
@@ -72,6 +69,7 @@ function parseDestinationMeta(dest) {
 
 function rangeLabel(job, rangePreset) {
   if (!rangePreset) return ''
+  if (rangePreset === 'month_to_yesterday') return 'Month to yesterday'
   return RANGE_OPTIONS[job]?.find((o) => o.value === rangePreset)?.label || rangePreset
 }
 
@@ -113,7 +111,11 @@ export default function DataSync() {
 
   useEffect(() => {
     if (RANGE_OPTIONS[newJob]) {
-      setNewRangePreset((prev) => prev || DEFAULT_RANGE_BY_JOB[newJob])
+      setNewRangePreset((prev) => (
+        RANGE_OPTIONS[newJob].some((option) => option.value === prev)
+          ? prev
+          : DEFAULT_RANGE_BY_JOB[newJob]
+      ))
     } else {
       setNewRangePreset('')
     }
@@ -238,7 +240,7 @@ export default function DataSync() {
       )}
 
       <div className="card p-4 bg-blue-50 border-blue-200 text-blue-900 text-sm">
-        Scheduled ranges use complete days only. For example, `Last 7 complete days` means yesterday back through the prior 6 days.
+        Scheduled ranges now use the same standard presets as the rest of the app. Rolling presets like `This month` and `Year-to-date` expand automatically as time moves forward.
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
