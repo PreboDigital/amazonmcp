@@ -199,6 +199,63 @@ async def _find_completed_performance_report(
     return legacy_match
 
 
+async def _find_recent_rolling_performance_report(
+    db: AsyncSession,
+    credential_id,
+    start_date: str,
+    end_date: str,
+    profile_id: Optional[str],
+    max_gap_days: int = 3,
+) -> Optional[Report]:
+    """
+    For rolling ranges like "this_month", reuse a recently completed report
+    with the same start date when the requested end date advanced by only a
+    few days and exact daily coverage is not ready yet.
+    """
+    try:
+        req_start = date_type.fromisoformat(start_date)
+        req_end = date_type.fromisoformat(end_date)
+    except ValueError:
+        return None
+
+    result = await db.execute(
+        select(Report)
+        .where(
+            Report.credential_id == credential_id,
+            Report.report_type == "performance",
+            Report.status == "completed",
+            Report.date_range_start == start_date,
+        )
+        .order_by(Report.date_range_end.desc(), Report.created_at.desc())
+        .limit(20)
+    )
+
+    legacy_match = None
+    for report in result.scalars().all():
+        payload = report.report_data if isinstance(report.report_data, dict) else {}
+        raw = report.raw_response if isinstance(report.raw_response, dict) else {}
+        stored_profile_id = payload.get("profile_id") or raw.get("profile_id")
+        if stored_profile_id not in (profile_id, None):
+            continue
+        try:
+            report_end = date_type.fromisoformat(report.date_range_end)
+            report_start = date_type.fromisoformat(report.date_range_start)
+        except (TypeError, ValueError):
+            continue
+        if report_start != req_start:
+            continue
+        if report_end >= req_end or report_end < req_start:
+            continue
+        gap_days = (req_end - report_end).days
+        if gap_days < 0 or gap_days > max_gap_days:
+            continue
+        if stored_profile_id == profile_id:
+            return report
+        if legacy_match is None:
+            legacy_match = report
+    return legacy_match
+
+
 def _hydrate_cached_report_response(
     cached_report: Report,
     *,
@@ -783,6 +840,14 @@ async def report_summary(
             end_str,
             profile_id=cred.profile_id,
         )
+        if not cached_report:
+            cached_report = await _find_recent_rolling_performance_report(
+                db,
+                cred.id,
+                start_str,
+                end_str,
+                profile_id=cred.profile_id,
+            )
         cached_payload = (
             cached_report.report_data
             if cached_report and isinstance(cached_report.report_data, dict)
@@ -815,6 +880,9 @@ async def report_summary(
                 },
                 "latest_snapshot": None,
                 "report_source": cached_payload.get("report_source") or "cached_report",
+                "data_may_not_match_range": (
+                    cached_report.date_range_end != end_str if cached_report else False
+                ),
             }
 
     has_history = len(daily_campaigns) > 0
@@ -914,6 +982,14 @@ async def report_trends(
         end_date.isoformat(),
         profile_id=cred.profile_id,
     )
+    if not cached_report:
+        cached_report = await _find_recent_rolling_performance_report(
+            db,
+            cred.id,
+            start_date.isoformat(),
+            end_date.isoformat(),
+            profile_id=cred.profile_id,
+        )
     cached_payload = (
         cached_report.report_data
         if cached_report and isinstance(cached_report.report_data, dict)
@@ -1089,14 +1165,24 @@ async def generate_report(
             end_str,
             profile_id=cred.profile_id,
         )
+        if not cached_report:
+            cached_report = await _find_recent_rolling_performance_report(
+                db,
+                cred.id,
+                start_str,
+                end_str,
+                profile_id=cred.profile_id,
+            )
         if cached_report and isinstance(cached_report.report_data, dict):
-            return _hydrate_cached_report_response(
+            response = _hydrate_cached_report_response(
                 cached_report,
                 currency_code=currency_code,
                 report_pending_id=report_pending_id,
                 sync_progress=sync_progress,
                 sync_error=sync_error,
             )
+            response["data_may_not_match_range"] = cached_report.date_range_end != end_str
+            return response
 
         campaigns_data = []
         daily_trend = []
