@@ -6,6 +6,7 @@ account_performance_daily tables.
 """
 
 import asyncio
+import copy
 import uuid
 import logging
 from datetime import date as date_type, datetime, timedelta
@@ -162,6 +163,64 @@ async def _find_report_sync_job(
     return None
 
 
+async def _find_completed_performance_report(
+    db: AsyncSession,
+    credential_id,
+    start_date: str,
+    end_date: str,
+    profile_id: Optional[str],
+) -> Optional[Report]:
+    """
+    Prefer a completed performance report with matching profile metadata.
+    Older reports may not have profile metadata, so keep the newest legacy
+    match as a fallback for single-profile credentials.
+    """
+    result = await db.execute(
+        select(Report)
+        .where(
+            Report.credential_id == credential_id,
+            Report.report_type == "performance",
+            Report.status == "completed",
+            Report.date_range_start == start_date,
+            Report.date_range_end == end_date,
+        )
+        .order_by(Report.created_at.desc())
+        .limit(10)
+    )
+    legacy_match = None
+    for report in result.scalars().all():
+        payload = report.report_data if isinstance(report.report_data, dict) else {}
+        raw = report.raw_response if isinstance(report.raw_response, dict) else {}
+        stored_profile_id = payload.get("profile_id") or raw.get("profile_id")
+        if stored_profile_id == profile_id:
+            return report
+        if stored_profile_id is None and legacy_match is None:
+            legacy_match = report
+    return legacy_match
+
+
+def _hydrate_cached_report_response(
+    cached_report: Report,
+    *,
+    currency_code: str,
+    report_pending_id: Optional[str] = None,
+    sync_progress: Optional[dict] = None,
+    sync_error: Optional[str] = None,
+) -> dict:
+    payload = copy.deepcopy(cached_report.report_data or {})
+    payload["currency_code"] = currency_code
+    payload["generated_at"] = utcnow().isoformat()
+    payload["report_pending"] = report_pending_id is not None
+    payload["report_pending_id"] = report_pending_id
+    payload["sync_progress"] = sync_progress
+    payload["sync_error"] = sync_error
+    payload["cached_report_id"] = str(cached_report.id)
+    payload["cached_report_completed_at"] = (
+        cached_report.completed_at.isoformat() if cached_report.completed_at else None
+    )
+    return payload
+
+
 def _parse_report_sync_timestamp(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
@@ -188,6 +247,43 @@ def _get_report_sync_progress(sync_job: Optional[Report]) -> Optional[dict]:
     }
 
 
+def _coerce_report_sync_days(value, default: int = 0) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_report_sync_resume_state(
+    sync_job: Report,
+    start_date: str,
+    end_date: str,
+) -> tuple[str, int, Optional[str]]:
+    raw = dict(sync_job.raw_response or {})
+    total_days = _days_inclusive(start_date, end_date)
+    days_synced = min(_coerce_report_sync_days(raw.get("days_synced"), 0), total_days)
+
+    resume_date = raw.get("current_date")
+    if not resume_date:
+        resume_date = (
+            date_type.fromisoformat(start_date) + timedelta(days=days_synced)
+        ).isoformat()
+
+    try:
+        resume_day = date_type.fromisoformat(resume_date)
+    except (TypeError, ValueError):
+        resume_day = date_type.fromisoformat(start_date) + timedelta(days=days_synced)
+
+    range_start = date_type.fromisoformat(start_date)
+    range_end = date_type.fromisoformat(end_date)
+    if resume_day < range_start:
+        resume_day = range_start
+    if resume_day > range_end:
+        resume_day = range_end
+
+    return resume_day.isoformat(), days_synced, raw.get("pending_report_id")
+
+
 def _is_report_sync_job_stale(sync_job: Optional[Report]) -> bool:
     if not sync_job or sync_job.status not in ("pending", "running"):
         return False
@@ -203,6 +299,32 @@ def _is_report_sync_job_stale(sync_job: Optional[Report]) -> bool:
 
     age_seconds = (utcnow() - last_heartbeat).total_seconds()
     return age_seconds > REPORT_SYNC_STALE_SECONDS
+
+
+async def _restart_report_sync_job(
+    db: AsyncSession,
+    sync_job: Report,
+    reason: str = "Exact daily sync was resumed after a stale heartbeat.",
+) -> Report:
+    raw = dict(sync_job.raw_response or {})
+    raw.update({
+        "step": reason,
+        "heartbeat_at": utcnow().isoformat(),
+        "restart_requested_at": utcnow().isoformat(),
+        "restart_count": _coerce_report_sync_days(raw.get("restart_count"), 0) + 1,
+    })
+    sync_job.status = "pending"
+    sync_job.completed_at = None
+    sync_job.raw_response = raw
+    sync_job.report_data = {
+        "status": "pending",
+        "message": reason,
+        "days_synced": _coerce_report_sync_days(raw.get("days_synced"), 0),
+        "days_total": _coerce_report_sync_days(raw.get("days_total"), 0),
+    }
+    await db.commit()
+    asyncio.create_task(_run_report_sync_background(sync_job.id))
+    return sync_job
 
 
 async def _mark_report_sync_job_stale(
@@ -335,21 +457,31 @@ async def _run_report_sync_background(report_id: uuid.UUID) -> None:
             if not cred:
                 raise RuntimeError("Credential not found for report sync")
 
+            resume_day_str, synced_days, pending_report_id = _get_report_sync_resume_state(
+                report,
+                start_date,
+                end_date,
+            )
             report.status = "running"
             raw.update({
                 "profile_id": profile_id,
-                "step": "Preparing daily report sync...",
-                "progress_pct": 0,
-                "days_synced": 0,
+                "step": f"Preparing daily report sync for {resume_day_str}",
+                "progress_pct": min(99, int((synced_days / max(total_days, 1)) * 100)),
+                "days_synced": synced_days,
                 "days_total": total_days,
-                "started_at": utcnow().isoformat(),
+                "started_at": raw.get("started_at") or utcnow().isoformat(),
                 "heartbeat_at": utcnow().isoformat(),
+                "current_date": resume_day_str,
             })
+            if pending_report_id:
+                raw["pending_report_id"] = pending_report_id
+            else:
+                raw.pop("pending_report_id", None)
             report.raw_response = raw
             await db.commit()
             logger.info(
-                "Performance report sync started: report_id=%s profile_id=%s range=%s..%s total_days=%d",
-                str(report.id), profile_id, start_date, end_date, total_days,
+                "Performance report sync started/resumed: report_id=%s profile_id=%s range=%s..%s total_days=%d synced_days=%d resume_day=%s",
+                str(report.id), profile_id, start_date, end_date, total_days, synced_days, resume_day_str,
             )
 
             client = await get_mcp_client_with_fresh_token(
@@ -364,13 +496,14 @@ async def _run_report_sync_background(report_id: uuid.UUID) -> None:
             )
             service = ReportingService(client, advertiser_account_id=advertiser_account_id)
 
-            current = date_type.fromisoformat(start_date)
+            current = date_type.fromisoformat(resume_day_str)
             end = date_type.fromisoformat(end_date)
-            synced_days = 0
 
             while current <= end:
                 day_str = current.isoformat()
                 raw = dict(report.raw_response or {})
+                if raw.get("current_date") != day_str:
+                    pending_report_id = None
                 raw.update({
                     "step": f"Syncing exact daily performance for {day_str}",
                     "progress_pct": min(99, int((synced_days / max(total_days, 1)) * 100)),
@@ -379,6 +512,10 @@ async def _run_report_sync_background(report_id: uuid.UUID) -> None:
                     "current_date": day_str,
                     "heartbeat_at": utcnow().isoformat(),
                 })
+                if pending_report_id:
+                    raw["pending_report_id"] = pending_report_id
+                else:
+                    raw.pop("pending_report_id", None)
                 report.raw_response = raw
                 await db.commit()
                 logger.info(
@@ -386,16 +523,21 @@ async def _run_report_sync_background(report_id: uuid.UUID) -> None:
                     str(report.id), day_str, synced_days, total_days,
                 )
 
-                pending_report_id = None
                 day_result = {}
-                attempts = 0
-                while attempts < 3:
-                    attempts += 1
+                while True:
                     raw = dict(report.raw_response or {})
                     raw.update({
-                        "step": f"Fetching Amazon report for {day_str} (attempt {attempts}/3)",
+                        "step": (
+                            f"Polling pending Amazon report for {day_str}"
+                            if pending_report_id
+                            else f"Fetching Amazon report for {day_str}"
+                        ),
                         "heartbeat_at": utcnow().isoformat(),
                     })
+                    if pending_report_id:
+                        raw["pending_report_id"] = pending_report_id
+                    else:
+                        raw.pop("pending_report_id", None)
                     report.raw_response = raw
                     await db.commit()
                     day_result = await service.generate_mcp_report(
@@ -404,14 +546,26 @@ async def _run_report_sync_background(report_id: uuid.UUID) -> None:
                         pending_report_id=pending_report_id,
                         max_wait=180,
                     )
-                    pending_report_id = day_result.get("_pending_report_id")
-                    if not pending_report_id:
-                        break
-
-                if not day_result or ("campaigns" not in day_result and "_pending_report_id" not in day_result):
-                    raise RuntimeError(f"Amazon report fetch failed for {day_str}")
-                if day_result.get("_pending_report_id"):
-                    raise RuntimeError(f"Amazon report for {day_str} did not complete in time")
+                    if not day_result or ("campaigns" not in day_result and "_pending_report_id" not in day_result):
+                        raise RuntimeError(f"Amazon report fetch failed for {day_str}")
+                    if day_result.get("_pending_report_id"):
+                        pending_report_id = day_result["_pending_report_id"]
+                        raw = dict(report.raw_response or {})
+                        raw.update({
+                            "step": f"Amazon report still processing for {day_str}; continuing to poll",
+                            "days_synced": synced_days,
+                            "days_total": total_days,
+                            "current_date": day_str,
+                            "progress_pct": min(99, int((synced_days / max(total_days, 1)) * 100)),
+                            "heartbeat_at": utcnow().isoformat(),
+                            "pending_report_id": pending_report_id,
+                        })
+                        report.raw_response = raw
+                        await db.commit()
+                        await asyncio.sleep(30)
+                        continue
+                    pending_report_id = None
+                    break
 
                 day_rows = service.parse_report_campaign_rows(day_result)
                 for row in day_rows:
@@ -437,12 +591,15 @@ async def _run_report_sync_background(report_id: uuid.UUID) -> None:
                         profile_id=profile_id,
                     )
                 synced_days += 1
+                next_day = current + timedelta(days=1)
                 raw = dict(report.raw_response or {})
                 raw.update({
                     "days_synced": synced_days,
                     "progress_pct": min(99, int((synced_days / max(total_days, 1)) * 100)),
                     "heartbeat_at": utcnow().isoformat(),
+                    "current_date": next_day.isoformat() if next_day <= end else day_str,
                 })
+                raw.pop("pending_report_id", None)
                 report.raw_response = raw
                 await db.commit()
                 logger.info(
@@ -469,6 +626,8 @@ async def _run_report_sync_background(report_id: uuid.UUID) -> None:
                 "days_total": total_days,
                 "heartbeat_at": utcnow().isoformat(),
             })
+            raw.pop("pending_report_id", None)
+            raw.pop("current_date", None)
             report.raw_response = raw
             db.add(ActivityLog(
                 credential_id=cred.id,
@@ -616,6 +775,47 @@ async def report_summary(
         daily_campaigns = await query_campaign_daily(
             db, cred.id, start_str, end_str, profile_id=cred.profile_id
         )
+    else:
+        cached_report = await _find_completed_performance_report(
+            db,
+            cred.id,
+            start_str,
+            end_str,
+            profile_id=cred.profile_id,
+        )
+        cached_payload = (
+            cached_report.report_data
+            if cached_report and isinstance(cached_report.report_data, dict)
+            else {}
+        )
+        if cached_payload:
+            cached_campaigns = cached_payload.get("campaigns") or []
+            return {
+                "summary": cached_payload.get("summary") or {},
+                "total_campaigns": len(cached_campaigns),
+                "active_campaigns": len([
+                    c for c in cached_campaigns
+                    if (c.get("state") or "").lower() in ("enabled", "active")
+                ]),
+                "paused_campaigns": len([
+                    c for c in cached_campaigns
+                    if (c.get("state") or "").lower() == "paused"
+                ]),
+                "campaigns": cached_campaigns,
+                "top_performers": cached_payload.get("top_performers") or [],
+                "worst_performers": cached_payload.get("worst_performers") or [],
+                "has_historical_data": True,
+                "requires_sync": False,
+                "last_synced": cached_report.completed_at.isoformat() if cached_report.completed_at else None,
+                "currency_code": currency_code,
+                "period": {
+                    "start_date": start_str,
+                    "end_date": end_str,
+                    "preset": preset if preset and preset in DATE_PRESETS else "this_month",
+                },
+                "latest_snapshot": None,
+                "report_source": cached_payload.get("report_source") or "cached_report",
+            }
 
     has_history = len(daily_campaigns) > 0
     last_synced = utcnow().isoformat() if has_history else None
@@ -693,13 +893,38 @@ async def report_trends(
     start_date = start_d
     end_date = end_d
 
-    # Try daily history table first
-    daily_trend = await query_account_daily_trend(
-        db, cred.id, start_date.isoformat(), end_date.isoformat(), profile_id=cred.profile_id
+    exact_daily_ready, _, _ = await _get_exact_daily_coverage(
+        db,
+        cred.id,
+        start_date.isoformat(),
+        end_date.isoformat(),
+        profile_id=cred.profile_id,
     )
+    if exact_daily_ready:
+        daily_trend = await query_account_daily_trend(
+            db, cred.id, start_date.isoformat(), end_date.isoformat(), profile_id=cred.profile_id
+        )
+        if daily_trend:
+            return {"source": "daily_history", "data": daily_trend}
 
-    if daily_trend:
-        return {"source": "daily_history", "data": daily_trend}
+    cached_report = await _find_completed_performance_report(
+        db,
+        cred.id,
+        start_date.isoformat(),
+        end_date.isoformat(),
+        profile_id=cred.profile_id,
+    )
+    cached_payload = (
+        cached_report.report_data
+        if cached_report and isinstance(cached_report.report_data, dict)
+        else {}
+    )
+    cached_trend = cached_payload.get("daily_trend") or []
+    if cached_trend:
+        return {
+            "source": cached_payload.get("report_source") or "cached_report",
+            "data": cached_trend,
+        }
 
     return {"source": "none", "data": []}
 
@@ -788,12 +1013,11 @@ async def generate_report(
             "Performance report sync stale; restarting: report_id=%s profile_id=%s range=%s..%s",
             str(sync_job.id), cred.profile_id, start_str, end_str,
         )
-        await _mark_report_sync_job_stale(
+        sync_job = await _restart_report_sync_job(
             db,
             sync_job,
-            reason="Exact daily sync stopped reporting progress and was restarted.",
+            reason="Exact daily sync heartbeat went stale; resuming saved progress.",
         )
-        sync_job = None
 
     if exact_daily_ready:
         await _finalize_report_sync_job_if_ready(
@@ -857,6 +1081,22 @@ async def generate_report(
             await db.commit()
             asyncio.create_task(_run_report_sync_background(sync_job.id))
             sync_progress = _get_report_sync_progress(sync_job)
+
+        cached_report = await _find_completed_performance_report(
+            db,
+            cred.id,
+            start_str,
+            end_str,
+            profile_id=cred.profile_id,
+        )
+        if cached_report and isinstance(cached_report.report_data, dict):
+            return _hydrate_cached_report_response(
+                cached_report,
+                currency_code=currency_code,
+                report_pending_id=report_pending_id,
+                sync_progress=sync_progress,
+                sync_error=sync_error,
+            )
 
         campaigns_data = []
         daily_trend = []
@@ -961,12 +1201,11 @@ async def generate_report(
                 "Comparison performance report sync stale; restarting: report_id=%s profile_id=%s range=%s..%s",
                 str(comp_job.id), cred.profile_id, comp_start_str, comp_end_str,
             )
-            await _mark_report_sync_job_stale(
+            comp_job = await _restart_report_sync_job(
                 db,
                 comp_job,
-                reason="Comparison exact daily sync stopped reporting progress and was restarted.",
+                reason="Comparison exact daily sync heartbeat went stale; resuming saved progress.",
             )
-            comp_job = None
 
         if comp_exact_ready:
             await _finalize_report_sync_job_if_ready(
@@ -1046,8 +1285,11 @@ async def generate_report(
             date_range_start=start_str,
             date_range_end=end_str,
             status="completed",
-            report_data=response,
-            raw_response=mcp_report_raw or None,
+            report_data={**response, "profile_id": cred.profile_id},
+            raw_response={
+                **(mcp_report_raw or {}),
+                "profile_id": cred.profile_id,
+            } or None,
             completed_at=utcnow(),
         )
         db.add(report)

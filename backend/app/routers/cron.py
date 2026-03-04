@@ -33,7 +33,7 @@ from app.routers.reporting import (
     _get_exact_daily_coverage,
     _get_report_sync_progress,
     _is_report_sync_job_stale,
-    _mark_report_sync_job_stale,
+    _restart_report_sync_job,
     _resolve_advertiser_account_id,
     _run_report_sync_background,
 )
@@ -226,12 +226,11 @@ async def _queue_exact_daily_schedule_sync(
 
     sync_job = await _find_report_sync_job(db, cred.id, start_date, end_date, profile_id)
     if _is_report_sync_job_stale(sync_job):
-        await _mark_report_sync_job_stale(
+        sync_job = await _restart_report_sync_job(
             db,
             sync_job,
-            reason="Scheduled exact daily sync stopped reporting progress and was restarted.",
+            reason="Scheduled exact daily sync heartbeat went stale; resuming saved progress.",
         )
-        sync_job = None
 
     if sync_job and sync_job.status in ("pending", "running"):
         return {
