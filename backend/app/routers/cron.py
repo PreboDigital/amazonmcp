@@ -17,7 +17,7 @@ import hashlib
 import logging
 from datetime import date, timedelta
 from typing import Optional
-from urllib.parse import quote, urlencode
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -906,8 +906,8 @@ async def create_schedule(
             f"PUBLIC_URL or RAILWAY_PUBLIC_DOMAIN must produce a URL with http:// or https://. "
             f"Got base: {base_url!r}. Set PUBLIC_URL in Railway Variables (e.g. https://amazonmcp-production.up.railway.app)."
         )
-    # QStash v2: POST /v2/schedules/{destination} with destination URL-encoded
-    encoded = quote(destination, safe="")
+    # QStash expects the raw destination path here; percent-encoding the full
+    # URL causes it to reject the endpoint as having an invalid scheme.
     base = (settings.qstash_url or "https://qstash.upstash.io").rstrip("/")
     schedule_fingerprint = hashlib.sha1(
         f"{job}|{cron}|{body.credential_id or ''}|{body.profile_id or ''}|{selected_range or ''}".encode("utf-8")
@@ -916,7 +916,7 @@ async def create_schedule(
     try:
         async with httpx.AsyncClient() as client:
             r = await client.post(
-                f"{base}/v2/schedules/{encoded}",
+                f"{base}/v2/schedules/{destination}",
                 headers={
                     "Authorization": f"Bearer {settings.qstash_token}",
                     "Upstash-Cron": cron,
