@@ -25,6 +25,23 @@ class AmazonAdsMCP:
     Each instance is configured with credentials and can call any MCP tool.
     """
 
+    # Tools that REJECT the FIXED-mode account headers and instead require
+    # body-level ``accessRequestedAccounts``. Observed prod error:
+    #
+    #   "The provided account identifier header is not supported for this
+    #    tool. Please update your MCP config."
+    #
+    # These tools belong to the legacy v3 reporting surface — the only scope
+    # header they accept is the profile-id (``Amazon-Advertising-API-Scope``);
+    # ``Amazon-Ads-AccountID`` + ``Amazon-Ads-AI-Account-Selection-Mode: FIXED``
+    # are *campaign-management* concepts that this surface flat-out refuses.
+    _BODY_SCOPED_TOOLS: frozenset[str] = frozenset({
+        "reporting-create_campaign_report",
+        "reporting-create_report",
+        "reporting-create_product_report",
+        "reporting-create_inventory_report",
+    })
+
     def __init__(
         self,
         client_id: str,
@@ -44,25 +61,32 @@ class AmazonAdsMCP:
         """Store the active advertiser account for MCP body scoping."""
         self.advertiser_account_id = advertiser_account_id
 
-    def _has_fixed_scope_headers(self) -> bool:
-        """
-        True when this client sends fixed account scope headers
-        (Amazon-Advertising-API-Scope or Amazon-Ads-AccountID + FIXED selection).
+    @classmethod
+    def _is_body_scoped_tool(cls, tool_name: Optional[str]) -> bool:
+        """True for reporting tools that need body scope and refuse FIXED headers."""
+        return isinstance(tool_name, str) and tool_name in cls._BODY_SCOPED_TOOLS
 
-        When fixed-scope headers are sent, the Amazon Ads MCP server REJECTS any
-        body-level accessRequestedAccount(s) with: "Cannot pass
-        accessRequestedAccounts in body when using fixed account scope headers".
-        Callers must therefore omit those body fields in this mode.
+    def _has_fixed_scope_headers(self, tool_name: Optional[str] = None) -> bool:
         """
+        True when this client will send fixed account scope headers for the
+        given tool (defaults to "any tool that isn't body-scoped").
+
+        When fixed-scope headers are sent, the Amazon Ads MCP server REJECTS
+        body-level accessRequestedAccount(s) with: "Cannot pass
+        accessRequestedAccounts in body when using fixed account scope
+        headers". Callers must therefore omit those body fields in this mode.
+        """
+        if self._is_body_scoped_tool(tool_name):
+            return False
         return bool(self.profile_id or self.account_id)
 
-    def _apply_access_requested_account(self, body: dict) -> dict:
+    def _apply_access_requested_account(self, body: dict, tool_name: Optional[str] = None) -> dict:
         """Attach Amazon's required account scope to campaign-management queries.
 
-        No-op when fixed-scope headers are active — the server uses the headers
-        and rejects body-level account scoping in that mode.
+        No-op when fixed-scope headers are active for the call — the server
+        uses the headers and rejects body-level account scoping in that mode.
         """
-        if self._has_fixed_scope_headers():
+        if self._has_fixed_scope_headers(tool_name):
             scoped_body = dict(body)
             scoped_body.pop("accessRequestedAccount", None)
             scoped_body.pop("accessRequestedAccounts", None)
@@ -82,13 +106,24 @@ class AmazonAdsMCP:
             raise ValueError(f"Unsupported region: {self.region}. Use na, eu, or fe.")
         return url
 
-    @property
-    def headers(self) -> dict[str, str]:
+    def _headers_for_tool(self, tool_name: Optional[str] = None) -> dict[str, str]:
+        """Per-tool header building.
+
+        Reporting create / retrieve tools reject ``Amazon-Ads-AccountID`` +
+        FIXED selection-mode headers — they only accept the legacy v3 scope
+        header (``Amazon-Advertising-API-Scope`` = profile_id). All other
+        tools use the FIXED-mode account scope headers.
+        """
         h = {
             "Amazon-Ads-ClientId": self.client_id,
             "Authorization": f"Bearer {self.access_token}",
             "Accept": "application/json, text/event-stream",
         }
+        if self._is_body_scoped_tool(tool_name):
+            if self.profile_id:
+                h["Amazon-Advertising-API-Scope"] = self.profile_id
+            return h
+
         has_fixed = False
         if self.profile_id:
             h["Amazon-Advertising-API-Scope"] = self.profile_id
@@ -100,16 +135,27 @@ class AmazonAdsMCP:
             h["Amazon-Ads-AI-Account-Selection-Mode"] = "FIXED"
         return h
 
-    def _sanitize_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        """
-        Drop body-level account scope fields when fixed-scope headers are active.
+    @property
+    def headers(self) -> dict[str, str]:
+        """Default headers — campaign-management mode (FIXED).
 
-        The Amazon Ads MCP server rejects body-level accessRequestedAccount /
-        accessRequestedAccounts whenever Amazon-Ads-AI-Account-Selection-Mode is
-        FIXED — which our client sets whenever profile_id or account_id is
-        configured. Stripping here makes every wrapper safe.
+        Kept as a property for code paths that aren't tool-specific
+        (``test_connection``, ``list_tools``). Tool dispatch goes through
+        :meth:`_headers_for_tool` instead.
         """
-        if not self._has_fixed_scope_headers():
+        return self._headers_for_tool(None)
+
+    def _sanitize_arguments(
+        self,
+        arguments: dict[str, Any],
+        tool_name: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """
+        Drop body-level account scope fields when fixed-scope headers are
+        active **for this specific tool**. Reporting tools (which require
+        body scope) are passed through unchanged.
+        """
+        if not self._has_fixed_scope_headers(tool_name):
             return arguments
         if not isinstance(arguments, dict):
             return arguments
@@ -125,19 +171,24 @@ class AmazonAdsMCP:
         return sanitized
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any] = None) -> dict:
-        """Call a single MCP tool and return the result."""
+        """Call a single MCP tool and return the result.
+
+        Headers + body sanitisation are tool-aware: reporting tools get
+        only the legacy v3 scope header (no FIXED account-id) and keep
+        their body-level ``accessRequestedAccounts``; everything else
+        gets the campaign-management FIXED-mode headers and has body
+        scope stripped.
+        """
         if arguments is None:
             arguments = {}
 
-        arguments = self._sanitize_arguments(arguments)
+        arguments = self._sanitize_arguments(arguments, tool_name)
         logger.info(f"MCP call: {tool_name} with args keys: {list(arguments.keys())}")
 
         try:
-            async with streamablehttp_client(url=self.url, headers=self.headers) as (
-                read_stream,
-                write_stream,
-                _,
-            ):
+            async with streamablehttp_client(
+                url=self.url, headers=self._headers_for_tool(tool_name),
+            ) as (read_stream, write_stream, _):
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
                     result = await session.call_tool(tool_name, arguments)
@@ -702,16 +753,17 @@ class AmazonAdsMCP:
                 # Remove unsupported 'adProduct' key if present
                 r.pop("adProduct", None)
 
-        if self._has_fixed_scope_headers():
-            report_config.pop("accessRequestedAccounts", None)
-        elif advertiser_account_id:
+        # Reporting tools always need body-level accessRequestedAccounts:
+        # the headers built for this tool drop the FIXED-mode account-id, so
+        # Amazon resolves the target account from the body.
+        if advertiser_account_id:
             report_config["accessRequestedAccounts"] = [
                 {"advertiserAccountId": advertiser_account_id}
             ]
         elif not report_config.get("accessRequestedAccounts"):
             logger.warning(
-                "create_campaign_report called without advertiser_account_id and without "
-                "fixed-scope headers — report creation may fail"
+                "create_campaign_report called without advertiser_account_id — "
+                "report creation will fail"
             )
             report_config.setdefault("accessRequestedAccounts", [])
 
@@ -844,10 +896,11 @@ class AmazonAdsMCP:
         Create a generic report using the reporting-create_report MCP tool.
         Supports all report types: spSearchTerm, sbSearchTerm, spTargeting,
         spCampaigns, spAdvertisedProduct, etc.
+
+        Reporting tools require body-level ``accessRequestedAccounts``; the
+        per-tool header builder drops FIXED-mode account scope for them.
         """
-        if self._has_fixed_scope_headers():
-            report_config.pop("accessRequestedAccounts", None)
-        elif advertiser_account_id:
+        if advertiser_account_id:
             report_config["accessRequestedAccounts"] = [
                 {"advertiserAccountId": advertiser_account_id}
             ]
@@ -859,9 +912,7 @@ class AmazonAdsMCP:
         advertiser_account_id: Optional[str] = None,
     ) -> dict:
         """Create a Product report via reporting-create_product_report."""
-        if self._has_fixed_scope_headers():
-            report_config.pop("accessRequestedAccounts", None)
-        elif advertiser_account_id:
+        if advertiser_account_id:
             report_config["accessRequestedAccounts"] = [
                 {"advertiserAccountId": advertiser_account_id}
             ]
@@ -873,9 +924,7 @@ class AmazonAdsMCP:
         advertiser_account_id: Optional[str] = None,
     ) -> dict:
         """Create an Inventory report via reporting-create_inventory_report."""
-        if self._has_fixed_scope_headers():
-            report_config.pop("accessRequestedAccounts", None)
-        elif advertiser_account_id:
+        if advertiser_account_id:
             report_config["accessRequestedAccounts"] = [
                 {"advertiserAccountId": advertiser_account_id}
             ]
@@ -1231,6 +1280,10 @@ class AmazonAdsMCP:
         "Validation error",
         "Cannot pass accessRequestedAccount",
         "fixed account scope",
+        # Reporting tools surface this when FIXED-mode account headers are
+        # sent — they only accept body-level accessRequestedAccounts.
+        "account identifier header is not supported",
+        "Please update your MCP config",
         "Start of structure or map found where not expected",
         "Internal Server Error",
         "Forbidden",

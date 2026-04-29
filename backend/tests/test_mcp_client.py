@@ -65,6 +65,51 @@ def test_open_scope_has_no_fixed_headers(open_scope_client):
     assert "Amazon-Ads-AI-Account-Selection-Mode" not in open_scope_client.headers
 
 
+# ── Tool-aware header dispatch (Phase 5 fix for "account identifier
+#    header is not supported for this tool") ───────────────────────────
+
+
+def test_reporting_tool_drops_fixed_mode_headers(fixed_scope_client):
+    """Reporting create tools must NOT receive FIXED-mode account headers."""
+    h = fixed_scope_client._headers_for_tool("reporting-create_campaign_report")
+    assert "Amazon-Ads-AI-Account-Selection-Mode" not in h
+    assert "Amazon-Ads-AccountID" not in h
+    # Profile-id header is still required (legacy v3 reporting scope)
+    assert h["Amazon-Advertising-API-Scope"] == "1690567693689407"
+
+
+def test_reporting_tool_returns_false_for_has_fixed_scope(fixed_scope_client):
+    assert fixed_scope_client._has_fixed_scope_headers(
+        "reporting-create_campaign_report"
+    ) is False
+
+
+def test_campaign_management_tool_keeps_fixed_mode_headers(fixed_scope_client):
+    h = fixed_scope_client._headers_for_tool("campaign_management-query_campaign")
+    assert h["Amazon-Ads-AI-Account-Selection-Mode"] == "FIXED"
+    assert h["Amazon-Advertising-API-Scope"] == "1690567693689407"
+
+
+def test_default_headers_property_keeps_fixed_mode(fixed_scope_client):
+    """`headers` property (no tool context) defaults to campaign-management mode."""
+    h = fixed_scope_client.headers
+    assert h["Amazon-Ads-AI-Account-Selection-Mode"] == "FIXED"
+
+
+def test_account_id_header_skipped_for_reporting_tools():
+    """When account_id is set on the client, reporting tools still drop it."""
+    client = AmazonAdsMCP(
+        client_id="amzn1.application-oa2-client.test",
+        access_token="Atza|test",
+        region="eu",
+        profile_id="1690567693689407",
+        account_id="ENTITYABC",
+    )
+    h = client._headers_for_tool("reporting-create_report")
+    assert "Amazon-Ads-AccountID" not in h
+    assert "Amazon-Ads-AI-Account-Selection-Mode" not in h
+
+
 # ── _apply_access_requested_account ────────────────────────────────────
 
 
@@ -129,7 +174,12 @@ def _run(coro):
 
 
 @pytest.mark.anyio
-async def test_create_campaign_report_omits_access_when_fixed_scope(fixed_scope_client):
+async def test_create_campaign_report_attaches_access_even_with_fixed_scope(fixed_scope_client):
+    """Reporting tools always need body-level accessRequestedAccounts.
+
+    Phase 5 reverses the prior expectation: per-tool headers strip FIXED
+    account-id for reporting calls, so the body must carry the scope.
+    """
     captured: dict = {}
 
     async def fake_call_tool(name: str, arguments: dict):
@@ -151,7 +201,9 @@ async def test_create_campaign_report_omits_access_when_fixed_scope(fixed_scope_
         )
 
     assert captured["name"] == "reporting-create_campaign_report"
-    assert "accessRequestedAccounts" not in captured["arguments"]["body"]
+    assert captured["arguments"]["body"]["accessRequestedAccounts"] == [
+        {"advertiserAccountId": "ENTITY999"}
+    ]
 
 
 @pytest.mark.anyio
@@ -216,6 +268,10 @@ def test_looks_like_server_error_detects_known_markers():
     )
     assert AmazonAdsMCP._looks_like_server_error_text("Validation error: bad input")
     assert AmazonAdsMCP._looks_like_server_error_text("Forbidden")
+    assert AmazonAdsMCP._looks_like_server_error_text(
+        "The provided account identifier header is not supported for this tool. "
+        "Please update your MCP config."
+    )
     assert not AmazonAdsMCP._looks_like_server_error_text("")
     assert not AmazonAdsMCP._looks_like_server_error_text("{\"campaigns\": []}")
     assert not AmazonAdsMCP._looks_like_server_error_text("Report queued for processing.")
