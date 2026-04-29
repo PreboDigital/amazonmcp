@@ -3,6 +3,7 @@ AI Router — AI-powered insights, chat, optimization recommendations, and campa
 Integrates with OpenAI for intelligent analysis of Amazon Ads data.
 """
 
+import logging
 import uuid
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -26,6 +27,11 @@ from app.services.ai_action_validator import (
     validate_ai_action,
     validate_ai_actions,
 )
+from app.services.ai_memory import (
+    compact_if_needed,
+    messages_for_prompt,
+)
+from app.services.ai_read_tools import build_tool_executor
 from app.services.search_term_service import get_search_term_summary
 from app.services.token_service import get_mcp_client_with_fresh_token
 from app.routers.settings import get_effective_api_keys
@@ -39,6 +45,57 @@ from app.utils import (
 
 router = APIRouter()
 settings = get_settings()
+logger = logging.getLogger(__name__)
+
+
+async def _get_previous_conversations(
+    db: AsyncSession,
+    cred: Credential,
+    *,
+    exclude_id: Optional[uuid.UUID] = None,
+    limit: int = 5,
+) -> list[dict]:
+    """Recap of the user's most recent prior chats on this account.
+
+    Lets the assistant reference past asks across separate conversations
+    (e.g. "what did I ask yesterday about wasted spend?") without
+    needing to load every message of every thread into the prompt.
+    """
+    query = (
+        select(AIConversation)
+        .where(AIConversation.credential_id == cred.id)
+        .order_by(AIConversation.updated_at.desc())
+        .limit(limit + 5)
+    )
+    if exclude_id is not None:
+        query = query.where(AIConversation.id != exclude_id)
+    result = await db.execute(query)
+    convos = result.scalars().all()
+
+    out: list[dict] = []
+    for conv in convos:
+        msgs = conv.messages or []
+        if not msgs and not conv.head_summary:
+            continue
+        first_user = next((m for m in msgs if m.get("role") == "user"), None)
+        last_assistant = next(
+            (m for m in reversed(msgs) if m.get("role") == "assistant"),
+            None,
+        )
+        out.append(
+            {
+                "id": str(conv.id),
+                "title": (conv.title or "Untitled chat")[:140],
+                "updated_at": conv.updated_at.isoformat() if conv.updated_at else None,
+                "message_count": len(msgs),
+                "head_summary": (conv.head_summary or "")[:600] or None,
+                "first_user": (first_user.get("content") if first_user else "")[:240] or None,
+                "last_assistant": (last_assistant.get("content") if last_assistant else "")[:280] or None,
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
 
 
 # ── Request Models ────────────────────────────────────────────────────
@@ -231,20 +288,22 @@ async def _get_account_context(db: AsyncSession, cred: Credential) -> dict:
     targets = targets_result.scalars().all()
     target_count = len(targets)
 
-    # Categorize targets
-    top_targets = sorted(targets, key=lambda t: t.spend or 0, reverse=True)[:30]
+    # Categorize targets — keep modest highlights only; the model uses
+    # db_query_targets to drill into the full lists on demand. Was 30/30/50/20;
+    # now 8/8/8/8 to free ~15k chars of prompt budget per turn.
+    top_targets = sorted(targets, key=lambda t: t.spend or 0, reverse=True)[:8]
     top_converters = sorted(
         [t for t in targets if (t.orders or 0) > 0],
         key=lambda t: t.orders or 0, reverse=True,
-    )[:30]
+    )[:8]
     non_converting = sorted(
         [t for t in targets if (t.clicks or 0) > 0 and (t.orders or 0) == 0],
         key=lambda t: t.spend or 0, reverse=True,
-    )[:50]
+    )[:8]
     high_acos_targets = sorted(
         [t for t in targets if (t.acos or 0) > 50 and (t.spend or 0) > 0],
         key=lambda t: t.spend or 0, reverse=True,
-    )[:20]
+    )[:8]
 
     # Target type breakdown
     targets_by_type = {}
@@ -707,17 +766,46 @@ async def ai_chat(payload: ChatRequest, db: AsyncSession = Depends(get_db)):
         db.add(conversation)
         await db.flush()
 
-    # Build account context
+    # Build account context — campaigns, ad groups, targets, audit, trends,
+    # pending changes, bid rules, harvest, search terms, activity.
     account_context = await _get_account_context(db, cred)
+
+    # Cross-thread recall: surface the user's recent prior conversations so
+    # the AI can reference past asks ("what did I ask yesterday about wasted
+    # spend?") without needing to reload every old thread into the prompt.
+    account_context["previous_conversations"] = await _get_previous_conversations(
+        db, cred, exclude_id=conversation.id, limit=5,
+    )
     conversation.context_data = account_context
 
-    # Get AI response
-    history = conversation.messages or []
-    result = await ai.chat(
-        user_message=payload.message,
-        conversation_history=history,
-        account_context=account_context,
+    # Build prompt-ready history: rolling head_summary (if any) + recent tail.
+    # ai_memory.messages_for_prompt prepends the synthetic system summary so
+    # the model keeps continuity even when the live tail has been compacted.
+    history = messages_for_prompt(conversation)
+
+    # Tool executor: lets the model call db_* (instant cache reads) and
+    # mcp_* (live Amazon Ads reads) mid-conversation. MCP client is built
+    # lazily so chats that only hit DB don't pay token-refresh cost.
+    async def _mcp_factory():
+        return await get_mcp_client_with_fresh_token(cred, db)
+
+    tool_executor = build_tool_executor(
+        db=db, cred=cred, mcp_client_factory=_mcp_factory,
     )
+
+    try:
+        result = await ai.chat(
+            user_message=payload.message,
+            conversation_history=history,
+            account_context=account_context,
+            tool_executor=tool_executor,
+        )
+    except Exception:
+        logger.exception("AI chat failed: cred=%s conv=%s", cred.id, conversation.id)
+        raise HTTPException(
+            status_code=502,
+            detail="AI provider failed. Check Settings → API Keys, model availability, and try again.",
+        )
 
     actions = result.get("actions") or []
     inline_actions_raw = [a for a in actions if a.get("scope") == "inline"]
@@ -763,16 +851,25 @@ async def ai_chat(payload: ChatRequest, db: AsyncSession = Depends(get_db)):
             db.add(change)
             queued_count += 1
 
-    # Update conversation (store actions for UI display)
+    # Update conversation (store actions for UI display).
+    # Append to the *live tail* (conversation.messages), NOT the prompt-ready
+    # history — the latter may include a synthetic head_summary system turn.
     now = utcnow().isoformat()
-    updated_messages = list(history)
-    updated_messages.append({"role": "user", "content": payload.message, "timestamp": now})
+    live_tail = list(conversation.messages or [])
+    live_tail.append({"role": "user", "content": payload.message, "timestamp": now})
     assistant_msg = {"role": "assistant", "content": result["message"], "timestamp": now}
     if actions:
         assistant_msg["actions"] = actions
-    updated_messages.append(assistant_msg)
-    conversation.messages = updated_messages
+    live_tail.append(assistant_msg)
+    conversation.messages = live_tail
     conversation.updated_at = utcnow()
+
+    # Roll the oldest turns into head_summary if the tail is now too big.
+    # Keeps prompt size bounded while preserving cross-turn continuity.
+    try:
+        await compact_if_needed(conversation, db, ai_service=ai)
+    except Exception:
+        logger.exception("ai_memory compact failed: conv=%s", conversation.id)
 
     db.add(ActivityLog(
         credential_id=cred.id,

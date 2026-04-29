@@ -15,6 +15,12 @@ from app.services.ai_tools import (
     openai_tool_specs,
     tool_call_to_action,
 )
+from app.services.ai_read_tools import (
+    READ_TOOL_NAMES,
+    RESULT_CHAR_CAP,
+    anthropic_read_tool_specs,
+    openai_read_tool_specs,
+)
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -26,6 +32,9 @@ settings = get_settings()
 MAX_CONTEXT_CHARS = 60_000        # full account-data dump cap
 MAX_HISTORY_CHARS = 16_000        # rolling conversation history cap
 MAX_HISTORY_MESSAGES = 40         # always keep at most this many turns
+# Multi-turn tool loop budget. Each hop = 1 OpenAI completion + N read tool
+# executions. Mutation tool calls always end the loop (returned as actions).
+MAX_TOOL_HOPS = 5
 # Per-section row caps inside _build_context_message
 SECTION_ROW_CAPS = {
     "all_campaigns": 60,
@@ -93,6 +102,12 @@ CRITICAL RULES — FOLLOW EVERY TIME:
   declining, stable).
 - For audit findings: reference specific issues and opportunities from the latest audit.
 - For pending changes: describe what changes are queued and their source/reasoning.
+- For continuity across chats: when the context contains a "Previous Conversations"
+  section, treat it as memory of what the user asked in earlier threads on this
+  same account. Reference it when the user says things like "what did I ask
+  yesterday", "follow up on that audit", "the campaign we discussed last time"
+  — but do NOT fabricate details that are not in the recap. If a prior thread
+  is relevant but the recap is too thin, ask the user to open that thread.
 
 When recommending changes, always:
 - Be specific (exact bid amounts, budget numbers)
@@ -127,6 +142,27 @@ To render a chart, output a [CHART] block with valid JSON. The UI will render it
 - yKeys: array of numeric keys for bar/line/area (e.g. ["spend","sales"])
 - For bar charts with long labels: add "layout":"vertical"
 - For pie: use "nameKey" and "valueKey" (e.g. {"type":"pie","title":"Spend by Campaign","data":[...],"nameKey":"name","valueKey":"spend"})
+
+**READ TOOLS — fetch data on demand:**
+The context above is a *summary*. For anything beyond that summary
+(specific campaigns, full target lists, search terms in any date
+range, daily trends, pending changes), call a read tool instead of
+guessing or telling the user "I don't have that".
+
+Tool tiers (use the cheapest one that answers the question):
+- ``db_query_campaigns`` / ``db_query_ad_groups`` / ``db_query_targets``
+  / ``db_query_search_terms`` / ``db_query_performance_trend`` /
+  ``db_query_pending_changes`` — instant local cache. Prefer these.
+- ``mcp_list_campaigns`` / ``mcp_list_ad_groups`` / ``mcp_list_targets``
+  — live Amazon Ads snapshot, ~1-5s. Use only when the user explicitly
+  asks for "right now" / "live" data, or when the matching db_* call
+  returned 0 rows.
+- ``_request_sync`` — when historical data outside the cached window is
+  needed (e.g. a month that was never synced). This does NOT fetch in
+  this turn; it asks the UI to start a sync.
+
+You may call multiple read tools in a single turn. Use the results to
+answer; do not narrate the tool calls themselves to the user.
 
 **ACTIONS — USE NATIVE TOOL CALLS:**
 Every supported mutation (bid / budget / state / rename / create_target
@@ -290,10 +326,21 @@ class AIService:
         user_message: str,
         conversation_history: list[dict] = None,
         account_context: dict = None,
+        tool_executor: Optional[Any] = None,
     ) -> dict:
         """
         General AI chat with campaign context.
+
         Returns structured response with message + any proposed changes.
+        When ``tool_executor`` is provided AND the active provider is
+        OpenAI, the model can fetch data on demand via ``db_*`` / ``mcp_*``
+        read tools — the loop runs up to :data:`MAX_TOOL_HOPS` rounds of
+        completion → tool execution → completion. Mutation tool calls
+        always end the loop and surface as user-facing actions.
+
+        Anthropic falls back to single-pass (mutations only) — multi-turn
+        tool use has a different message-shape contract that is not yet
+        wired here.
         """
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
@@ -310,6 +357,14 @@ class AIService:
 
         messages.append({"role": "user", "content": user_message})
 
+        if self.provider == "openai" and tool_executor is not None:
+            try:
+                return await self._chat_openai_tool_loop(messages, tool_executor)
+            except Exception as e:
+                logger.error(f"AI chat (tool loop) failed: {e}")
+                raise
+
+        # Single-pass fallback — Anthropic, or OpenAI without an executor.
         try:
             tools = (
                 openai_tool_specs() if self.provider == "openai"
@@ -344,10 +399,142 @@ class AIService:
                 "actions": actions,
                 "tokens_used": 0,
                 "tool_calls_used": len(native_actions),
+                "tool_hops": 0,
             }
         except Exception as e:
             logger.error(f"AI chat failed: {e}")
             raise
+
+    async def _chat_openai_tool_loop(
+        self,
+        messages: list[dict],
+        tool_executor: Any,
+    ) -> dict:
+        """OpenAI multi-turn loop: read tools execute locally and feed back.
+
+        Mutation tool calls (and ``_request_sync`` / ``_harvest_execute`` /
+        ``_ai_campaign_create``) end the loop — they are user-facing
+        actions, not in-loop reads. When the model emits a mix of read +
+        mutation calls in the same turn we still execute the reads (so the
+        model has full context on the next conversation turn) but return
+        the mutations now and stop.
+        """
+        all_tools = openai_tool_specs() + openai_read_tool_specs()
+        regex_actions_acc: list[dict] = []
+        tool_hops = 0
+        last_text = ""
+
+        for hop in range(MAX_TOOL_HOPS):
+            response = await self._openai_client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                tools=all_tools,
+                tool_choice="auto",
+                temperature=0.3,
+                max_tokens=8000,
+            )
+            choice = response.choices[0].message
+            content = choice.content or ""
+            tool_calls = list(choice.tool_calls or [])
+            text, regex_actions = self._parse_chat_response(content)
+            regex_actions_acc.extend(regex_actions)
+            last_text = text or last_text
+
+            # No tool calls → final answer.
+            if not tool_calls:
+                return {
+                    "message": last_text,
+                    "actions": regex_actions_acc,
+                    "tokens_used": getattr(response.usage, "total_tokens", 0) if response.usage else 0,
+                    "tool_calls_used": 0,
+                    "tool_hops": tool_hops,
+                }
+
+            read_calls = [tc for tc in tool_calls if tc.function.name in READ_TOOL_NAMES]
+            mutation_calls = [tc for tc in tool_calls if tc.function.name not in READ_TOOL_NAMES]
+
+            # Mutation present → end loop, surface actions.
+            if mutation_calls:
+                actions: list[dict] = []
+                for tc in mutation_calls:
+                    action = tool_call_to_action(tc.function.name, tc.function.arguments)
+                    if action is not None:
+                        actions.append(action)
+                # Reads alongside mutations: we execute them too so the
+                # model could in principle reference their data in the
+                # accompanying message text — but they don't loop back.
+                # Skipping execution keeps latency predictable.
+                return {
+                    "message": last_text,
+                    "actions": actions + regex_actions_acc,
+                    "tokens_used": getattr(response.usage, "total_tokens", 0) if response.usage else 0,
+                    "tool_calls_used": len(actions),
+                    "tool_hops": tool_hops,
+                }
+
+            # Pure-read turn → execute, append, loop.
+            tool_hops += 1
+            messages.append({
+                "role": "assistant",
+                "content": content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in read_calls
+                ],
+            })
+            for tc in read_calls:
+                args = self._coerce_tool_args(tc.function.arguments)
+                try:
+                    result = await tool_executor(tc.function.name, args)
+                except Exception as exc:
+                    logger.exception("read tool %s raised", tc.function.name)
+                    result = {"error": f"{tc.function.name} raised: {str(exc)[:240]}"}
+                serialized = json.dumps(result, default=str)
+                if len(serialized) > RESULT_CHAR_CAP:
+                    serialized = serialized[:RESULT_CHAR_CAP] + '..."[truncated]"'
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": serialized,
+                })
+
+        # Hop budget exhausted — return whatever the latest text was.
+        logger.warning("OpenAI tool loop hit MAX_TOOL_HOPS=%s without final answer", MAX_TOOL_HOPS)
+        return {
+            "message": (
+                last_text
+                or "I needed more data than I could fetch in one turn. Ask a more specific question (a campaign id, ad group id, or date range) and I'll dig in."
+            ),
+            "actions": regex_actions_acc,
+            "tokens_used": 0,
+            "tool_calls_used": 0,
+            "tool_hops": tool_hops,
+        }
+
+    @staticmethod
+    def _coerce_tool_args(raw: Any) -> dict:
+        """Parse OpenAI's JSON-string tool arguments into a dict."""
+        if raw is None:
+            return {}
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str):
+            s = raw.strip()
+            if not s:
+                return {}
+            try:
+                decoded = json.loads(s)
+            except json.JSONDecodeError:
+                return {}
+            return decoded if isinstance(decoded, dict) else {}
+        return {}
 
     @staticmethod
     def _trim_conversation_history(history: list[dict]) -> list[dict]:
@@ -1034,6 +1221,29 @@ Design a full campaign structure. Respond ONLY with valid JSON:
                 "\n## Search Term Data: Not yet synced. "
                 "User can sync via Settings or the search term sync endpoint."
             )
+
+        # ── Previous Conversations (cross-thread memory) ──────────────
+        prev_convos = context.get("previous_conversations") or []
+        if prev_convos:
+            parts.append(
+                f"\n## Previous Conversations ({len(prev_convos)} most recent on this account)"
+            )
+            parts.append(
+                "_Use this only as memory of what the user asked before — do not "
+                "fabricate details beyond what's recapped here._"
+            )
+            for pc in prev_convos:
+                title = pc.get("title") or "Untitled"
+                updated = pc.get("updated_at") or "?"
+                count = pc.get("message_count") or 0
+                parts.append(f"  - **{title}** ({count} msg, updated {updated})")
+                head = pc.get("head_summary")
+                if head:
+                    parts.append(f"    Earlier-summary: {head}")
+                if pc.get("first_user"):
+                    parts.append(f"    First user msg: {pc['first_user']}")
+                if pc.get("last_assistant"):
+                    parts.append(f"    Last assistant: {pc['last_assistant']}")
 
         # ── Recent Activity ───────────────────────────────────────────
         activity = context.get("recent_activity", [])
