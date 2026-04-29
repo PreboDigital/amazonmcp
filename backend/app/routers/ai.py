@@ -562,10 +562,13 @@ async def _get_account_context(db: AsyncSession, cred: Credential) -> dict:
             return None
         return max(0, (utcnow() - dt).days)
 
+    # ``CampaignPerformanceDaily.date`` is a ``String(25)`` column (legacy
+    # range-key support), so ``last_perf_date`` is already an ISO string
+    # — calling ``.isoformat()`` on it would raise ``AttributeError``.
     data_freshness = {
         "last_campaign_sync_at": last_campaign_sync.isoformat() if last_campaign_sync else None,
         "last_campaign_sync_days_ago": _stale_days(last_campaign_sync),
-        "last_performance_date": last_perf_date.isoformat() if last_perf_date else None,
+        "last_performance_date": str(last_perf_date) if last_perf_date else None,
         "campaigns_cached": len(campaigns),
         "targets_cached": target_count,
     }
