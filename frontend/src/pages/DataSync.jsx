@@ -99,6 +99,9 @@ export default function DataSync() {
   const [newRangePreset, setNewRangePreset] = useState(DEFAULT_RANGE_BY_JOB.reports)
   const [newCronPreset, setNewCronPreset] = useState('0 */6 * * *')
   const [newCronCustom, setNewCronCustom] = useState('')
+  // When true, the backend expands one schedule into N — one per discovered
+  // profile on the credential. Useful for multi-marketplace credentials.
+  const [newAllProfiles, setNewAllProfiles] = useState(false)
   const [runRanges, setRunRanges] = useState({
     reports: DEFAULT_RANGE_BY_JOB.reports,
     'search-terms': DEFAULT_RANGE_BY_JOB['search-terms'],
@@ -154,12 +157,14 @@ export default function DataSync() {
     try {
       await cronApi.createSchedule(newJob, cron, {
         credentialId: activeAccountId,
-        profileId: activeProfileId,
+        profileId: newAllProfiles ? null : activeProfileId,
         rangePreset: RANGE_OPTIONS[newJob] ? newRangePreset : null,
+        allProfiles: newAllProfiles,
       })
       await loadSchedules()
       setNewCronCustom('')
       setNewCronPreset('0 */6 * * *')
+      setNewAllProfiles(false)
     } catch (err) {
       setError(err.message || 'Failed to create schedule')
     } finally {
@@ -351,6 +356,18 @@ export default function DataSync() {
               />
             </div>
           )}
+          <label
+            className="flex items-center gap-2 text-xs text-slate-600 select-none cursor-pointer"
+            title="Create one schedule per profile on this credential. Useful when the credential covers multiple marketplaces."
+          >
+            <input
+              type="checkbox"
+              checked={newAllProfiles}
+              onChange={(e) => setNewAllProfiles(e.target.checked)}
+              className="rounded border-slate-300"
+            />
+            All profiles
+          </label>
           <button
             onClick={handleCreateSchedule}
             disabled={
@@ -361,7 +378,7 @@ export default function DataSync() {
             className="btn-primary text-sm disabled:opacity-50"
           >
             {creating ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
-            Add schedule
+            Add schedule{newAllProfiles ? 's' : ''}
           </button>
         </div>
 

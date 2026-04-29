@@ -93,3 +93,56 @@ def test_trigger_sync_is_non_blocking_too():
     body = src[fn_start:next_def] if next_def != -1 else src[fn_start:]
     assert 'asyncio.create_task' in body, "trigger_sync must be non-blocking too"
     assert 'await run_full_sync(' not in body
+
+
+def test_is_data_recent_freshness_window():
+    """The cron skip-fresh check must:
+    - return False for None / never-synced data
+    - return True only when data is younger than min_age_hours
+    - return False when min_age_hours <= 0 (manual triggers force re-fetch)
+    """
+    now = _now_naive()
+    assert cron_router._is_data_recent(None, min_age_hours=4.0) is False
+    assert cron_router._is_data_recent(now, min_age_hours=0) is False
+    assert cron_router._is_data_recent(now - timedelta(minutes=30), min_age_hours=4.0) is True
+    assert cron_router._is_data_recent(now - timedelta(hours=3), min_age_hours=4.0) is True
+    assert cron_router._is_data_recent(now - timedelta(hours=5), min_age_hours=4.0) is False
+    assert cron_router._is_data_recent(now - timedelta(days=1), min_age_hours=4.0) is False
+
+
+def test_search_terms_cron_calls_freshness_check():
+    """Guardrail: cron_search_terms must skip MCP report creation when
+    SearchTermPerformance has recent rows for the requested range."""
+    src = Path(BACKEND_DIR / "app" / "routers" / "cron.py").read_text()
+    fn_start = src.find('async def cron_search_terms(')
+    assert fn_start != -1
+    next_def = src.find('\n@router.', fn_start + 1)
+    body = src[fn_start:next_def] if next_def != -1 else src[fn_start:]
+    assert '_search_terms_recent_sync_at' in body, (
+        "cron_search_terms must check existing data freshness before creating "
+        "another expensive MCP report"
+    )
+    assert '"skipped_fresh"' in body or "'skipped_fresh'" in body
+
+
+def test_products_cron_calls_freshness_check():
+    src = Path(BACKEND_DIR / "app" / "routers" / "cron.py").read_text()
+    fn_start = src.find('async def cron_products(')
+    assert fn_start != -1
+    next_def = src.find('\n@router.', fn_start + 1)
+    body = src[fn_start:next_def] if next_def != -1 else src[fn_start:]
+    assert '_products_recent_sync_at' in body
+    assert '"skipped_fresh"' in body or "'skipped_fresh'" in body
+
+
+def test_create_schedule_supports_all_profiles():
+    """Multi-profile schedule expansion must be wired in CreateScheduleRequest
+    and the create_schedule body must look up profiles from the DB when set."""
+    src = Path(BACKEND_DIR / "app" / "routers" / "cron.py").read_text()
+    assert "all_profiles: bool" in src
+    fn_start = src.find('async def create_schedule(')
+    assert fn_start != -1
+    next_def = src.find('\n@router.', fn_start + 1)
+    body = src[fn_start:next_def] if next_def != -1 else src[fn_start:]
+    assert "_list_credential_profiles" in body
+    assert "all_profiles" in body

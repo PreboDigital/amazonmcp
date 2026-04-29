@@ -234,6 +234,78 @@ async def _set_aux_schedule_job_state(
     return report
 
 
+# Idempotency window: if data for the *exact same* (credential, profile,
+# range, ad_product) was synced more recently than this, the cron tick is a
+# no-op. Calibrated for QStash schedules running every 6h+ — a 4h window
+# de-duplicates redundant intra-day ticks (e.g. last_30_days × every 6h)
+# without blocking once-a-day cron from running. Manual /trigger/* paths
+# pass ``min_age_hours=0`` to always re-fetch.
+DEFAULT_FRESHNESS_HOURS = 4.0
+
+
+async def _search_terms_recent_sync_at(
+    db: AsyncSession,
+    *,
+    credential_id,
+    profile_id: Optional[str],
+    ad_product: str,
+    start_date: str,
+    end_date: str,
+):
+    """Most recent ``synced_at`` for matching SearchTermPerformance rows.
+
+    None when nothing's been synced yet for this exact range. Lets the cron
+    skip a redundant 60-120s MCP report if data is already fresh enough.
+    """
+    from sqlalchemy import func as _func
+    q = (
+        select(_func.max(SearchTermPerformance.synced_at))
+        .where(
+            SearchTermPerformance.credential_id == credential_id,
+            SearchTermPerformance.ad_product == ad_product,
+            SearchTermPerformance.report_date_start == start_date,
+            SearchTermPerformance.report_date_end == end_date,
+        )
+    )
+    if profile_id is not None:
+        q = q.where(SearchTermPerformance.profile_id == profile_id)
+    else:
+        q = q.where(SearchTermPerformance.profile_id.is_(None))
+    return (await db.execute(q)).scalar()
+
+
+async def _products_recent_sync_at(
+    db: AsyncSession,
+    *,
+    credential_id,
+    profile_id: Optional[str],
+    start_date: str,
+    end_date: str,
+):
+    """Most recent ``synced_at`` for matching ProductPerformanceDaily rows."""
+    from sqlalchemy import func as _func
+    q = (
+        select(_func.max(ProductPerformanceDaily.synced_at))
+        .where(
+            ProductPerformanceDaily.credential_id == credential_id,
+            ProductPerformanceDaily.report_date_start == start_date,
+            ProductPerformanceDaily.report_date_end == end_date,
+        )
+    )
+    if profile_id is not None:
+        q = q.where(ProductPerformanceDaily.profile_id == profile_id)
+    else:
+        q = q.where(ProductPerformanceDaily.profile_id.is_(None))
+    return (await db.execute(q)).scalar()
+
+
+def _is_data_recent(synced_at, *, min_age_hours: float) -> bool:
+    """True when ``synced_at`` is fresher than ``min_age_hours`` ago."""
+    if synced_at is None or min_age_hours <= 0:
+        return False
+    return (utcnow() - synced_at) < timedelta(hours=min_age_hours)
+
+
 async def _queue_exact_daily_schedule_sync(
     db: AsyncSession,
     cred,
@@ -455,6 +527,12 @@ async def cron_search_terms(
     Scheduled search term sync. Call from QStash:
     POST https://your-app.railway.app/api/cron/search-terms
     Header: X-Cron-Secret: <CRON_SECRET>
+
+    Idempotent: when SearchTermPerformance rows for the exact requested
+    range were synced within :data:`DEFAULT_FRESHNESS_HOURS`, returns
+    ``status=skipped_fresh`` instead of creating another 60-120s Amazon
+    report. Avoids 4 redundant 30-day fetches/day on a ``every 6h ×
+    last_30_days`` schedule.
     """
     try:
         cred, selected_profile_id = await _get_cred_and_profile(db, credential_id, profile_id)
@@ -463,6 +541,27 @@ async def cron_search_terms(
         start_date, end_date = _resolve_schedule_range(
             selected_range, marketplace=marketplace, region=cred.region
         )
+        recent_sync = await _search_terms_recent_sync_at(
+            db,
+            credential_id=cred.id,
+            profile_id=selected_profile_id,
+            ad_product="SPONSORED_PRODUCTS",
+            start_date=start_date,
+            end_date=end_date,
+        )
+        if _is_data_recent(recent_sync, min_age_hours=DEFAULT_FRESHNESS_HOURS):
+            logger.info(
+                "Cron search-terms skipped — data synced %s ago (range=%s..%s, profile=%s)",
+                utcnow() - recent_sync, start_date, end_date, selected_profile_id,
+            )
+            return {
+                "status": "skipped_fresh",
+                "range_preset": selected_range,
+                "start_date": start_date,
+                "end_date": end_date,
+                "last_synced_at": recent_sync.isoformat(),
+            }
+
         job = await _find_aux_schedule_job(
             db,
             cred.id,
@@ -559,7 +658,12 @@ async def cron_products(
     _: None = Depends(_require_cron_secret),
     db: AsyncSession = Depends(get_db),
 ):
-    """Scheduled product/business report sync."""
+    """Scheduled product/business report sync.
+
+    Idempotent — same logic as search-terms. Skips redundant fetches when
+    ProductPerformanceDaily already has rows for this range synced within
+    :data:`DEFAULT_FRESHNESS_HOURS`.
+    """
     try:
         cred, selected_profile_id = await _get_cred_and_profile(db, credential_id, profile_id)
         marketplace = await _get_marketplace_for_profile(db, cred, selected_profile_id)
@@ -567,6 +671,26 @@ async def cron_products(
         start_date, end_date = _resolve_schedule_range(
             selected_range, marketplace=marketplace, region=cred.region
         )
+        recent_sync = await _products_recent_sync_at(
+            db,
+            credential_id=cred.id,
+            profile_id=selected_profile_id,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        if _is_data_recent(recent_sync, min_age_hours=DEFAULT_FRESHNESS_HOURS):
+            logger.info(
+                "Cron products skipped — data synced %s ago (range=%s..%s, profile=%s)",
+                utcnow() - recent_sync, start_date, end_date, selected_profile_id,
+            )
+            return {
+                "status": "skipped_fresh",
+                "range_preset": selected_range,
+                "start_date": start_date,
+                "end_date": end_date,
+                "last_synced_at": recent_sync.isoformat(),
+            }
+
         job = await _find_aux_schedule_job(
             db,
             cred.id,
@@ -1210,6 +1334,9 @@ class CreateScheduleRequest(BaseModel):
     credential_id: Optional[str] = None
     profile_id: Optional[str] = None
     range_preset: Optional[str] = None
+    # When True and credential has multiple profiles in the Account table,
+    # create one schedule per discovered profile. Profile_id is ignored.
+    all_profiles: bool = False
 
 
 @router.get("/schedules")
@@ -1235,15 +1362,101 @@ async def list_schedules(_: User = Depends(require_admin)):
         return {"schedules": [], "error": str(e)}
 
 
+async def _list_credential_profiles(
+    db: AsyncSession, credential_id_str: Optional[str],
+) -> list[str]:
+    """All profile_ids known for this credential. Used by all_profiles=True."""
+    from app.utils import parse_uuid
+    from app.routers.reporting import _get_cred as _get_cred_fn
+
+    cred = await _get_cred_fn(db, credential_id_str)
+    result = await db.execute(
+        select(Account.profile_id)
+        .where(Account.credential_id == cred.id, Account.profile_id.isnot(None))
+        .distinct()
+    )
+    return [pid for (pid,) in result.all() if pid]
+
+
+async def _post_qstash_schedule(
+    *,
+    settings,
+    secret: str,
+    job: str,
+    cron: str,
+    credential_id: Optional[str],
+    profile_id: Optional[str],
+    selected_range: Optional[str],
+    base_url: str,
+) -> dict:
+    """Single QStash schedule POST. Extracted so create_schedule can fan out
+    over multiple profiles when ``all_profiles=True``.
+    """
+    import httpx
+    params: dict[str, str] = {}
+    if credential_id:
+        params["credential_id"] = credential_id
+    if profile_id:
+        params["profile_id"] = profile_id
+    if selected_range:
+        params["range_preset"] = selected_range
+    qs = urlencode(params)
+    destination = base_url.rstrip("/") + CRON_JOB_PATHS[job] + (f"?{qs}" if qs else "")
+    if not destination.startswith(("http://", "https://")):
+        raise HTTPException(
+            500,
+            "PUBLIC_URL or RAILWAY_PUBLIC_DOMAIN must produce a URL with http:// or https://. "
+            f"Got base: {base_url!r}.",
+        )
+    base = (settings.qstash_url or "https://qstash.upstash.io").rstrip("/")
+    schedule_fingerprint = hashlib.sha1(
+        f"{job}|{cron}|{credential_id or ''}|{profile_id or ''}|{selected_range or ''}".encode("utf-8")
+    ).hexdigest()[:10]
+    schedule_id = f"amazon-ads-{job}-{schedule_fingerprint}"
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            f"{base}/v2/schedules/{destination}",
+            headers={
+                "Authorization": f"Bearer {settings.qstash_token}",
+                "Upstash-Cron": cron,
+                "Upstash-Schedule-Id": schedule_id,
+                "Upstash-Forward-X-Cron-Secret": secret,
+                "Content-Type": "application/json",
+            },
+            content=b"{}",
+        )
+        if r.status_code in (400, 412):
+            err = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+            msg = err.get("error", r.text) or r.text
+            raise HTTPException(r.status_code, msg)
+        r.raise_for_status()
+        data = r.json()
+        return {
+            "scheduleId": data.get("scheduleId", schedule_id),
+            "destination": destination,
+            "cron": cron,
+            "job": job,
+            "range_preset": selected_range,
+            "credential_id": credential_id,
+            "profile_id": profile_id,
+        }
+
+
 @router.post("/schedules")
 async def create_schedule(
     body: CreateScheduleRequest,
     request: Request,
     _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
 ):
-    """Create a QStash schedule. Admin only. Requires QSTASH_TOKEN and CRON_SECRET."""
+    """Create one or more QStash schedules.
+
+    Admin only. Requires ``QSTASH_TOKEN`` and ``CRON_SECRET``. When
+    ``all_profiles=True``, expands into one schedule per discovered profile
+    on the credential — handy for multi-marketplace credentials so the
+    operator doesn't have to repeat the form 4×.
+    """
     from app.config import get_settings
-    import httpx
     job = body.job
     cron = body.cron
     if job not in CRON_JOB_PATHS:
@@ -1258,61 +1471,56 @@ async def create_schedule(
     if not secret:
         raise HTTPException(500, "CRON_SECRET not configured")
     base_url = _resolve_public_base_url(request, settings.effective_public_url)
-    params = {}
-    if body.credential_id:
-        params["credential_id"] = body.credential_id
-    if body.profile_id:
-        params["profile_id"] = body.profile_id
-    if selected_range:
-        params["range_preset"] = selected_range
-    qs = urlencode(params)
-    destination = base_url.rstrip("/") + CRON_JOB_PATHS[job] + (f"?{qs}" if qs else "")
-    if not destination.startswith(("http://", "https://")):
-        raise HTTPException(
-            500,
-            f"PUBLIC_URL or RAILWAY_PUBLIC_DOMAIN must produce a URL with http:// or https://. "
-            f"Got base: {base_url!r}. Set PUBLIC_URL in Railway Variables (e.g. https://amazonmcp-production.up.railway.app)."
-        )
-    # QStash expects the raw destination path here; percent-encoding the full
-    # URL causes it to reject the endpoint as having an invalid scheme.
-    base = (settings.qstash_url or "https://qstash.upstash.io").rstrip("/")
-    schedule_fingerprint = hashlib.sha1(
-        f"{job}|{cron}|{body.credential_id or ''}|{body.profile_id or ''}|{selected_range or ''}".encode("utf-8")
-    ).hexdigest()[:10]
-    schedule_id = f"amazon-ads-{job}-{schedule_fingerprint}"
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.post(
-                f"{base}/v2/schedules/{destination}",
-                headers={
-                    "Authorization": f"Bearer {settings.qstash_token}",
-                    "Upstash-Cron": cron,
-                    "Upstash-Schedule-Id": schedule_id,
-                    "Upstash-Forward-X-Cron-Secret": secret,
-                    "Content-Type": "application/json",
-                },
-                content=b"{}",
+
+    # Resolve target profiles
+    if body.all_profiles:
+        profile_ids: list[Optional[str]] = await _list_credential_profiles(db, body.credential_id)
+        if not profile_ids:
+            raise HTTPException(
+                400,
+                "all_profiles=True but no profiles are stored for this credential. "
+                "Run accounts/discover first, or pass profile_id explicitly.",
             )
-            if r.status_code in (400, 412):
-                err = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
-                msg = err.get("error", r.text) or r.text
-                raise HTTPException(r.status_code, msg)
-            r.raise_for_status()
-            data = r.json()
-            return {
-                "scheduleId": data.get("scheduleId", schedule_id),
-                "destination": destination,
-                "cron": cron,
-                "job": job,
-                "range_preset": selected_range,
-                "credential_id": body.credential_id,
-                "profile_id": body.profile_id,
-            }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Failed to create QStash schedule")
-        raise HTTPException(500, str(e))
+    else:
+        profile_ids = [body.profile_id]
+
+    created: list[dict] = []
+    failures: list[dict] = []
+    for pid in profile_ids:
+        try:
+            res = await _post_qstash_schedule(
+                settings=settings,
+                secret=secret,
+                job=job,
+                cron=cron,
+                credential_id=body.credential_id,
+                profile_id=pid,
+                selected_range=selected_range,
+                base_url=base_url,
+            )
+            created.append(res)
+        except HTTPException as he:
+            failures.append({"profile_id": pid, "status_code": he.status_code, "error": he.detail})
+        except Exception as e:
+            logger.exception("Failed to create QStash schedule for profile %s", pid)
+            failures.append({"profile_id": pid, "status_code": 500, "error": str(e)})
+
+    if not created:
+        raise HTTPException(500, {"message": "All schedule creations failed", "failures": failures})
+
+    # Single-schedule path → preserve old response shape (a single dict) for
+    # backward compatibility with existing UI code.
+    if len(created) == 1 and not body.all_profiles:
+        out = dict(created[0])
+        if failures:
+            out["failures"] = failures
+        return out
+
+    return {
+        "created": created,
+        "failures": failures,
+        "count": len(created),
+    }
 
 
 @router.delete("/schedules/{schedule_id}")

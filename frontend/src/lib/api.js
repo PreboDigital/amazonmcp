@@ -699,6 +699,7 @@ export const cronApi = {
         credential_id: opts.credentialId || null,
         profile_id: opts.profileId || null,
         range_preset: opts.rangePreset || null,
+        all_profiles: opts.allProfiles || false,
       }),
     }),
   deleteSchedule: (scheduleId) =>
