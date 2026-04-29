@@ -6,13 +6,48 @@ Supports configurable default LLM via app settings.
 import json
 import logging
 import re
-from typing import Optional
+from typing import Any, Optional
 from openai import AsyncOpenAI
 from anthropic import AsyncAnthropic
 from app.config import get_settings
+from app.services.ai_tools import (
+    anthropic_tool_specs,
+    openai_tool_specs,
+    tool_call_to_action,
+)
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# ── Prompt-size budgets ───────────────────────────────────────────────
+# Hard caps on what we serialize into a single chat call. Real models tolerate
+# more, but we hit cost / latency / accuracy cliffs above ~30k chars of
+# context. Tune via env if needed; defaults are conservative.
+MAX_CONTEXT_CHARS = 60_000        # full account-data dump cap
+MAX_HISTORY_CHARS = 16_000        # rolling conversation history cap
+MAX_HISTORY_MESSAGES = 40         # always keep at most this many turns
+# Per-section row caps inside _build_context_message
+SECTION_ROW_CAPS = {
+    "all_campaigns": 60,
+    "ad_groups": 80,
+    "top_spenders": 25,
+    "top_converters": 20,
+    "non_converting": 25,
+    "high_acos": 25,
+    "performance_trend": 30,
+    "pending_changes": 25,
+    "issues": 25,
+    "opportunities": 25,
+    "bid_rules": 15,
+    "optimization_history": 10,
+    "harvest_configs": 10,
+    "harvested_keywords": 10,
+    "search_terms_top": 25,
+    "search_terms_non_converting": 25,
+    "search_terms_high_acos": 25,
+    "recent_activity": 20,
+}
+
 
 SYSTEM_PROMPT = """You are an expert Amazon Advertising strategist and PPC optimization specialist.
 You have deep expertise in Sponsored Products, Sponsored Brands, and Amazon DSP campaigns.
@@ -93,23 +128,32 @@ To render a chart, output a [CHART] block with valid JSON. The UI will render it
 - For bar charts with long labels: add "layout":"vertical"
 - For pie: use "nameKey" and "valueKey" (e.g. {"type":"pie","title":"Spend by Campaign","data":[...],"nameKey":"name","valueKey":"spend"})
 
-**INLINE ACTIONS (small changes — approve in chat):**
-When you suggest 1–2 small changes that the user can approve immediately, append an [ACTIONS] block at the end.
-Use scope "inline" for: single bid change, single budget change, campaign/ad group rename, single keyword add/update/delete.
-Use scope "queue" for: 3+ changes, campaign creation, harvest, batch operations — these go to Approval Queue.
+**ACTIONS — USE NATIVE TOOL CALLS:**
+Every supported mutation (bid / budget / state / rename / create_target
+/ delete_target / ad_group update) is exposed as a native tool. The
+queue-only synthetics ``_request_sync``, ``_harvest_execute``, and
+``_ai_campaign_create`` are likewise available.
 
-Context includes target_id, ad_group_id, campaign_id for targets; ad_group_id, campaign_id for ad groups; campaign_id for campaigns.
-Use these EXACT IDs from the context when building mcp_payload.
+When the user asks for a change you can execute, emit a tool call.
+Numeric fields like ``bid`` and ``dailyBudget`` MUST be real numbers
+(``0.50``), never strings (``"$0.50"``). Use the exact ``id:`` values
+from the provided context — do not invent IDs.
 
-Format (append after your message, no extra text):
-[ACTIONS]
-{"actions":[{"scope":"inline","tool":"campaign_management-update_target_bid","arguments":{"body":{"targets":[{"targetId":"<target_id>","bid":0.5}]}},"label":"Increase bid on 'keyword' to $0.50","change_type":"bid_update","entity_name":"keyword","entity_id":"<target_id>","current_value":"$0.35","proposed_value":"$0.50"}]}
-[/ACTIONS]
+The legacy ``[ACTIONS]`` text block is still parsed as a final fallback
+for providers that fail to emit a tool call, but new responses should
+exclusively rely on native tool calls.
 
-Valid tools for inline: campaign_management-update_target_bid, campaign_management-update_campaign_budget, campaign_management-update_campaign (name), campaign_management-update_ad_group (name), campaign_management-create_target, campaign_management-update_target (bid/state), campaign_management-delete_target, campaign_management-update_campaign_state, campaign_management-update_target (state only).
-For create_target: body.targets needs campaignId, adGroupId, expression (keyword text), expressionType KEYWORD, matchType EXACT/PHRASE/BROAD, state enabled, bid.
-For update_campaign (rename): body.campaigns needs campaignId, name.
-For update_ad_group (rename): body.adGroups needs adGroupId, name."""
+Context rows expose ``id:`` plus ``ad_group_id`` / ``campaign_id`` where
+applicable. Pass those EXACT values into the matching tool argument
+(``targetId`` / ``adGroupId`` / ``campaignId``); never invent IDs.
+
+**REQUESTING A SYNC:**
+If the user asks about data that is missing or stale (see "Data
+freshness" in the context above), do not invent numbers. Call the
+``_request_sync`` tool with the appropriate ``kind`` (``campaigns``,
+``reports``, ``search_terms``, or ``products``) and an optional
+``range_preset``. The UI will surface a "Sync now" button to the user
+— this tool never mutates data, only requests a refresh."""
 
 
 def _parse_model_id(model_id: Optional[str]) -> tuple[str, str]:
@@ -155,7 +199,34 @@ class AIService:
         max_tokens: int = 8000,
         json_response: bool = False,
     ) -> str:
-        """Call the appropriate provider's completion API."""
+        """Call the appropriate provider's completion API.
+
+        Backward-compatible plain-text shim around :meth:`_completion_full`.
+        """
+        result = await self._completion_full(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            json_response=json_response,
+            tools=None,
+        )
+        return result.get("content", "") or ""
+
+    async def _completion_full(
+        self,
+        messages: list[dict],
+        temperature: float = 0.3,
+        max_tokens: int = 8000,
+        json_response: bool = False,
+        tools: Optional[list[dict]] = None,
+    ) -> dict[str, Any]:
+        """Call the provider and return ``{content, tool_calls}``.
+
+        ``tool_calls`` is a normalised list of ``(name, raw_arguments)``
+        tuples — for OpenAI raw_arguments is a JSON string, for
+        Anthropic it is already a dict. The
+        :mod:`app.services.ai_tools` converter handles either shape.
+        """
         if self.provider == "openai":
             kwargs = dict(
                 model=self.model,
@@ -163,10 +234,23 @@ class AIService:
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
-            if json_response:
+            if tools:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = "auto"
+                # OpenAI rejects response_format=json_object together
+                # with tools; tools imply structured output already.
+            elif json_response:
                 kwargs["response_format"] = {"type": "json_object"}
             response = await self._openai_client.chat.completions.create(**kwargs)
-            return response.choices[0].message.content or ""
+            choice = response.choices[0].message
+            content = choice.content or ""
+            tool_calls: list[tuple[str, Any]] = []
+            for tc in (choice.tool_calls or []):
+                fn = getattr(tc, "function", None)
+                if fn is None:
+                    continue
+                tool_calls.append((fn.name, fn.arguments))
+            return {"content": content, "tool_calls": tool_calls}
 
         # Anthropic: convert messages to their format
         system = ""
@@ -179,15 +263,27 @@ class AIService:
             else:
                 anthropic_messages.append({"role": "user" if role == "user" else "assistant", "content": content})
 
-        response = await self._anthropic_client.messages.create(
+        anthropic_kwargs: dict[str, Any] = dict(
             model=self.model,
             max_tokens=max_tokens,
             system=system.strip() if system else None,
             messages=anthropic_messages,
         )
-        if response.content and response.content[0].type == "text":
-            return response.content[0].text
-        return ""
+        if tools:
+            anthropic_kwargs["tools"] = tools
+
+        response = await self._anthropic_client.messages.create(**anthropic_kwargs)
+        text_parts: list[str] = []
+        tool_calls = []
+        for block in response.content or []:
+            block_type = getattr(block, "type", None)
+            if block_type == "text":
+                text_parts.append(getattr(block, "text", "") or "")
+            elif block_type == "tool_use":
+                tool_calls.append(
+                    (getattr(block, "name", ""), getattr(block, "input", {}) or {})
+                )
+        return {"content": "".join(text_parts), "tool_calls": tool_calls}
 
     async def chat(
         self,
@@ -201,45 +297,136 @@ class AIService:
         """
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-        # Add account context if available
         if account_context:
             context_msg = self._build_context_message(account_context)
             messages.append({"role": "system", "content": context_msg})
 
-        # Add conversation history
-        if conversation_history:
-            for msg in conversation_history[-20:]:  # Last 20 messages for context
-                messages.append({
-                    "role": msg.get("role", "user"),
-                    "content": msg.get("content", ""),
-                })
+        trimmed_history = self._trim_conversation_history(conversation_history or [])
+        for msg in trimmed_history:
+            messages.append({
+                "role": msg.get("role", "user"),
+                "content": msg.get("content", ""),
+            })
 
         messages.append({"role": "user", "content": user_message})
 
         try:
-            content = await self._completion(messages, temperature=0.3, max_tokens=8000)
-            message, actions = self._parse_chat_response(content)
-            return {"message": message, "actions": actions, "tokens_used": 0}
+            tools = (
+                openai_tool_specs() if self.provider == "openai"
+                else anthropic_tool_specs()
+            )
+            result = await self._completion_full(
+                messages,
+                temperature=0.3,
+                max_tokens=8000,
+                tools=tools,
+            )
+            content = result.get("content", "") or ""
+            tool_calls = result.get("tool_calls") or []
+
+            message, regex_actions = self._parse_chat_response(content)
+
+            native_actions: list[dict] = []
+            for name, raw_args in tool_calls:
+                action = tool_call_to_action(name, raw_args)
+                if action is not None:
+                    native_actions.append(action)
+
+            actions = native_actions + regex_actions
+            if native_actions and regex_actions:
+                logger.info(
+                    "AI emitted both native tool_calls (%d) and [ACTIONS] blocks (%d) — merging",
+                    len(native_actions), len(regex_actions),
+                )
+
+            return {
+                "message": message,
+                "actions": actions,
+                "tokens_used": 0,
+                "tool_calls_used": len(native_actions),
+            }
         except Exception as e:
             logger.error(f"AI chat failed: {e}")
             raise
 
-    def _parse_chat_response(self, content: str) -> tuple[str, list]:
-        """Extract [ACTIONS] block from AI response. Returns (message_without_actions, actions_list)."""
-        actions = []
-        message = content
-        match = re.search(r'\[ACTIONS\]\s*(\{.*?\})\s*\[/ACTIONS\]', content, re.DOTALL)
-        if match:
+    @staticmethod
+    def _trim_conversation_history(history: list[dict]) -> list[dict]:
+        """Drop oldest turns until the tail fits within both caps.
+
+        Keeps the most recent turns, so the user's current thread of
+        thought is preserved. The latest turn is *always* retained even if
+        a single message is over the char budget — better to overshoot than
+        drop the user's current ask.
+        """
+        if not history:
+            return []
+        tail = history[-MAX_HISTORY_MESSAGES:]
+
+        char_budget = MAX_HISTORY_CHARS
+        kept_reversed: list[dict] = []
+        for msg in reversed(tail):
+            content = str(msg.get("content", ""))
+            cost = len(content) + 32  # rough overhead per message
+            if kept_reversed and (char_budget - cost) < 0:
+                break
+            char_budget -= cost
+            kept_reversed.append(msg)
+        return list(reversed(kept_reversed))
+
+    # Tolerant ACTIONS block matcher:
+    #   - one or more [ACTIONS]…[/ACTIONS] anywhere in the message
+    #   - inner JSON may sit inside a ```json code fence the model invented
+    #   - inner JSON may be the bare ``actions`` array instead of an object
+    _ACTIONS_BLOCK_RE = re.compile(
+        r"\[ACTIONS\]\s*(?:```(?:json)?\s*)?(.*?)(?:\s*```\s*)?\[/ACTIONS\]",
+        re.DOTALL | re.IGNORECASE,
+    )
+
+    @classmethod
+    def _parse_chat_response(cls, content: str) -> tuple[str, list]:
+        """Extract every ``[ACTIONS]`` block from the AI response.
+
+        Returns ``(message_without_actions, actions_list)``. Robust against:
+        - multiple ACTIONS blocks (concatenated)
+        - inner JSON wrapped in ```json``` fences
+        - inner JSON that is a bare actions list rather than ``{"actions": [...]}``
+        - stray whitespace / case differences
+        """
+        actions: list = []
+        if not content:
+            return content or "", actions
+
+        last_end = 0
+        message_parts: list[str] = []
+        any_match = False
+
+        for match in cls._ACTIONS_BLOCK_RE.finditer(content):
+            any_match = True
+            message_parts.append(content[last_end:match.start()])
+            last_end = match.end()
+            payload = (match.group(1) or "").strip()
+            if not payload:
+                continue
             try:
-                data = json.loads(match.group(1).strip())
-                actions = data.get("actions", [])
-                if isinstance(actions, list):
-                    message = content[:match.start()].strip()
-                else:
-                    actions = []
+                data = json.loads(payload)
             except json.JSONDecodeError:
                 logger.warning("Failed to parse [ACTIONS] JSON in chat response")
-        return (message, actions)
+                continue
+            if isinstance(data, dict):
+                block_actions = data.get("actions")
+            elif isinstance(data, list):
+                block_actions = data
+            else:
+                block_actions = None
+            if isinstance(block_actions, list):
+                actions.extend(a for a in block_actions if isinstance(a, dict))
+
+        if not any_match:
+            return content, []
+
+        message_parts.append(content[last_end:])
+        message = "".join(message_parts).strip()
+        return message, actions
 
     async def generate_insights(self, campaign_data: dict, account_context: dict = None) -> dict:
         """
@@ -440,8 +627,25 @@ Design a full campaign structure. Respond ONLY with valid JSON:
         Build a comprehensive context message from account data for the AI.
         Formats all available data: campaigns, ad groups, targets, audit,
         trends, pending changes, bid rules, harvest, and activity.
+
+        Bounded by ``SECTION_ROW_CAPS`` per section + ``MAX_CONTEXT_CHARS``
+        overall. When sections are truncated, the prompt explicitly tells
+        the AI so it doesn't claim "no other campaigns" when it just hasn't
+        seen them.
         """
-        parts = ["Here is the COMPLETE account data for the selected account. Use this data to answer questions.\n"]
+        # Defensively clamp lists by section name so a runaway sync can't
+        # produce a 500k-char prompt. Mutates a shallow copy only.
+        context = self._cap_context_sections(context)
+        parts = ["Here is the account data for the selected account. Use this data to answer questions.\n"]
+        truncations = context.get("_truncations") or {}
+        if truncations:
+            parts.append(
+                "**Note:** the lists below are truncated for prompt budget. "
+                "Total rows available before truncation: "
+                + ", ".join(f"{k}={v}" for k, v in sorted(truncations.items()))
+                + ". If the user asks about something that should be in a longer list, "
+                "tell them you're seeing a truncated view and recommend a focused query."
+            )
 
         # ── Account ───────────────────────────────────────────────────
         if context.get("account"):
@@ -455,6 +659,29 @@ Design a full campaign structure. Respond ONLY with valid JSON:
             parts.append(f"**Account:** {label}")
             if acct.get("profile_id"):
                 parts.append(f"**Profile ID:** {acct['profile_id']}")
+
+        # ── Data Freshness ────────────────────────────────────────────
+        freshness = context.get("data_freshness") or {}
+        if freshness:
+            last_sync = freshness.get("last_campaign_sync_at")
+            stale_days = freshness.get("last_campaign_sync_days_ago")
+            last_perf = freshness.get("last_performance_date")
+            line = "**Data freshness:** "
+            if last_sync:
+                line += f"campaigns synced {last_sync}"
+                if stale_days is not None and stale_days >= 2:
+                    line += f" — ⚠️ stale ({stale_days}d old)"
+            else:
+                line += "campaigns NEVER synced"
+            if last_perf:
+                line += f"; last daily performance row: {last_perf}"
+            else:
+                line += "; no performance rows cached yet"
+            parts.append(line)
+            if stale_days is not None and stale_days >= 2:
+                parts.append(
+                    "_Treat older data with caution. Recommend the user re-sync if they ask about today/this week._"
+                )
 
         # ── Campaigns Summary ─────────────────────────────────────────
         cs = context.get("campaigns_summary", {})
@@ -485,13 +712,18 @@ Design a full campaign structure. Respond ONLY with valid JSON:
         all_camps = context.get("all_campaigns", [])
         if all_camps:
             parts.append(f"\n## All Campaigns ({len(all_camps)} total)")
+            parts.append(
+                "_When emitting an [ACTIONS] block, always copy the **`id:`** value below "
+                "verbatim into `campaignId`. Never invent IDs from the campaign name._"
+            )
             for c in all_camps:
                 spend = c.get("spend") or 0
                 sales = c.get("sales") or 0
                 acos = c.get("acos") or 0
                 targeting = c.get("targeting") or ""
+                cid = c.get("campaign_id") or c.get("id") or "?"
                 parts.append(
-                    f"  - **{c.get('name', '?')}** [{c.get('state', '?')}] "
+                    f"  - campaignId:`{cid}` **{c.get('name', '?')}** [{c.get('state', '?')}] "
                     f"Type: {c.get('type', '?')}, Targeting: {targeting}, "
                     f"Budget: ${c.get('budget') or 0:.2f}"
                 )
@@ -510,9 +742,16 @@ Design a full campaign structure. Respond ONLY with valid JSON:
         groups = ag.get("groups", [])
         if groups:
             parts.append(f"\n## Ad Groups ({ag.get('total', len(groups))} total)")
+            parts.append(
+                "_Use the **id:** and **campaign_id:** values verbatim in any "
+                "[ACTIONS] block. Do not invent IDs._"
+            )
             for g in groups:
+                gid = g.get("ad_group_id") or g.get("id") or "?"
+                cid = g.get("campaign_id") or "?"
                 parts.append(
-                    f"  - {g.get('name', '?')} [{g.get('state', '?')}] "
+                    f"  - adGroupId:`{gid}` campaignId:`{cid}` "
+                    f"{g.get('name', '?')} [{g.get('state', '?')}] "
                     f"— Default Bid: ${g.get('default_bid') or 0:.2f}, "
                     f"Campaign: {g.get('campaign_name', '?')}"
                 )
@@ -521,6 +760,10 @@ Design a full campaign structure. Respond ONLY with valid JSON:
         ts = context.get("targets_summary", {})
         if ts:
             parts.append(f"\n## Targets/Keywords ({ts.get('total', 0)} total)")
+            parts.append(
+                "_Use the **id:** value as `targetId` in any [ACTIONS] block. "
+                "**Never** generate a `targetId` from the keyword text._"
+            )
 
             # Breakdowns
             if ts.get("by_type"):
@@ -530,38 +773,44 @@ Design a full campaign structure. Respond ONLY with valid JSON:
             if ts.get("by_state"):
                 parts.append(f"By state: {', '.join(f'{k}: {v}' for k, v in ts['by_state'].items())}")
 
+            def _fmt_target(t: dict, *, include_perf: bool = True) -> str:
+                spend = t.get("spend") or 0
+                sales = t.get("sales") or 0
+                acos = t.get("acos") or 0
+                tid = t.get("target_id") or t.get("id") or "?"
+                line = (
+                    f"  - targetId:`{tid}` "
+                    f"\"{t.get('keyword', '?')}\" "
+                    f"[{t.get('match_type', '?')}, {t.get('type', '?')}] "
+                    f"State: {t.get('state', '?')}, Bid: ${t.get('bid') or 0:.2f}"
+                )
+                if include_perf:
+                    line += (
+                        f", Spend: ${spend:,.2f}, Sales: ${sales:,.2f}, ACOS: {acos:.1f}%, "
+                        f"Clicks: {t.get('clicks', 0)}, Orders: {t.get('orders', 0)}, "
+                        f"Impressions: {t.get('impressions', 0)}"
+                    )
+                return line
+
             # Top spenders
             top = ts.get("top_spenders", [])
             if top:
                 parts.append(f"\n### Top {len(top)} Keywords by Spend")
                 for t in top:
-                    spend = t.get("spend") or 0
-                    sales = t.get("sales") or 0
-                    acos = t.get("acos") or 0
-                    parts.append(
-                        f"  - \"{t.get('keyword', '?')}\" [{t.get('match_type', '?')}, {t.get('type', '?')}] "
-                        f"State: {t.get('state', '?')}, Bid: ${t.get('bid') or 0:.2f}, "
-                        f"Spend: ${spend:,.2f}, Sales: ${sales:,.2f}, ACOS: {acos:.1f}%, "
-                        f"Clicks: {t.get('clicks', 0)}, Orders: {t.get('orders', 0)}, "
-                        f"Impressions: {t.get('impressions', 0)}"
-                    )
+                    parts.append(_fmt_target(t))
                     if t.get("campaign_name"):
-                        parts.append(f"    Campaign: {t['campaign_name']}")
+                        parts.append(
+                            f"    campaign_id:`{t.get('campaign_id', '?')}` "
+                            f"ad_group_id:`{t.get('ad_group_id', '?')}` "
+                            f"Campaign: {t['campaign_name']}"
+                        )
 
             # Top converters
             converters = ts.get("top_converters", [])
             if converters:
                 parts.append(f"\n### Top {len(converters)} Keywords by Orders (Best Converters)")
                 for t in converters:
-                    spend = t.get("spend") or 0
-                    sales = t.get("sales") or 0
-                    acos = t.get("acos") or 0
-                    parts.append(
-                        f"  - \"{t.get('keyword', '?')}\" [{t.get('match_type', '?')}] "
-                        f"Orders: {t.get('orders', 0)}, Sales: ${sales:,.2f}, "
-                        f"Spend: ${spend:,.2f}, ACOS: {acos:.1f}%, "
-                        f"Clicks: {t.get('clicks', 0)}"
-                    )
+                    parts.append(_fmt_target(t))
 
             # Non-converting
             non_conv = ts.get("non_converting", [])
@@ -573,28 +822,19 @@ Design a full campaign structure. Respond ONLY with valid JSON:
                     f"({non_conv_total} total, ${total_wasted:,.2f} wasted spend)"
                 )
                 for t in non_conv:
-                    spend = t.get("spend") or 0
-                    parts.append(
-                        f"  - \"{t.get('keyword', '?')}\" [{t.get('match_type', '?')}] "
-                        f"Bid: ${t.get('bid') or 0:.2f}, Spend: ${spend:,.2f}, "
-                        f"Clicks: {t.get('clicks', 0)}, Impressions: {t.get('impressions', 0)}"
-                    )
+                    parts.append(_fmt_target(t))
                     if t.get("campaign_name"):
-                        parts.append(f"    Campaign: {t['campaign_name']}")
+                        parts.append(
+                            f"    campaign_id:`{t.get('campaign_id', '?')}` "
+                            f"Campaign: {t['campaign_name']}"
+                        )
 
             # High ACOS
             high_acos = ts.get("high_acos", [])
             if high_acos:
                 parts.append(f"\n### High ACOS Keywords (> 50%)")
                 for t in high_acos:
-                    spend = t.get("spend") or 0
-                    sales = t.get("sales") or 0
-                    acos = t.get("acos") or 0
-                    parts.append(
-                        f"  - \"{t.get('keyword', '?')}\" [{t.get('match_type', '?')}] "
-                        f"ACOS: {acos:.1f}%, Spend: ${spend:,.2f}, Sales: ${sales:,.2f}, "
-                        f"Clicks: {t.get('clicks', 0)}, Orders: {t.get('orders', 0)}"
-                    )
+                    parts.append(_fmt_target(t))
 
         # ── Recent Audit ──────────────────────────────────────────────
         audit = context.get("recent_audit")
@@ -805,7 +1045,133 @@ Design a full campaign structure. Respond ONLY with valid JSON:
                     f"({a.get('status', '?')}, {a.get('date', '?')})"
                 )
 
-        return "\n".join(parts)
+        result = "\n".join(parts)
+        if len(result) > MAX_CONTEXT_CHARS:
+            logger.warning(
+                "AI context exceeded budget (%d > %d chars); truncating tail",
+                len(result),
+                MAX_CONTEXT_CHARS,
+            )
+            result = (
+                result[:MAX_CONTEXT_CHARS]
+                + "\n\n_Context truncated to fit prompt budget. Some sections above are partial._"
+            )
+        return result
+
+    @staticmethod
+    def _cap_context_sections(context: dict) -> dict:
+        """Return a shallow copy of ``context`` with row-list sections clamped.
+
+        Any section that gets truncated has the original count preserved
+        in a sibling ``_truncated`` field so callers can surface that.
+        """
+        if not isinstance(context, dict):
+            return {}
+        ctx = dict(context)
+        truncations: dict[str, int] = {}
+
+        def _cap(value, cap: int):
+            if isinstance(value, list) and len(value) > cap:
+                return value[:cap], len(value)
+            return value, None
+
+        # Top-level lists
+        for key in ("all_campaigns", "performance_trend"):
+            section = ctx.get(key)
+            cap = SECTION_ROW_CAPS.get(key)
+            if cap and isinstance(section, list):
+                capped, original = _cap(section, cap)
+                ctx[key] = capped
+                if original is not None:
+                    truncations[key] = original
+
+        # ad_groups.groups
+        ag = ctx.get("ad_groups")
+        if isinstance(ag, dict) and isinstance(ag.get("groups"), list):
+            capped, original = _cap(ag["groups"], SECTION_ROW_CAPS["ad_groups"])
+            if original is not None:
+                ag = dict(ag)
+                ag["groups"] = capped
+                ag["_truncated"] = original
+                ctx["ad_groups"] = ag
+                truncations["ad_groups"] = original
+
+        # targets_summary subsections
+        ts = ctx.get("targets_summary")
+        if isinstance(ts, dict):
+            ts_copy = dict(ts)
+            for src_key, cap_key in (
+                ("top_spenders", "top_spenders"),
+                ("top_converters", "top_converters"),
+                ("non_converting", "non_converting"),
+                ("high_acos", "high_acos"),
+            ):
+                section = ts_copy.get(src_key)
+                cap = SECTION_ROW_CAPS.get(cap_key)
+                if cap and isinstance(section, list):
+                    capped, original = _cap(section, cap)
+                    ts_copy[src_key] = capped
+                    if original is not None:
+                        truncations[f"targets.{src_key}"] = original
+            ctx["targets_summary"] = ts_copy
+
+        # pending_changes.changes
+        pc = ctx.get("pending_changes")
+        if isinstance(pc, dict) and isinstance(pc.get("changes"), list):
+            capped, original = _cap(pc["changes"], SECTION_ROW_CAPS["pending_changes"])
+            if original is not None:
+                pc = dict(pc)
+                pc["changes"] = capped
+                ctx["pending_changes"] = pc
+                truncations["pending_changes"] = original
+
+        # audit issues / opportunities
+        audit = ctx.get("recent_audit")
+        if isinstance(audit, dict):
+            audit_copy = dict(audit)
+            for k, cap_key in (("issues", "issues"), ("opportunities", "opportunities")):
+                section = audit_copy.get(k)
+                cap = SECTION_ROW_CAPS.get(cap_key)
+                if cap and isinstance(section, list):
+                    capped, original = _cap(section, cap)
+                    audit_copy[k] = capped
+                    if original is not None:
+                        truncations[f"audit.{k}"] = original
+            ctx["recent_audit"] = audit_copy
+
+        # search terms subsections
+        st = ctx.get("search_terms")
+        if isinstance(st, dict):
+            st_copy = dict(st)
+            for src, cap_key in (
+                ("top_by_sales", "search_terms_top"),
+                ("top_non_converting", "search_terms_non_converting"),
+                ("top_high_acos", "search_terms_high_acos"),
+            ):
+                section = st_copy.get(src)
+                cap = SECTION_ROW_CAPS.get(cap_key)
+                if cap and isinstance(section, list):
+                    capped, original = _cap(section, cap)
+                    st_copy[src] = capped
+                    if original is not None:
+                        truncations[f"search_terms.{src}"] = original
+            ctx["search_terms"] = st_copy
+
+        # bid rules / opt history / harvest configs / activity
+        for key in ("bid_rules", "optimization_history", "harvest_configs", "recent_activity"):
+            section = ctx.get(key)
+            cap = SECTION_ROW_CAPS.get(key)
+            if cap and isinstance(section, list):
+                capped, original = _cap(section, cap)
+                ctx[key] = capped
+                if original is not None:
+                    truncations[key] = original
+
+        if truncations:
+            logger.info("AI context section caps applied: %s", truncations)
+            ctx.setdefault("_truncations", truncations)
+
+        return ctx
 
 
 def create_ai_service(

@@ -36,6 +36,10 @@ from app.services.product_reporting_service import (
     query_product_rows,
     get_product_summary,
 )
+from app.services.report_skip_service import (
+    get_permanent_skip_dates,
+    update_after_sync as update_skip_state_after_sync,
+)
 from app.utils import parse_uuid, utcnow
 
 logger = logging.getLogger(__name__)
@@ -495,6 +499,28 @@ async def _clear_legacy_range_slice(
     await db.execute(delete(AccountPerformanceDaily).where(and_(*account_where)))
 
 
+def _should_abort_skipped_sync(
+    skipped_count: int,
+    total_days: int,
+    max_skip_ratio: float = 0.5,
+    floor: int = 2,
+) -> bool:
+    """Return True when so many days have failed that the sync should hard-fail.
+
+    A small number of stuck days (Amazon refuses to produce data for specific
+    historical dates) is benign and should not abort. But when most of the
+    window fails, that's a systemic issue (auth/scope) and we want to surface
+    it as an explicit failure, not as "completed_with_skips".
+
+    The ``floor`` ensures very short syncs (e.g. 1–2 day catch-up runs)
+    aren't aborted on a single failure.
+    """
+    if skipped_count <= floor:
+        return False
+    threshold = max(floor, int(total_days * max_skip_ratio))
+    return skipped_count > threshold
+
+
 async def _run_report_sync_background(report_id: uuid.UUID) -> None:
     async with async_session() as db:
         result = await db.execute(select(Report).where(Report.id == report_id))
@@ -556,8 +582,48 @@ async def _run_report_sync_background(report_id: uuid.UUID) -> None:
             current = date_type.fromisoformat(resume_day_str)
             end = date_type.fromisoformat(end_date)
 
+            # Track per-day failures so a single broken date (Amazon
+            # occasionally refuses to produce reports for specific historical
+            # dates) doesn't abort the whole 30-day sync. Without this, every
+            # daily cron retries the same broken day forever and never
+            # produces fresh data — the 2026-03-28 loop bug observed in prod.
+            existing_skipped = (report.raw_response or {}).get("skipped_days") or []
+            skipped_days: list[dict] = list(existing_skipped) if isinstance(existing_skipped, list) else []
+            # Honour a soft cap so a totally broken sync (e.g. expired token)
+            # still surfaces as a failure, instead of "completed with 30/30 skips".
+            max_skip_ratio = 0.5
+
+            # Phase 5: respect the credential-scoped permanent skip list.
+            # Dates that have failed across ``PROMOTE_THRESHOLD`` consecutive
+            # syncs are flagged as doomed and we don't even try them again.
+            permanent_skip = get_permanent_skip_dates(cred, profile_id)
+            permanent_skipped_this_run: list[str] = []
+            synced_day_strs: list[str] = []
+
             while current <= end:
                 day_str = current.isoformat()
+                if day_str in permanent_skip:
+                    permanent_skipped_this_run.append(day_str)
+                    skipped_days.append({
+                        "date": day_str,
+                        "error": "permanent_skip: previously promoted by report_skip_service",
+                        "permanent": True,
+                    })
+                    raw = dict(report.raw_response or {})
+                    raw["skipped_days"] = skipped_days
+                    raw["heartbeat_at"] = utcnow().isoformat()
+                    raw["current_date"] = (current + timedelta(days=1)).isoformat() \
+                        if current < end else day_str
+                    raw["permanent_skipped"] = list(permanent_skipped_this_run)
+                    raw.pop("pending_report_id", None)
+                    report.raw_response = raw
+                    await db.commit()
+                    logger.info(
+                        "Report sync skipping permanently-flagged date day=%s report_id=%s",
+                        day_str, str(report.id),
+                    )
+                    current += timedelta(days=1)
+                    continue
                 raw = dict(report.raw_response or {})
                 if raw.get("current_date") != day_str:
                     pending_report_id = None
@@ -573,6 +639,8 @@ async def _run_report_sync_background(report_id: uuid.UUID) -> None:
                     raw["pending_report_id"] = pending_report_id
                 else:
                     raw.pop("pending_report_id", None)
+                if skipped_days:
+                    raw["skipped_days"] = skipped_days
                 report.raw_response = raw
                 await db.commit()
                 logger.info(
@@ -580,49 +648,93 @@ async def _run_report_sync_background(report_id: uuid.UUID) -> None:
                     str(report.id), day_str, synced_days, total_days,
                 )
 
-                day_result = {}
-                while True:
-                    raw = dict(report.raw_response or {})
-                    raw.update({
-                        "step": (
-                            f"Polling pending Amazon report for {day_str}"
-                            if pending_report_id
-                            else f"Fetching Amazon report for {day_str}"
-                        ),
-                        "heartbeat_at": utcnow().isoformat(),
-                    })
-                    if pending_report_id:
-                        raw["pending_report_id"] = pending_report_id
-                    else:
-                        raw.pop("pending_report_id", None)
-                    report.raw_response = raw
-                    await db.commit()
-                    day_result = await service.generate_mcp_report(
-                        day_str,
-                        day_str,
-                        pending_report_id=pending_report_id,
-                        max_wait=180,
-                    )
-                    if not day_result or ("campaigns" not in day_result and "_pending_report_id" not in day_result):
-                        raise RuntimeError(f"Amazon report fetch failed for {day_str}")
-                    if day_result.get("_pending_report_id"):
-                        pending_report_id = day_result["_pending_report_id"]
+                day_failed_reason: Optional[str] = None
+                day_result: dict = {}
+                try:
+                    while True:
                         raw = dict(report.raw_response or {})
                         raw.update({
-                            "step": f"Amazon report still processing for {day_str}; continuing to poll",
-                            "days_synced": synced_days,
-                            "days_total": total_days,
-                            "current_date": day_str,
-                            "progress_pct": min(99, int((synced_days / max(total_days, 1)) * 100)),
+                            "step": (
+                                f"Polling pending Amazon report for {day_str}"
+                                if pending_report_id
+                                else f"Fetching Amazon report for {day_str}"
+                            ),
                             "heartbeat_at": utcnow().isoformat(),
-                            "pending_report_id": pending_report_id,
                         })
+                        if pending_report_id:
+                            raw["pending_report_id"] = pending_report_id
+                        else:
+                            raw.pop("pending_report_id", None)
                         report.raw_response = raw
                         await db.commit()
-                        await asyncio.sleep(30)
-                        continue
+                        day_result = await service.generate_mcp_report(
+                            day_str,
+                            day_str,
+                            pending_report_id=pending_report_id,
+                            max_wait=180,
+                        )
+                        if not day_result or (
+                            "campaigns" not in day_result
+                            and "_pending_report_id" not in day_result
+                        ):
+                            raise RuntimeError(
+                                f"Amazon report fetch failed for {day_str}"
+                            )
+                        if day_result.get("_pending_report_id"):
+                            pending_report_id = day_result["_pending_report_id"]
+                            raw = dict(report.raw_response or {})
+                            raw.update({
+                                "step": f"Amazon report still processing for {day_str}; continuing to poll",
+                                "days_synced": synced_days,
+                                "days_total": total_days,
+                                "current_date": day_str,
+                                "progress_pct": min(99, int((synced_days / max(total_days, 1)) * 100)),
+                                "heartbeat_at": utcnow().isoformat(),
+                                "pending_report_id": pending_report_id,
+                            })
+                            report.raw_response = raw
+                            await db.commit()
+                            await asyncio.sleep(30)
+                            continue
+                        pending_report_id = None
+                        break
+                except Exception as day_err:
+                    day_failed_reason = str(day_err)[:300]
                     pending_report_id = None
-                    break
+                    logger.warning(
+                        "Performance report sync skipping day=%s after error: %s",
+                        day_str,
+                        day_err,
+                    )
+
+                if day_failed_reason is not None:
+                    skipped_days.append({"date": day_str, "error": day_failed_reason})
+                    raw = dict(report.raw_response or {})
+                    raw.update({
+                        "skipped_days": skipped_days,
+                        "heartbeat_at": utcnow().isoformat(),
+                        "current_date": (current + timedelta(days=1)).isoformat()
+                            if current < end else day_str,
+                    })
+                    raw.pop("pending_report_id", None)
+                    report.raw_response = raw
+                    await db.commit()
+                    # Only count *new* failures against the 50% abort
+                    # threshold — pre-promoted permanent skips are an
+                    # optimisation, not a fresh systemic failure.
+                    new_failure_count = sum(
+                        1 for s in skipped_days
+                        if isinstance(s, dict) and not s.get("permanent")
+                    )
+                    if _should_abort_skipped_sync(
+                        new_failure_count, total_days, max_skip_ratio=max_skip_ratio
+                    ):
+                        raise RuntimeError(
+                            f"Aborting sync: {new_failure_count} of {total_days} days "
+                            f"failed (>{int(max_skip_ratio*100)}%). Last error: {day_failed_reason}"
+                        )
+                    current += timedelta(days=1)
+                    continue
 
                 day_rows = service.parse_report_campaign_rows(day_result)
                 for row in day_rows:
@@ -648,6 +760,7 @@ async def _run_report_sync_background(report_id: uuid.UUID) -> None:
                         profile_id=profile_id,
                     )
                 synced_days += 1
+                synced_day_strs.append(day_str)
                 next_day = current + timedelta(days=1)
                 raw = dict(report.raw_response or {})
                 raw.update({
@@ -657,6 +770,8 @@ async def _run_report_sync_background(report_id: uuid.UUID) -> None:
                     "current_date": next_day.isoformat() if next_day <= end else day_str,
                 })
                 raw.pop("pending_report_id", None)
+                if skipped_days:
+                    raw["skipped_days"] = skipped_days
                 report.raw_response = raw
                 await db.commit()
                 logger.info(
@@ -667,17 +782,41 @@ async def _run_report_sync_background(report_id: uuid.UUID) -> None:
 
             await _clear_legacy_range_slice(db, cred.id, start_date, end_date, profile_id)
 
+            # Phase 5: promote chronically-failing dates to the permanent
+            # skip list and clear counters / permanent flags for dates that
+            # finally succeeded. Filter the ones that were already in the
+            # permanent list this run — they were not new failures.
+            new_skipped_for_counter = [
+                s for s in skipped_days
+                if isinstance(s, dict) and not s.get("permanent")
+            ]
+            skip_state_report = await update_skip_state_after_sync(
+                db,
+                cred,
+                profile_id,
+                skipped_days=new_skipped_for_counter,
+                synced_day_strs=synced_day_strs,
+            )
+
+            completed_with_skips = bool(skipped_days)
+            # Keep status="completed" (don't break legacy lookups that filter on
+            # exact match). Surface the skip count via report_data + raw_response
+            # metadata + activity log description instead.
             report.status = "completed"
             report.completed_at = utcnow()
             report.report_data = {
-                "status": "completed",
+                "status": "completed_with_skips" if completed_with_skips else "completed",
                 "days_synced": synced_days,
                 "days_total": total_days,
+                "days_skipped": len(skipped_days),
+                "skipped_days": skipped_days,
                 "profile_id": profile_id,
+                "skip_state": skip_state_report,
+                "permanent_skipped_this_run": permanent_skipped_this_run,
             }
             raw = dict(report.raw_response or {})
             raw.update({
-                "step": "Completed",
+                "step": "Completed with skips" if completed_with_skips else "Completed",
                 "progress_pct": 100,
                 "days_synced": synced_days,
                 "days_total": total_days,
@@ -685,15 +824,40 @@ async def _run_report_sync_background(report_id: uuid.UUID) -> None:
             })
             raw.pop("pending_report_id", None)
             raw.pop("current_date", None)
+            if skipped_days:
+                raw["skipped_days"] = skipped_days
             report.raw_response = raw
+            description_parts: list[str] = [
+                f"Daily performance sync completed for {start_date} – {end_date}"
+            ]
+            if completed_with_skips:
+                description_parts.append(
+                    f" with {len(skipped_days)} day(s) skipped "
+                    f"({', '.join(s['date'] for s in skipped_days[:5])}"
+                    f"{'…' if len(skipped_days) > 5 else ''})"
+                )
+            promoted = skip_state_report.get("promoted_to_permanent") or []
+            if promoted:
+                description_parts.append(
+                    f" — promoted to permanent skip list: {', '.join(promoted[:5])}"
+                    f"{'…' if len(promoted) > 5 else ''}"
+                )
+            cleared = skip_state_report.get("cleared_after_success") or []
+            if cleared:
+                description_parts.append(
+                    f" — cleared from skip list: {', '.join(cleared[:5])}"
+                    f"{'…' if len(cleared) > 5 else ''}"
+                )
+            description = "".join(description_parts)
             db.add(ActivityLog(
                 credential_id=cred.id,
                 action="performance_sync",
                 category="reporting",
-                description=f"Daily performance sync completed for {start_date} – {end_date}",
+                description=description,
                 entity_type="report",
                 entity_id=str(report.id),
                 details=report.report_data,
+                status="warning" if completed_with_skips else "success",
             ))
             await db.commit()
         except Exception as exc:

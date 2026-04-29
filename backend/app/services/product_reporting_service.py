@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.mcp_client import AmazonAdsMCP
 from app.models import ProductPerformanceDaily
-from app.utils import normalize_amazon_date
+from app.utils import marketplace_today, normalize_amazon_date
 
 logger = logging.getLogger(__name__)
 
@@ -88,9 +88,11 @@ class ProductReportingService:
         self,
         client: AmazonAdsMCP,
         advertiser_account_id: Optional[str] = None,
+        marketplace: Optional[str] = None,
     ):
         self.client = client
         self.advertiser_account_id = advertiser_account_id
+        self.marketplace = marketplace
         if advertiser_account_id:
             self.client.set_advertiser_account_id(advertiser_account_id)
 
@@ -110,9 +112,11 @@ class ProductReportingService:
         Returns pending report ID if still processing.
         """
         if not end_date:
-            end_date = date.today().isoformat()
+            end_date = marketplace_today(self.marketplace, self.client.region).isoformat()
         if not start_date:
-            start_date = (date.today() - timedelta(days=30)).isoformat()
+            start_date = (
+                marketplace_today(self.marketplace, self.client.region) - timedelta(days=30)
+            ).isoformat()
 
         try:
             report_ids = []

@@ -15,17 +15,18 @@ Admin-only /trigger/* endpoints allow manual runs from the UI.
 import asyncio
 import hashlib
 import logging
-from datetime import date, timedelta
+from datetime import timedelta
 from typing import Optional
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import require_admin
 from app.database import get_db
-from app.models import Report, User
+from app.models import Account, Report, User
 from app.routers.campaigns import run_full_sync
 from app.routers.reporting import (
     _find_report_sync_job,
@@ -41,7 +42,7 @@ from app.services.reporting_service import DATE_PRESETS, get_date_range
 from app.services.product_reporting_service import ProductReportingService
 from app.services.search_term_service import SearchTermService
 from app.services.token_service import get_mcp_client_with_fresh_token
-from app.utils import utcnow
+from app.utils import marketplace_today, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -79,15 +80,19 @@ def _get_schedule_range_preset(job: str, range_preset: Optional[str]) -> Optiona
     return preset
 
 
-def _resolve_schedule_range(range_preset: str) -> tuple[str, str]:
-    today = date.today()
+def _resolve_schedule_range(
+    range_preset: str,
+    marketplace: Optional[str] = None,
+    region: Optional[str] = None,
+) -> tuple[str, str]:
+    today = marketplace_today(marketplace, region)
     yesterday = today - timedelta(days=1)
 
     if range_preset == "month_to_yesterday":
         end_d = yesterday
         start_d = end_d.replace(day=1)
     elif range_preset in DATE_PRESETS:
-        start_d, end_d = get_date_range(range_preset)
+        start_d, end_d = get_date_range(range_preset, marketplace=marketplace, region=region)
     else:
         raise HTTPException(
             400,
@@ -105,6 +110,24 @@ async def _get_cred_and_profile(
     cred = await _get_cred(db, credential_id)
     selected_profile_id = profile_id if profile_id is not None else cred.profile_id
     return cred, selected_profile_id
+
+
+async def _get_marketplace_for_profile(
+    db: AsyncSession,
+    cred,
+    profile_id: Optional[str],
+) -> Optional[str]:
+    """Look up the discovered marketplace code for an active profile, if any."""
+    if not profile_id:
+        return None
+    result = await db.execute(
+        select(Account).where(
+            Account.credential_id == cred.id,
+            Account.profile_id == profile_id,
+        )
+    )
+    account = result.scalar_one_or_none()
+    return account.marketplace if account else None
 
 
 def _schedule_profile_matches(report: Optional[Report], profile_id: Optional[str]) -> bool:
@@ -353,8 +376,11 @@ async def cron_reports(
     """
     try:
         cred, selected_profile_id = await _get_cred_and_profile(db, credential_id, profile_id)
+        marketplace = await _get_marketplace_for_profile(db, cred, selected_profile_id)
         selected_range = _get_schedule_range_preset("reports", range_preset)
-        start_date, end_date = _resolve_schedule_range(selected_range)
+        start_date, end_date = _resolve_schedule_range(
+            selected_range, marketplace=marketplace, region=cred.region
+        )
         result = await _queue_exact_daily_schedule_sync(
             db,
             cred,
@@ -387,8 +413,11 @@ async def cron_search_terms(
     """
     try:
         cred, selected_profile_id = await _get_cred_and_profile(db, credential_id, profile_id)
+        marketplace = await _get_marketplace_for_profile(db, cred, selected_profile_id)
         selected_range = _get_schedule_range_preset("search-terms", range_preset)
-        start_date, end_date = _resolve_schedule_range(selected_range)
+        start_date, end_date = _resolve_schedule_range(
+            selected_range, marketplace=marketplace, region=cred.region
+        )
         job = await _find_aux_schedule_job(
             db,
             cred.id,
@@ -401,7 +430,7 @@ async def cron_search_terms(
 
         client = await get_mcp_client_with_fresh_token(cred, db, profile_id_override=selected_profile_id)
         adv_id = await _resolve_advertiser_account_id(db, cred, profile_id_override=selected_profile_id)
-        service = SearchTermService(client, adv_id)
+        service = SearchTermService(client, adv_id, marketplace=marketplace)
         result = await service.sync_search_terms(
             db=db,
             credential_id=cred.id,
@@ -488,8 +517,11 @@ async def cron_products(
     """Scheduled product/business report sync."""
     try:
         cred, selected_profile_id = await _get_cred_and_profile(db, credential_id, profile_id)
+        marketplace = await _get_marketplace_for_profile(db, cred, selected_profile_id)
         selected_range = _get_schedule_range_preset("products", range_preset)
-        start_date, end_date = _resolve_schedule_range(selected_range)
+        start_date, end_date = _resolve_schedule_range(
+            selected_range, marketplace=marketplace, region=cred.region
+        )
         job = await _find_aux_schedule_job(
             db,
             cred.id,
@@ -502,7 +534,7 @@ async def cron_products(
 
         client = await get_mcp_client_with_fresh_token(cred, db, profile_id_override=selected_profile_id)
         adv_id = await _resolve_advertiser_account_id(db, cred, profile_id_override=selected_profile_id)
-        service = ProductReportingService(client, adv_id)
+        service = ProductReportingService(client, adv_id, marketplace=marketplace)
         result = await service.sync_products(
             db=db,
             credential_id=cred.id,
@@ -588,8 +620,11 @@ async def _run_reports(
 ):
     """Shared logic for scheduled exact-daily reports."""
     cred, selected_profile_id = await _get_cred_and_profile(db, credential_id, profile_id)
+    marketplace = await _get_marketplace_for_profile(db, cred, selected_profile_id)
     selected_range = _get_schedule_range_preset("reports", range_preset)
-    start_date, end_date = _resolve_schedule_range(selected_range)
+    start_date, end_date = _resolve_schedule_range(
+        selected_range, marketplace=marketplace, region=cred.region
+    )
     return await _queue_exact_daily_schedule_sync(
         db,
         cred,
@@ -608,8 +643,11 @@ async def _run_search_terms(
 ):
     """Shared logic for search term cron with resume support."""
     cred, selected_profile_id = await _get_cred_and_profile(db, credential_id, profile_id)
+    marketplace = await _get_marketplace_for_profile(db, cred, selected_profile_id)
     selected_range = _get_schedule_range_preset("search-terms", range_preset)
-    start_date, end_date = _resolve_schedule_range(selected_range)
+    start_date, end_date = _resolve_schedule_range(
+        selected_range, marketplace=marketplace, region=cred.region
+    )
     job = await _find_aux_schedule_job(
         db,
         cred.id,
@@ -621,7 +659,7 @@ async def _run_search_terms(
     pending_report_id = (job.raw_response or {}).get("pending_report_id") if job else None
     client = await get_mcp_client_with_fresh_token(cred, db, profile_id_override=selected_profile_id)
     adv_id = await _resolve_advertiser_account_id(db, cred, profile_id_override=selected_profile_id)
-    service = SearchTermService(client, adv_id)
+    service = SearchTermService(client, adv_id, marketplace=marketplace)
     result = await service.sync_search_terms(
         db=db,
         credential_id=cred.id,
@@ -685,8 +723,11 @@ async def _run_products(
 ):
     """Shared logic for product cron with resume support."""
     cred, selected_profile_id = await _get_cred_and_profile(db, credential_id, profile_id)
+    marketplace = await _get_marketplace_for_profile(db, cred, selected_profile_id)
     selected_range = _get_schedule_range_preset("products", range_preset)
-    start_date, end_date = _resolve_schedule_range(selected_range)
+    start_date, end_date = _resolve_schedule_range(
+        selected_range, marketplace=marketplace, region=cred.region
+    )
     job = await _find_aux_schedule_job(
         db,
         cred.id,
@@ -698,7 +739,7 @@ async def _run_products(
     pending_report_id = (job.raw_response or {}).get("pending_report_id") if job else None
     client = await get_mcp_client_with_fresh_token(cred, db, profile_id_override=selected_profile_id)
     adv_id = await _resolve_advertiser_account_id(db, cred, profile_id_override=selected_profile_id)
-    service = ProductReportingService(client, adv_id)
+    service = ProductReportingService(client, adv_id, marketplace=marketplace)
     result = await service.sync_products(
         db=db,
         credential_id=cred.id,

@@ -28,3 +28,8 @@ frontend/dist/
 *~
 .DS_Store
 Thumbs.db
+
+# ── Logs / debug dumps ───────────────────────────────────────────────
+*.log
+logs.txt
+**/railwaylogs*.txt

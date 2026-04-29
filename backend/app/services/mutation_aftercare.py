@@ -1,0 +1,559 @@
+"""Mutation aftercare — verify Amazon actually applied what we asked.
+
+Amazon's MCP API often returns a generic ``{"success": true}`` envelope
+even when the underlying mutation was partially or silently rejected
+(e.g. a bid that hit a per-campaign minimum gets clamped, a state
+change is queued but not yet visible, a delete returns OK but the
+target reappears in the next query).
+
+Phase 5.3 closes that loop:
+
+1. After each successful ``call_tool`` the apply path runs
+   :func:`verify_mutation`, which issues a *read-back* query for the
+   touched entities.
+2. The read-back response is diffed against what the mutation asked
+   for. Any mismatched field is emitted as ``drift``.
+3. :func:`build_aftercare` packages a small report — ``headline``,
+   ``summary``, ``verification`` block, ``next_prompts`` (suggested
+   follow-up user actions). The router stuffs this into
+   ``PendingChange.apply_result`` so the UI can show "applied — Amazon
+   confirmed bid is $0.50" or "applied, but Amazon clamped bid to
+   $1.00 (account minimum)".
+
+Verification is **best effort**. If the read-back call fails (auth,
+quota, scope mismatch) we still mark the mutation as applied; the
+aftercare just records ``{verified: False, error: ...}``. The
+underlying ``mcp_result`` is never overwritten.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _to_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).replace("$", "").replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _bid_close_enough(a: Optional[float], b: Optional[float], tol: float = 0.01) -> bool:
+    if a is None or b is None:
+        return False
+    return abs(a - b) <= tol
+
+
+def _index_by(items: list[dict], key: str) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        v = item.get(key)
+        if isinstance(v, (str, int)):
+            out[str(v)] = item
+    return out
+
+
+# ── Read-backs (best-effort, swallow exceptions) ─────────────────────
+
+async def _read_targets_for_ids(
+    client,
+    target_ids: list[str],
+    *,
+    ad_group_id: Optional[str] = None,
+    campaign_id: Optional[str] = None,
+) -> dict[str, dict]:
+    """Read back the specified targets via the most-scoped query possible.
+
+    Strategy (in order, falling back on each failure):
+
+    1. Direct ``campaign_management-query_target`` with
+       ``targetIdFilter`` — Amazon's id-scoped read returns only the
+       rows we actually mutated. O(N) on the request body, not on the
+       account.
+    2. ``query_targets(ad_group_id=..)`` when an ad_group_id is known
+       — bounded to the ad group's targets.
+    3. ``query_targets(campaign_id=..)`` when a campaign id is known.
+    4. Full account ``query_targets(all_products=True)`` — last resort
+       (the legacy behaviour).
+
+    Best-effort: any exception falls through to the next strategy. We
+    never raise; an empty dict means "verifier could not read back".
+    """
+    if not target_ids:
+        return {}
+    wanted = {str(t) for t in target_ids if t}
+
+    # 1. Targeted id-filter call via raw MCP body
+    try:
+        ad_products = ["SPONSORED_PRODUCTS", "SPONSORED_BRANDS", "SPONSORED_DISPLAY"]
+        merged: list[dict] = []
+        for ap in ad_products:
+            body = {
+                "adProductFilter": {"include": [ap]},
+                "targetIdFilter": {"include": list(wanted)},
+            }
+            try:
+                resp = await client.call_tool(
+                    "campaign_management-query_target", {"body": body}
+                )
+            except Exception as exc:
+                logger.debug("Aftercare targetIdFilter(%s) failed: %s", ap, exc)
+                continue
+            if isinstance(resp, dict):
+                rows = resp.get("targets") or resp.get("result") or []
+                if isinstance(rows, list):
+                    merged.extend(r for r in rows if isinstance(r, dict))
+        if merged:
+            by_id: dict[str, dict] = {}
+            for t in merged:
+                tid = t.get("targetId") or t.get("id")
+                if tid and str(tid) in wanted:
+                    by_id[str(tid)] = t
+            if by_id:
+                return by_id
+    except Exception as exc:  # pragma: no cover — outer guard
+        logger.debug("Aftercare targetIdFilter path errored: %s", exc)
+
+    # 2-4. Scoped → unscoped fallback chain
+    fallback_calls = []
+    if ad_group_id:
+        fallback_calls.append(
+            lambda: client.query_targets(ad_group_id=ad_group_id, all_products=True)
+        )
+    if campaign_id:
+        fallback_calls.append(
+            lambda: client.query_targets(campaign_id=campaign_id, all_products=True)
+        )
+    fallback_calls.append(lambda: client.query_targets(all_products=True))
+
+    for call in fallback_calls:
+        try:
+            result = await call()
+        except Exception as exc:
+            logger.debug("Aftercare fallback query_targets failed: %s", exc)
+            continue
+        targets = result.get("targets") if isinstance(result, dict) else None
+        if not isinstance(targets, list):
+            continue
+        by_id = {}
+        for t in targets:
+            tid = t.get("targetId") or t.get("id")
+            if tid and str(tid) in wanted:
+                by_id[str(tid)] = t
+        if by_id:
+            return by_id
+    return {}
+
+
+async def _read_targets_for_ad_group(client, ad_group_id: Optional[str]) -> list[dict]:
+    if not ad_group_id:
+        return []
+    try:
+        result = await client.query_targets(
+            ad_group_id=ad_group_id, all_products=True
+        )
+    except Exception as exc:
+        logger.warning("Aftercare query_targets(ad_group=%s) failed: %s", ad_group_id, exc)
+        return []
+    return result.get("targets") if isinstance(result, dict) else []
+
+
+async def _read_campaigns_for_ids(client, campaign_ids: list[str]) -> dict[str, dict]:
+    """Read back specific campaigns via ``campaignIdFilter`` when supported."""
+    if not campaign_ids:
+        return {}
+    wanted = {str(c) for c in campaign_ids if c}
+
+    try:
+        result = await client.query_campaigns(
+            filters={"campaignIdFilter": {"include": list(wanted)}},
+            all_products=True,
+        )
+    except Exception as exc:
+        logger.debug("Aftercare query_campaigns(filtered) failed: %s", exc)
+        result = None
+
+    if not isinstance(result, dict):
+        try:
+            result = await client.query_campaigns(all_products=True)
+        except Exception as exc:
+            logger.warning("Aftercare query_campaigns fallback failed: %s", exc)
+            return {}
+
+    campaigns = result.get("campaigns") if isinstance(result, dict) else None
+    if not isinstance(campaigns, list):
+        return {}
+    return {
+        str(c.get("campaignId")): c
+        for c in campaigns
+        if c.get("campaignId") and str(c["campaignId"]) in wanted
+    }
+
+
+async def _read_ad_groups_for_ids(
+    client,
+    ad_group_ids: list[str],
+    *,
+    campaign_id: Optional[str] = None,
+) -> dict[str, dict]:
+    """Read back specific ad groups, prefer scoping by parent campaign."""
+    if not ad_group_ids:
+        return {}
+    wanted = {str(g) for g in ad_group_ids if g}
+
+    if campaign_id:
+        try:
+            result = await client.query_ad_groups(campaign_id=campaign_id, all_products=True)
+        except Exception as exc:
+            logger.debug("Aftercare query_ad_groups(campaign=%s) failed: %s", campaign_id, exc)
+            result = None
+    else:
+        result = None
+
+    if not isinstance(result, dict):
+        try:
+            result = await client.query_ad_groups(all_products=True)
+        except Exception as exc:
+            logger.warning("Aftercare query_ad_groups failed: %s", exc)
+            return {}
+
+    groups = result.get("adGroups") if isinstance(result, dict) else None
+    if not isinstance(groups, list):
+        return {}
+    return {
+        str(g.get("adGroupId")): g
+        for g in groups
+        if g.get("adGroupId") and str(g["adGroupId"]) in wanted
+    }
+
+
+# ── Per-tool verifiers ───────────────────────────────────────────────
+
+async def _verify_target_update(client, body: dict) -> dict:
+    requested = body.get("targets") or []
+    ids = [str(t.get("targetId")) for t in requested if t.get("targetId")]
+    actual = await _read_targets_for_ids(client, ids)
+    drift: list[dict] = []
+    for req in requested:
+        tid = str(req.get("targetId") or "")
+        if not tid:
+            continue
+        observed = actual.get(tid)
+        if observed is None:
+            drift.append({"targetId": tid, "field": "_existence", "expected": "present", "observed": "missing"})
+            continue
+        if "bid" in req:
+            req_bid = _to_float(req["bid"])
+            obs_bid = _to_float(observed.get("bid"))
+            if not _bid_close_enough(req_bid, obs_bid):
+                drift.append({
+                    "targetId": tid, "field": "bid",
+                    "expected": req_bid, "observed": obs_bid,
+                })
+        if "state" in req:
+            if str(req["state"]).upper() != str(observed.get("state") or "").upper():
+                drift.append({
+                    "targetId": tid, "field": "state",
+                    "expected": req["state"], "observed": observed.get("state"),
+                })
+    return {
+        "checked": len(ids),
+        "found": len(actual),
+        "drift": drift,
+        "ok": not drift and len(actual) == len(ids),
+    }
+
+
+async def _verify_target_delete(client, body: dict) -> dict:
+    target_ids = [str(t) for t in (body.get("targetIds") or []) if t]
+    actual = await _read_targets_for_ids(client, target_ids)
+    drift: list[dict] = []
+    for tid in target_ids:
+        if tid in actual:
+            drift.append({"targetId": tid, "field": "_existence", "expected": "deleted", "observed": "still_present"})
+    return {
+        "checked": len(target_ids),
+        "found_after_delete": len(actual),
+        "drift": drift,
+        "ok": not drift,
+    }
+
+
+async def _verify_target_create(client, body: dict) -> dict:
+    requested = body.get("targets") or []
+    if not requested:
+        return {"checked": 0, "drift": [], "ok": True}
+    ad_group_ids = {str(t.get("adGroupId")) for t in requested if t.get("adGroupId")}
+    drift: list[dict] = []
+    matched = 0
+    for ag_id in ad_group_ids:
+        existing = await _read_targets_for_ad_group(client, ag_id)
+        existing_expressions = {
+            str(t.get("expression") or t.get("keywordText") or "").strip().lower()
+            for t in existing
+        }
+        for req in requested:
+            if str(req.get("adGroupId")) != ag_id:
+                continue
+            expr = str(req.get("expression") or "").strip().lower()
+            if expr and expr in existing_expressions:
+                matched += 1
+            else:
+                drift.append({
+                    "adGroupId": ag_id, "field": "expression",
+                    "expected": expr, "observed": "missing",
+                })
+    return {
+        "checked": len(requested),
+        "matched": matched,
+        "drift": drift,
+        "ok": not drift,
+    }
+
+
+async def _verify_campaign_update(client, body: dict) -> dict:
+    requested = body.get("campaigns") or []
+    ids = [str(c.get("campaignId")) for c in requested if c.get("campaignId")]
+    actual = await _read_campaigns_for_ids(client, ids)
+    drift: list[dict] = []
+    for req in requested:
+        cid = str(req.get("campaignId") or "")
+        if not cid:
+            continue
+        observed = actual.get(cid)
+        if observed is None:
+            drift.append({"campaignId": cid, "field": "_existence", "expected": "present", "observed": "missing"})
+            continue
+        if "dailyBudget" in req:
+            req_b = _to_float(req["dailyBudget"])
+            obs_b = _to_float(observed.get("dailyBudget"))
+            if obs_b is None:
+                # Some MCP responses nest budget under a `budget` object.
+                # Guard against the value being a non-dict (e.g. a raw
+                # number or null) before calling .get().
+                budget_field = observed.get("budget")
+                if isinstance(budget_field, dict):
+                    obs_b = _to_float(budget_field.get("budget"))
+            if req_b is not None and obs_b is not None and abs(req_b - obs_b) > 0.01:
+                drift.append({
+                    "campaignId": cid, "field": "dailyBudget",
+                    "expected": req_b, "observed": obs_b,
+                })
+        if "state" in req:
+            if str(req["state"]).upper() != str(observed.get("state") or "").upper():
+                drift.append({
+                    "campaignId": cid, "field": "state",
+                    "expected": req["state"], "observed": observed.get("state"),
+                })
+        if "name" in req:
+            if str(req["name"]) != str(observed.get("name") or ""):
+                drift.append({
+                    "campaignId": cid, "field": "name",
+                    "expected": req["name"], "observed": observed.get("name"),
+                })
+    return {
+        "checked": len(ids),
+        "found": len(actual),
+        "drift": drift,
+        "ok": not drift and len(actual) == len(ids),
+    }
+
+
+async def _verify_ad_group_update(client, body: dict) -> dict:
+    requested = body.get("adGroups") or []
+    ids = [str(g.get("adGroupId")) for g in requested if g.get("adGroupId")]
+    actual = await _read_ad_groups_for_ids(client, ids)
+    drift: list[dict] = []
+    for req in requested:
+        gid = str(req.get("adGroupId") or "")
+        if not gid:
+            continue
+        observed = actual.get(gid)
+        if observed is None:
+            drift.append({"adGroupId": gid, "field": "_existence", "expected": "present", "observed": "missing"})
+            continue
+        if "defaultBid" in req:
+            req_b = _to_float(req["defaultBid"])
+            obs_b = _to_float(observed.get("defaultBid"))
+            if not _bid_close_enough(req_b, obs_b):
+                drift.append({
+                    "adGroupId": gid, "field": "defaultBid",
+                    "expected": req_b, "observed": obs_b,
+                })
+        if "state" in req:
+            if str(req["state"]).upper() != str(observed.get("state") or "").upper():
+                drift.append({
+                    "adGroupId": gid, "field": "state",
+                    "expected": req["state"], "observed": observed.get("state"),
+                })
+        if "name" in req:
+            if str(req["name"]) != str(observed.get("name") or ""):
+                drift.append({
+                    "adGroupId": gid, "field": "name",
+                    "expected": req["name"], "observed": observed.get("name"),
+                })
+    return {
+        "checked": len(ids),
+        "found": len(actual),
+        "drift": drift,
+        "ok": not drift and len(actual) == len(ids),
+    }
+
+
+# ── Public verify entrypoint ─────────────────────────────────────────
+
+_VERIFIERS = {
+    "campaign_management-update_target_bid": _verify_target_update,
+    "campaign_management-update_target": _verify_target_update,
+    "campaign_management-create_target": _verify_target_create,
+    "campaign_management-delete_target": _verify_target_delete,
+    "campaign_management-update_campaign_budget": _verify_campaign_update,
+    "campaign_management-update_campaign_state": _verify_campaign_update,
+    "campaign_management-update_campaign": _verify_campaign_update,
+    "campaign_management-update_ad_group": _verify_ad_group_update,
+}
+
+
+async def verify_mutation(client, tool: str, arguments: dict) -> dict:
+    """Read-back a recently-applied mutation; return verification report.
+
+    Always returns a dict; on error the dict has ``ok=False`` and an
+    ``error`` field — the apply path should *not* mark the mutation as
+    failed because Amazon already accepted the write.
+    """
+    verifier = _VERIFIERS.get(tool)
+    if verifier is None:
+        return {"ok": True, "skipped": True, "reason": "no verifier for tool"}
+    body = (arguments or {}).get("body") if isinstance(arguments, dict) else None
+    if not isinstance(body, dict):
+        return {"ok": False, "error": "arguments.body missing"}
+    try:
+        report = await verifier(client, body)
+    except Exception as exc:
+        logger.exception("verify_mutation failed for %s: %s", tool, exc)
+        return {"ok": False, "error": str(exc)[:300]}
+    report["checked_at"] = _now_iso()
+    return report
+
+
+# ── Aftercare summary builder ────────────────────────────────────────
+
+def _summarize_drift(drift: list[dict]) -> str:
+    if not drift:
+        return ""
+    parts: list[str] = []
+    for d in drift[:5]:
+        eid = d.get("targetId") or d.get("campaignId") or d.get("adGroupId") or "?"
+        parts.append(
+            f"{eid}.{d.get('field')}: expected {d.get('expected')!r} "
+            f"got {d.get('observed')!r}"
+        )
+    if len(drift) > 5:
+        parts.append(f"… +{len(drift) - 5} more")
+    return "; ".join(parts)
+
+
+def _next_prompts_for(tool: str, drift: list[dict]) -> list[str]:
+    has_drift = bool(drift)
+    if tool in (
+        "campaign_management-update_target_bid",
+        "campaign_management-update_target",
+    ):
+        if has_drift:
+            return [
+                "Show me which targets had clamped bids and why",
+                "Re-attempt the bid changes with adjusted values",
+            ]
+        return [
+            "Show 7-day performance for the targets I just updated",
+            "Find similar targets that might benefit from the same change",
+        ]
+    if tool == "campaign_management-update_campaign_budget":
+        return [
+            "Show the next 24 hours of pacing for these campaigns",
+            "Are any other campaigns budget-capped right now?",
+        ]
+    if tool == "campaign_management-update_campaign_state":
+        return [
+            "What changed in spend after pausing/enabling these campaigns?",
+            "Show me yesterday's performance for these campaigns",
+        ]
+    if tool == "campaign_management-create_target":
+        return [
+            "Show first-day performance for the new keywords",
+            "Suggest negative keywords to protect spend",
+        ]
+    if tool == "campaign_management-delete_target":
+        return [
+            "Replace the deleted keywords with stronger variants",
+            "Show 30-day cumulative spend recovered",
+        ]
+    if tool == "campaign_management-update_ad_group":
+        return ["Show ad group performance for the last 7 days"]
+    return []
+
+
+def build_aftercare(
+    tool: str,
+    arguments: dict,
+    mcp_result: Any,
+    verification: Optional[dict],
+) -> dict:
+    """Package a verification report into a UI-friendly aftercare dict."""
+    verification = verification or {}
+    drift = verification.get("drift") or []
+    ok = bool(verification.get("ok"))
+    skipped = bool(verification.get("skipped"))
+
+    if skipped:
+        headline = "Applied (no aftercare verifier registered for this tool)"
+        summary = "Amazon accepted the call; we did not run a read-back."
+    elif "error" in verification:
+        headline = "Applied — verification could not run"
+        summary = f"Read-back failed: {verification.get('error')}"
+    elif ok:
+        headline = "Applied and verified"
+        summary = "Amazon read-back matches the requested values."
+    else:
+        headline = "Applied with drift"
+        summary = (
+            f"Amazon accepted the call but the read-back disagrees on "
+            f"{len(drift)} field(s): {_summarize_drift(drift)}"
+        )
+
+    return {
+        "tool": tool,
+        "headline": headline,
+        "summary": summary,
+        "verification": verification,
+        "next_prompts": _next_prompts_for(tool, drift),
+        "mcp_result_excerpt": _excerpt(mcp_result),
+    }
+
+
+def _excerpt(value: Any, limit: int = 500) -> Any:
+    """Return a small-bytes excerpt of a possibly-large MCP result."""
+    if value is None:
+        return None
+    try:
+        import json
+        s = json.dumps(value, default=str)
+    except Exception:
+        s = str(value)
+    if len(s) <= limit:
+        return value
+    return {"_truncated": True, "preview": s[:limit]}

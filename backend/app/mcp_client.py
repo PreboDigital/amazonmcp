@@ -44,8 +44,29 @@ class AmazonAdsMCP:
         """Store the active advertiser account for MCP body scoping."""
         self.advertiser_account_id = advertiser_account_id
 
+    def _has_fixed_scope_headers(self) -> bool:
+        """
+        True when this client sends fixed account scope headers
+        (Amazon-Advertising-API-Scope or Amazon-Ads-AccountID + FIXED selection).
+
+        When fixed-scope headers are sent, the Amazon Ads MCP server REJECTS any
+        body-level accessRequestedAccount(s) with: "Cannot pass
+        accessRequestedAccounts in body when using fixed account scope headers".
+        Callers must therefore omit those body fields in this mode.
+        """
+        return bool(self.profile_id or self.account_id)
+
     def _apply_access_requested_account(self, body: dict) -> dict:
-        """Attach Amazon's required account scope to campaign-management queries."""
+        """Attach Amazon's required account scope to campaign-management queries.
+
+        No-op when fixed-scope headers are active — the server uses the headers
+        and rejects body-level account scoping in that mode.
+        """
+        if self._has_fixed_scope_headers():
+            scoped_body = dict(body)
+            scoped_body.pop("accessRequestedAccount", None)
+            scoped_body.pop("accessRequestedAccounts", None)
+            return scoped_body
         if not self.advertiser_account_id or body.get("accessRequestedAccount"):
             return body
         scoped_body = dict(body)
@@ -79,11 +100,36 @@ class AmazonAdsMCP:
             h["Amazon-Ads-AI-Account-Selection-Mode"] = "FIXED"
         return h
 
+    def _sanitize_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """
+        Drop body-level account scope fields when fixed-scope headers are active.
+
+        The Amazon Ads MCP server rejects body-level accessRequestedAccount /
+        accessRequestedAccounts whenever Amazon-Ads-AI-Account-Selection-Mode is
+        FIXED — which our client sets whenever profile_id or account_id is
+        configured. Stripping here makes every wrapper safe.
+        """
+        if not self._has_fixed_scope_headers():
+            return arguments
+        if not isinstance(arguments, dict):
+            return arguments
+        sanitized = dict(arguments)
+        body = sanitized.get("body")
+        if isinstance(body, dict) and (
+            "accessRequestedAccount" in body or "accessRequestedAccounts" in body
+        ):
+            new_body = dict(body)
+            new_body.pop("accessRequestedAccount", None)
+            new_body.pop("accessRequestedAccounts", None)
+            sanitized["body"] = new_body
+        return sanitized
+
     async def call_tool(self, tool_name: str, arguments: dict[str, Any] = None) -> dict:
         """Call a single MCP tool and return the result."""
         if arguments is None:
             arguments = {}
 
+        arguments = self._sanitize_arguments(arguments)
         logger.info(f"MCP call: {tool_name} with args keys: {list(arguments.keys())}")
 
         try:
@@ -96,6 +142,8 @@ class AmazonAdsMCP:
                     await session.initialize()
                     result = await session.call_tool(tool_name, arguments)
                     return self._parse_result(result)
+        except MCPError:
+            raise
         except Exception as e:
             logger.error(f"MCP tool call failed: {tool_name} - {str(e)}")
             raise MCPError(f"Failed to call {tool_name}: {str(e)}")
@@ -112,9 +160,12 @@ class AmazonAdsMCP:
                 async with ClientSession(read_stream, write_stream) as session:
                     await session.initialize()
                     for tool_name, arguments in calls:
+                        sanitized = self._sanitize_arguments(arguments or {})
                         logger.info(f"MCP sequential call: {tool_name}")
-                        result = await session.call_tool(tool_name, arguments or {})
+                        result = await session.call_tool(tool_name, sanitized)
                         results.append(self._parse_result(result))
+        except MCPError:
+            raise
         except Exception as e:
             logger.error(f"MCP sequential calls failed: {str(e)}")
             raise MCPError(f"Sequential tool calls failed: {str(e)}")
@@ -651,16 +702,16 @@ class AmazonAdsMCP:
                 # Remove unsupported 'adProduct' key if present
                 r.pop("adProduct", None)
 
-        # Ensure accessRequestedAccounts has a real advertiser account ID.
-        # An empty array causes "Start of structure or map found where not expected."
-        if advertiser_account_id:
+        if self._has_fixed_scope_headers():
+            report_config.pop("accessRequestedAccounts", None)
+        elif advertiser_account_id:
             report_config["accessRequestedAccounts"] = [
                 {"advertiserAccountId": advertiser_account_id}
             ]
         elif not report_config.get("accessRequestedAccounts"):
             logger.warning(
-                "create_campaign_report called without advertiser_account_id — "
-                "report creation may fail"
+                "create_campaign_report called without advertiser_account_id and without "
+                "fixed-scope headers — report creation may fail"
             )
             report_config.setdefault("accessRequestedAccounts", [])
 
@@ -794,7 +845,9 @@ class AmazonAdsMCP:
         Supports all report types: spSearchTerm, sbSearchTerm, spTargeting,
         spCampaigns, spAdvertisedProduct, etc.
         """
-        if advertiser_account_id:
+        if self._has_fixed_scope_headers():
+            report_config.pop("accessRequestedAccounts", None)
+        elif advertiser_account_id:
             report_config["accessRequestedAccounts"] = [
                 {"advertiserAccountId": advertiser_account_id}
             ]
@@ -806,7 +859,9 @@ class AmazonAdsMCP:
         advertiser_account_id: Optional[str] = None,
     ) -> dict:
         """Create a Product report via reporting-create_product_report."""
-        if advertiser_account_id:
+        if self._has_fixed_scope_headers():
+            report_config.pop("accessRequestedAccounts", None)
+        elif advertiser_account_id:
             report_config["accessRequestedAccounts"] = [
                 {"advertiserAccountId": advertiser_account_id}
             ]
@@ -818,7 +873,9 @@ class AmazonAdsMCP:
         advertiser_account_id: Optional[str] = None,
     ) -> dict:
         """Create an Inventory report via reporting-create_inventory_report."""
-        if advertiser_account_id:
+        if self._has_fixed_scope_headers():
+            report_config.pop("accessRequestedAccounts", None)
+        elif advertiser_account_id:
             report_config["accessRequestedAccounts"] = [
                 {"advertiserAccountId": advertiser_account_id}
             ]
@@ -1169,6 +1226,38 @@ class AmazonAdsMCP:
 
     # ── Helpers ───────────────────────────────────────────────────────
 
+    _SERVER_ERROR_MARKERS: tuple[str, ...] = (
+        "Validation failed",
+        "Validation error",
+        "Cannot pass accessRequestedAccount",
+        "fixed account scope",
+        "Start of structure or map found where not expected",
+        "Internal Server Error",
+        "Forbidden",
+        "Unauthorized",
+        "Bad Request",
+    )
+
+    @staticmethod
+    def _looks_like_server_error_text(text: str) -> bool:
+        """
+        Heuristic: detect plain-prose error bodies returned with HTTP 200.
+
+        Amazon's MCP server sometimes returns a 200 with a string body like
+        "Cannot pass accessRequestedAccounts in body when using fixed account
+        scope headers". Without this guard, callers see a {"result": "<error>"}
+        dict and silently treat it as success — which infinite-loops cron syncs.
+        """
+        if not isinstance(text, str):
+            return False
+        stripped = text.strip()
+        if not stripped or stripped.startswith(("{", "[")):
+            return False
+        for marker in AmazonAdsMCP._SERVER_ERROR_MARKERS:
+            if marker.lower() in stripped.lower():
+                return True
+        return False
+
     @staticmethod
     def _parse_result(result) -> dict:
         """Parse MCP tool result into a clean dict."""
@@ -1199,9 +1288,8 @@ class AmazonAdsMCP:
                 except (json.JSONDecodeError, TypeError):
                     text = content_parts[0]
                     logger.warning(f"MCP response not valid JSON: {text[:500]}")
-                    # Detect validation errors and raise so callers get a clear message
-                    if "Validation failed" in text or "Validation error" in text:
-                        raise MCPError(f"MCP validation error: {text[:500]}")
+                    if AmazonAdsMCP._looks_like_server_error_text(text):
+                        raise MCPError(f"MCP server error: {text[:500]}")
                     return {"result": text}
             logger.info(f"MCP response has {len(content_parts)} content parts")
             return {"result": content_parts}

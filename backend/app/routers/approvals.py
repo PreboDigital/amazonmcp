@@ -4,6 +4,7 @@ All changes to Amazon Ads go through this approval pipeline before being pushed.
 Supports review, approve, reject, batch operations, and execution via MCP.
 """
 
+import asyncio
 import uuid
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,6 +18,7 @@ from app.mcp_client import create_mcp_client
 from app.services.token_service import get_mcp_client_with_fresh_token
 from app.services.harvest_service import HarvestService
 from app.services.campaign_creation_service import CampaignCreationService
+from app.services.mutation_aftercare import build_aftercare, verify_mutation
 from app.utils import (
     parse_uuid,
     utcnow,
@@ -77,30 +79,79 @@ async def _get_cred(db: AsyncSession, cred_id: Optional[str] = None) -> Credenti
     return cred
 
 
-async def _call_tool_with_resilience(client, tool_name: str, arguments: dict):
+_TRANSIENT_ERROR_TOKENS = (
+    "throttl", "rate limit", "rate-limit", "rate_limit",
+    "timeout", "timed out", "temporar", "try again",
+    "quota", "503", "504",
+)
+
+
+def _looks_transient(message: str | None) -> bool:
+    if not message:
+        return False
+    low = message.lower()
+    return any(tok in low for tok in _TRANSIENT_ERROR_TOKENS)
+
+
+async def _retry_with_backoff(client, tool_name: str, arguments: dict, *, attempts: int = 2):
+    """One-shot transient retry with linear backoff. Returns ``(result, error)``.
+
+    On every attempt the parsed-error / raised exception is treated
+    uniformly: transient-looking errors trigger a retry up to
+    ``attempts``; anything else returns immediately so the caller can
+    decide whether to fall back to a generic tool or surface the error.
     """
-    Execute MCP call, then retry once with a safe fallback tool for known cases.
-    Raises a clear error if both attempts fail.
-    """
-    first_error = None
-    try:
-        result = await client.call_tool(tool_name, arguments)
+    last_error: str | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            result = await client.call_tool(tool_name, arguments)
+        except Exception as exc:
+            last_error = str(exc)
+            if not _looks_transient(last_error) or attempt + 1 >= attempts:
+                return None, last_error
+            await asyncio.sleep(0.5 * (attempt + 1))
+            continue
         parsed_error = extract_mcp_error(result)
         if not parsed_error:
-            return result
-        first_error = parsed_error
-    except Exception as e:
-        first_error = str(e)
+            return result, None
+        last_error = parsed_error
+        if not _looks_transient(parsed_error) or attempt + 1 >= attempts:
+            return None, last_error
+        await asyncio.sleep(0.5 * (attempt + 1))
+    return None, last_error
+
+
+async def _call_tool_with_resilience(client, tool_name: str, arguments: dict):
+    """
+    Execute MCP call with transient-error retry, then a final fallback to
+    the generic ``update_*`` tool for known specialised endpoints.
+
+    Layered behaviour:
+
+    1. Call ``tool_name`` with one transient retry (throttle / 5xx /
+       timeout) — covers Amazon's aggressive report-poll throttling and
+       short-lived MCP session blips.
+    2. If the call still returns a non-transient error, attempt the
+       fallback mapping in :func:`build_mcp_fallback_call`
+       (``update_target_bid → update_target`` etc).
+    3. The fallback also retries once on transient errors so we don't
+       give up on a generic tool over a single 503.
+    """
+    result, first_error = await _retry_with_backoff(client, tool_name, arguments)
+    if result is not None:
+        return result
 
     fallback = build_mcp_fallback_call(tool_name, arguments)
     if not fallback:
         raise RuntimeError(first_error or "MCP call failed")
 
     fb_tool, fb_args = fallback
-    fb_result = await client.call_tool(fb_tool, fb_args)
-    fb_error = extract_mcp_error(fb_result)
-    if fb_error:
-        raise RuntimeError(f"{first_error or 'MCP call failed'} | fallback {fb_tool} failed: {fb_error}")
+    fb_result, fb_error = await _retry_with_backoff(client, fb_tool, fb_args)
+    if fb_result is None:
+        raise RuntimeError(
+            f"{first_error or 'MCP call failed'} | fallback {fb_tool} failed: "
+            f"{fb_error or 'unknown error'}"
+        )
     return fb_result
 
 
@@ -354,12 +405,15 @@ async def apply_approved_changes(
     failed = 0
     results = []
     cred_cache: dict = {}
+    group_stats: dict[tuple[str, Optional[str]], dict] = {}
     grouped: dict[tuple[str, Optional[str]], list[PendingChange]] = {}
     for change in changes:
         key = (str(change.credential_id), change.profile_id)
         grouped.setdefault(key, []).append(change)
+        group_stats.setdefault(key, {"applied": 0, "failed": 0, "results": []})
 
     for (cred_id_str, profile_id), group_changes in grouped.items():
+        stats = group_stats[(cred_id_str, profile_id)]
         cred_id = parse_uuid(cred_id_str, "credential_id")
         cred = cred_cache.get(cred_id_str)
         if cred is None:
@@ -372,7 +426,10 @@ async def apply_approved_changes(
                 change.status = "failed"
                 change.error_message = "Credential not found"
                 failed += 1
-                results.append({"id": str(change.id), "status": "failed", "error": "Credential not found"})
+                stats["failed"] += 1
+                entry = {"id": str(change.id), "status": "failed", "error": "Credential not found"}
+                results.append(entry)
+                stats["results"].append(entry)
             continue
 
         client = await get_mcp_client_with_fresh_token(
@@ -417,28 +474,75 @@ async def apply_approved_changes(
                 else:
                     mcp_result = await _call_tool_with_resilience(client, tool_name, arguments)
 
+                # Phase 5.3: best-effort read-back so the UI can show
+                # whether Amazon actually applied what we asked for
+                # (vs. silently clamping or queueing).
+                aftercare: Optional[dict] = None
+                if not (isinstance(tool_name, str) and tool_name.startswith("_")):
+                    try:
+                        verification = await verify_mutation(client, tool_name, arguments)
+                    except Exception as ver_exc:
+                        verification = {"ok": False, "error": str(ver_exc)[:300]}
+                    aftercare = build_aftercare(tool_name, arguments, mcp_result, verification)
+
                 change.status = "applied"
                 change.applied_at = utcnow()
-                change.apply_result = mcp_result
+                # Phase 5.3: preserve the legacy ``apply_result`` shape
+                # (= raw MCP response) so existing UIs keep working, and
+                # tuck the aftercare report under a sibling ``_aftercare``
+                # key when the MCP result is dict-shaped. Non-dict results
+                # (legacy harvest / campaign-create services return rich
+                # dicts already) get the {mcp_result, _aftercare} wrapper.
+                if aftercare is None:
+                    apply_payload = mcp_result
+                elif isinstance(mcp_result, dict):
+                    apply_payload = {**mcp_result, "_aftercare": aftercare}
+                else:
+                    apply_payload = {
+                        "mcp_result": mcp_result,
+                        "_aftercare": aftercare,
+                    }
+                change.apply_result = apply_payload
                 applied += 1
-                results.append({"id": str(change.id), "status": "applied"})
+                stats["applied"] += 1
+                entry = {"id": str(change.id), "status": "applied"}
+                if aftercare is not None:
+                    entry["aftercare"] = {
+                        "headline": aftercare.get("headline"),
+                        "drift_count": len(aftercare.get("verification", {}).get("drift") or []),
+                    }
+                results.append(entry)
+                stats["results"].append(entry)
 
             except Exception as e:
                 change.status = "failed"
                 change.error_message = str(e)
                 failed += 1
-                results.append({"id": str(change.id), "status": "failed", "error": str(e)})
+                stats["failed"] += 1
+                entry = {"id": str(change.id), "status": "failed", "error": str(e)}
+                results.append(entry)
+                stats["results"].append(entry)
 
-    # Activity log per affected credential for clearer auditability.
-    for cred_id_str, cred in cred_cache.items():
+    # Activity log per (credential, profile) for accurate per-account audit trail.
+    for (cred_id_str, profile_id), stats in group_stats.items():
+        cred = cred_cache.get(cred_id_str)
         if not cred:
             continue
+        scope_label = f"profile {profile_id}" if profile_id else "default profile"
         db.add(ActivityLog(
             credential_id=cred.id,
             action="changes_applied",
             category="approvals",
-            description=f"Applied {applied} changes to Amazon Ads ({failed} failed)",
-            details={"applied": applied, "failed": failed, "results": results},
+            description=(
+                f"Applied {stats['applied']} changes to Amazon Ads "
+                f"({stats['failed']} failed) on {scope_label}"
+            ),
+            details={
+                "profile_id": profile_id,
+                "applied": stats["applied"],
+                "failed": stats["failed"],
+                "results": stats["results"],
+            },
         ))
 
     return {

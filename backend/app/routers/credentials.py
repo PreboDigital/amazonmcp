@@ -16,6 +16,10 @@ from app.models import Credential, ActivityLog
 from app.mcp_client import create_mcp_client
 from app.services.token_service import get_mcp_client_with_fresh_token
 from app.crypto import encrypt_value, decrypt_value
+from app.services.report_skip_service import (
+    clear_skip,
+    get_permanent_skip_dates,
+)
 from app.utils import utcnow
 
 router = APIRouter()
@@ -245,3 +249,85 @@ async def test_credential(cred_id: UUID, db: AsyncSession = Depends(get_db)):
     ))
 
     return test_result
+
+
+# ── Report-skip list management ──────────────────────────────────────
+#
+# Phase 5.1 promotes report dates that have failed across N consecutive
+# syncs to a permanent skip list on the credential. These endpoints let
+# operators inspect / manually clear that list when Amazon catches up
+# (rather than waiting for the next successful daily sync to clear the
+# date naturally).
+
+
+@router.get("/{cred_id}/report-skip")
+async def get_report_skip(
+    cred_id: UUID,
+    profile_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the permanent skip list + counter state for a credential.
+
+    Pass ``profile_id`` to scope to a specific profile; omit to fall
+    back to the credential's default profile (profile-less rows).
+    """
+    result = await db.execute(select(Credential).where(Credential.id == cred_id))
+    cred = result.scalar_one_or_none()
+    if not cred:
+        raise HTTPException(status_code=404, detail="Credential not found")
+
+    target_profile = profile_id if profile_id is not None else cred.profile_id
+    permanent = sorted(get_permanent_skip_dates(cred, target_profile))
+
+    metadata = cred.credential_metadata or {}
+    state = (metadata.get("report_skip") or {}).get(
+        target_profile if target_profile else "__none__"
+    ) or {}
+    counters = state.get("counters") or {}
+    return {
+        "credential_id": str(cred.id),
+        "profile_id": target_profile,
+        "permanent": permanent,
+        "counters": counters,
+    }
+
+
+@router.delete("/{cred_id}/report-skip/{day}")
+async def clear_report_skip_date(
+    cred_id: UUID,
+    day: str,
+    profile_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually clear one date from the permanent skip list.
+
+    The next cron run will attempt the date again. Use when Amazon
+    confirms data is back-available for a previously-stuck day.
+    """
+    result = await db.execute(select(Credential).where(Credential.id == cred_id))
+    cred = result.scalar_one_or_none()
+    if not cred:
+        raise HTTPException(status_code=404, detail="Credential not found")
+
+    target_profile = profile_id if profile_id is not None else cred.profile_id
+    changed = clear_skip(cred, target_profile, day)
+    if changed:
+        db.add(cred)
+        db.add(ActivityLog(
+            credential_id=cred.id,
+            action="report_skip_cleared",
+            category="reporting",
+            description=f"Cleared report-skip flag for {day} (profile {target_profile or 'default'})",
+            entity_type="credential",
+            entity_id=str(cred.id),
+            details={"profile_id": target_profile, "date": day},
+            status="success",
+        ))
+
+    return {
+        "credential_id": str(cred.id),
+        "profile_id": target_profile,
+        "date": day,
+        "cleared": changed,
+        "permanent_after": sorted(get_permanent_skip_dates(cred, target_profile)),
+    }

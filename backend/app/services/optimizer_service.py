@@ -6,14 +6,21 @@ Calculates optimal bids based on ACOS targets and applies them.
 import logging
 from typing import Optional
 from app.mcp_client import AmazonAdsMCP
+from app.utils import marketplace_today
 
 logger = logging.getLogger(__name__)
 
 
 class OptimizerService:
-    def __init__(self, client: AmazonAdsMCP, advertiser_account_id: str = None):
+    def __init__(
+        self,
+        client: AmazonAdsMCP,
+        advertiser_account_id: str = None,
+        marketplace: Optional[str] = None,
+    ):
         self.client = client
         self.advertiser_account_id = advertiser_account_id
+        self.marketplace = marketplace
         if advertiser_account_id:
             self.client.set_advertiser_account_id(advertiser_account_id)
 
@@ -58,9 +65,10 @@ class OptimizerService:
             all_targets = [{"campaign_id": "all", "targets": targets_data}]
 
         # Step 2: Get performance report
-        from datetime import date, timedelta
-        end = date.today().isoformat()
-        start = (date.today() - timedelta(days=30)).isoformat()
+        from datetime import timedelta
+        today = marketplace_today(self.marketplace, self.client.region)
+        end = today.isoformat()
+        start = (today - timedelta(days=30)).isoformat()
         report_config = {
             "reports": [{
                 "format": "GZIP_JSON",

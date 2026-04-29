@@ -18,7 +18,7 @@ from app.models import (
     CampaignPerformanceDaily, AccountPerformanceDaily,
     Campaign, Credential,
 )
-from app.utils import normalize_amazon_date, normalize_state_value
+from app.utils import marketplace_today, normalize_amazon_date, normalize_state_value
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +69,17 @@ def get_currency_for_marketplace(marketplace: str = None, region: str = None) ->
 
 # ── Date-range helpers ────────────────────────────────────────────────
 
-def get_date_range(preset: str) -> Tuple[date, date]:
-    """Return (start, end) dates for a named preset."""
-    today = date.today()
+def get_date_range(
+    preset: str,
+    marketplace: Optional[str] = None,
+    region: Optional[str] = None,
+) -> Tuple[date, date]:
+    """Return (start, end) dates for a named preset.
+
+    Pass ``marketplace`` and/or ``region`` to compute "today" in the
+    advertiser's reporting timezone instead of UTC.
+    """
+    today = marketplace_today(marketplace, region)
 
     if preset == "today":
         return today, today
@@ -103,9 +111,13 @@ def get_date_range(preset: str) -> Tuple[date, date]:
         return today - timedelta(days=7), today
 
 
-def get_comparison_range(preset: str) -> Tuple[date, date]:
-    """Return the comparison period for the given preset."""
-    today = date.today()
+def get_comparison_range(
+    preset: str,
+    marketplace: Optional[str] = None,
+    region: Optional[str] = None,
+) -> Tuple[date, date]:
+    """Return the comparison period for the given preset (marketplace-aware)."""
+    today = marketplace_today(marketplace, region)
 
     if preset == "today":
         d = today - timedelta(days=1)
@@ -116,7 +128,7 @@ def get_comparison_range(preset: str) -> Tuple[date, date]:
     elif preset == "last_7_days":
         return today - timedelta(days=13), today - timedelta(days=7)
     elif preset == "this_week":
-        return get_date_range("last_week")
+        return get_date_range("last_week", marketplace=marketplace, region=region)
     elif preset == "last_week":
         monday = today - timedelta(days=today.weekday() + 14)
         sunday = monday + timedelta(days=6)
@@ -125,7 +137,7 @@ def get_comparison_range(preset: str) -> Tuple[date, date]:
         # Previous 31-day period
         return today - timedelta(days=61), today - timedelta(days=31)
     elif preset == "this_month":
-        return get_date_range("last_month")
+        return get_date_range("last_month", marketplace=marketplace, region=region)
     elif preset == "last_month":
         first_this = today.replace(day=1)
         last_prev = first_this - timedelta(days=1)
@@ -136,7 +148,7 @@ def get_comparison_range(preset: str) -> Tuple[date, date]:
     elif preset == "year_to_date":
         return today.replace(year=today.year - 1, month=1, day=1), today.replace(year=today.year - 1, month=12, day=31)
     else:
-        start, end = get_date_range(preset)
+        start, end = get_date_range(preset, marketplace=marketplace, region=region)
         duration = (end - start).days + 1
         return start - timedelta(days=duration), start - timedelta(days=1)
 

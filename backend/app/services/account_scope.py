@@ -67,16 +67,25 @@ def get_campaign_sync_scope_error(
     account: Optional[Account],
     profile_id: Optional[str],
 ) -> Optional[str]:
-    """Return the user-facing reason campaign metadata sync is unsafe."""
+    """Return the user-facing reason campaign metadata sync is unsafe.
+
+    Order matters:
+    1. A marketplace child profile is always allowed, even when the parent
+       account is flagged ``isGlobalAccount`` — Amazon discovers the child via
+       ``marketplace_alt`` and exposes a marketplace-scoped profileId we can
+       use directly.
+    2. Only true *root* global accounts (no marketplace_alt resolution) are
+       blocked.
+    """
     if not profile_id:
         return CAMPAIGN_SYNC_SCOPE_REQUIRED_DETAIL
     if account is None:
         return CAMPAIGN_SYNC_UNKNOWN_PROFILE_DETAIL
-    if is_global_advertiser_account(account):
+    if is_marketplace_child_account(account):
+        return None
+    if is_global_root_account(account):
         return CAMPAIGN_SYNC_GLOBAL_ACCOUNT_DETAIL
-    if not is_marketplace_child_account(account):
-        return CAMPAIGN_SYNC_NON_MARKETPLACE_DETAIL
-    return None
+    return CAMPAIGN_SYNC_NON_MARKETPLACE_DETAIL
 
 
 async def resolve_campaign_sync_scope(

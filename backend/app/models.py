@@ -79,6 +79,10 @@ class Credential(Base):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     last_tested_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
     tools_available: Mapped[int] = mapped_column(Integer, nullable=True)
+    # Generic key/value store for credential-scoped runtime state we don't
+    # want to model with dedicated tables (e.g. permanently-stuck report
+    # dates that Amazon refuses to produce — see report_skip_service).
+    credential_metadata: Mapped[dict] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
@@ -775,6 +779,10 @@ class AIConversation(Base):
     title: Mapped[str] = mapped_column(String(512), nullable=True)
     messages: Mapped[list] = mapped_column(JSON, default=list)
     # messages: [{"role": "user"|"assistant", "content": "...", "timestamp": "..."}]
+    # head_summary holds a rolling summary of the messages that fell out of
+    # the trimmed tail — used by ``ai_memory.compact_if_needed`` so long
+    # threads keep continuity without re-sending the full transcript.
+    head_summary: Mapped[str] = mapped_column(Text, nullable=True)
     context_data: Mapped[dict] = mapped_column(JSON, nullable=True)
     # Cached account data for AI context
     changes_proposed: Mapped[int] = mapped_column(Integer, default=0)
@@ -979,8 +987,15 @@ class SearchTermPerformance(Base):
     amazon_ad_group_id: Mapped[str] = mapped_column(String(255), nullable=True)
     ad_group_name: Mapped[str] = mapped_column(String(512), nullable=True)
 
-    # Date
-    date: Mapped[str] = mapped_column(String(25), nullable=False)  # YYYY-MM-DD or SUMMARY
+    # Date / aggregation grain
+    # Historically the ``date`` column carried both "YYYY-MM-DD" and the
+    # sentinel "SUMMARY" — querying daily rows then required guarding every
+    # read against the literal. ``time_unit`` (DAILY / SUMMARY) makes the
+    # grain explicit; ``date`` now only holds an ISO date and SUMMARY rows
+    # set ``date`` to the last day of the report range. Old "SUMMARY"-as-date
+    # rows still load (legacy reads coerce them).
+    date: Mapped[str] = mapped_column(String(25), nullable=False)
+    time_unit: Mapped[str] = mapped_column(String(20), nullable=True)  # DAILY | SUMMARY
 
     # Traffic metrics
     impressions: Mapped[int] = mapped_column(BigInteger, default=0)
@@ -1014,6 +1029,7 @@ class SearchTermPerformance(Base):
         Index("ix_stp_credential_date", "credential_id", "date"),
         Index("ix_stp_clicks", "clicks"),
         Index("ix_stp_purchases", "purchases"),
+        Index("ix_stp_time_unit", "time_unit"),
     )
 
 

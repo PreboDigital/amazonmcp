@@ -22,13 +22,16 @@ from app.models import (
 )
 from app.config import get_settings
 from app.services.ai_service import create_ai_service
+from app.services.ai_action_validator import (
+    validate_ai_action,
+    validate_ai_actions,
+)
 from app.services.search_term_service import get_search_term_summary
 from app.services.token_service import get_mcp_client_with_fresh_token
 from app.routers.settings import get_effective_api_keys
 from app.utils import (
     parse_uuid,
     utcnow,
-    normalize_mcp_call,
     normalize_state_value,
     extract_mcp_error,
     build_mcp_fallback_call,
@@ -545,7 +548,28 @@ async def _get_account_context(db: AsyncSession, cred: Credential) -> dict:
         for a in recent_activity
     ]
 
-    # ── Build the full context ────────────────────────────────────────
+    # ── Data freshness (so the AI can warn on stale data) ────────────
+    last_campaign_sync = max((c.synced_at for c in campaigns if c.synced_at), default=None)
+    last_perf_date_result = await db.execute(
+        select(func.max(CampaignPerformanceDaily.date)).where(
+            CampaignPerformanceDaily.credential_id == cred.id
+        )
+    )
+    last_perf_date = last_perf_date_result.scalar()
+
+    def _stale_days(dt: Optional[datetime]) -> Optional[int]:
+        if not dt:
+            return None
+        return max(0, (utcnow() - dt).days)
+
+    data_freshness = {
+        "last_campaign_sync_at": last_campaign_sync.isoformat() if last_campaign_sync else None,
+        "last_campaign_sync_days_ago": _stale_days(last_campaign_sync),
+        "last_performance_date": last_perf_date.isoformat() if last_perf_date else None,
+        "campaigns_cached": len(campaigns),
+        "targets_cached": target_count,
+    }
+
     return {
         "account": {
             "name": active_profile.account_name if active_profile else cred.name,
@@ -554,6 +578,7 @@ async def _get_account_context(db: AsyncSession, cred: Credential) -> dict:
             "profile_id": cred.profile_id,
             "account_type": active_profile.account_type if active_profile else None,
         },
+        "data_freshness": data_freshness,
         "campaigns_summary": {
             "total": len(campaigns),
             "active": active,
@@ -692,20 +717,28 @@ async def ai_chat(payload: ChatRequest, db: AsyncSession = Depends(get_db)):
     )
 
     actions = result.get("actions") or []
-    inline_actions = [a for a in actions if a.get("scope") == "inline"]
-    queue_actions = [a for a in actions if a.get("scope") == "queue"]
+    inline_actions_raw = [a for a in actions if a.get("scope") == "inline"]
+    queue_actions_raw = [a for a in actions if a.get("scope") == "queue"]
+
+    # ── Validate proposed actions against the live DB ────────────────
+    inline_accepted, inline_rejected = await validate_ai_actions(
+        inline_actions_raw, db, cred, allow_queue_only_tools=False,
+    )
+    queue_accepted, queue_rejected = await validate_ai_actions(
+        queue_actions_raw, db, cred, allow_queue_only_tools=True,
+    )
+
+    inline_actions = inline_accepted
+    sync_requests = [a for a in queue_accepted if a.get("tool") == "_request_sync"]
+    queue_actions = [a for a in queue_accepted if a.get("tool") != "_request_sync"]
+    rejected_actions = inline_rejected + queue_rejected
     queued_count = 0
 
-    # Create PendingChanges for queue-scope actions; notify user
     if queue_actions:
         batch_id = str(uuid.uuid4())
         for act in queue_actions:
-            raw_tool = act.get("tool", "")
-            raw_args = act.get("arguments", {})
-            if isinstance(raw_tool, str) and raw_tool.startswith("_"):
-                tool, args = raw_tool, (raw_args or {})
-            else:
-                tool, args = normalize_mcp_call(raw_tool, raw_args)
+            tool = act.get("tool")
+            args = act.get("arguments") or {}
             if not tool or tool == "unknown":
                 continue
             mcp_payload = {"tool": tool, "arguments": args}
@@ -745,7 +778,15 @@ async def ai_chat(payload: ChatRequest, db: AsyncSession = Depends(get_db)):
         description=f"AI chat: {payload.message[:80]}",
         entity_type="ai_conversation",
         entity_id=str(conversation.id),
-        details={"inline_actions": len(inline_actions), "queued_actions": queued_count} if actions else None,
+        details=(
+            {
+                "inline_actions": len(inline_actions),
+                "queued_actions": queued_count,
+                "rejected_actions": len(rejected_actions),
+            }
+            if actions
+            else None
+        ),
     ))
 
     await db.flush()
@@ -759,6 +800,25 @@ async def ai_chat(payload: ChatRequest, db: AsyncSession = Depends(get_db)):
     if queued_count > 0:
         response["queued_count"] = queued_count
         response["queued_message"] = f"{queued_count} change(s) sent to Approval Queue. Review and approve when ready."
+    if sync_requests:
+        response["sync_requests"] = [
+            {
+                "kind": (a.get("arguments") or {}).get("kind"),
+                "range_preset": (a.get("arguments") or {}).get("range_preset"),
+                "label": a.get("label") or "Sync requested by AI",
+                "reason": a.get("reason"),
+            }
+            for a in sync_requests
+        ]
+    if rejected_actions:
+        response["rejected_actions"] = [
+            {"label": (r["action"] or {}).get("label"), "tool": r["tool"], "error": r["error"]}
+            for r in rejected_actions
+        ]
+        response["rejected_message"] = (
+            f"{len(rejected_actions)} AI-suggested change(s) were rejected before queuing because "
+            "they referenced unknown IDs or out-of-range values. Re-sync your campaigns/targets and try again."
+        )
     return response
 
 
@@ -779,18 +839,30 @@ async def apply_inline(payload: ApplyInlineRequest, db: AsyncSession = Depends(g
     results = []
 
     for act in payload.actions:
-        raw_tool = act.get("tool", "")
-        raw_arguments = act.get("arguments", {})
-        if isinstance(raw_tool, str) and raw_tool.startswith("_"):
-            tool, arguments = raw_tool, (raw_arguments or {})
-        else:
-            tool, arguments = normalize_mcp_call(raw_tool, raw_arguments)
-        label = act.get("label", tool)
+        label = act.get("label") or act.get("tool") or "action"
 
-        if not tool or tool == "unknown":
-            results.append({"label": label, "status": "skipped", "error": "Unknown tool"})
+        validation = await validate_ai_action(
+            act, db, cred, allow_queue_only_tools=False,
+        )
+        if not validation.ok:
+            results.append({
+                "label": label,
+                "status": "rejected",
+                "error": validation.error or "Validation failed",
+            })
             failed += 1
+            db.add(ActivityLog(
+                credential_id=cred.id,
+                action="ai_inline_rejected",
+                category="ai",
+                description=f"Inline rejected: {label}",
+                details={"tool": validation.tool, "error": validation.error},
+                status="error",
+            ))
             continue
+
+        tool = validation.tool
+        arguments = validation.arguments or {}
 
         try:
             mcp_result = await _call_tool_with_resilience(client, tool, arguments)

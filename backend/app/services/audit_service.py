@@ -6,14 +6,21 @@ import logging
 from typing import Optional
 from app.mcp_client import AmazonAdsMCP
 from app.services.reporting_service import ReportingService
+from app.utils import marketplace_today
 
 logger = logging.getLogger(__name__)
 
 
 class AuditService:
-    def __init__(self, client: AmazonAdsMCP, advertiser_account_id: Optional[str] = None):
+    def __init__(
+        self,
+        client: AmazonAdsMCP,
+        advertiser_account_id: Optional[str] = None,
+        marketplace: Optional[str] = None,
+    ):
         self.client = client
         self.advertiser_account_id = advertiser_account_id
+        self.marketplace = marketplace
         if advertiser_account_id:
             self.client.set_advertiser_account_id(advertiser_account_id)
 
@@ -46,8 +53,8 @@ class AuditService:
             report_svc = ReportingService(
                 self.client, advertiser_account_id=self.advertiser_account_id
             )
-            from datetime import date, timedelta
-            end_date = date.today()
+            from datetime import timedelta
+            end_date = marketplace_today(self.marketplace, self.client.region)
             start_date = end_date - timedelta(days=30)
             end = end_date.isoformat()
             start = start_date.isoformat()
@@ -90,12 +97,12 @@ class AuditService:
         self, report_type: str = "campaign", date_range: Optional[dict] = None
     ) -> dict:
         """Create a specific report, poll for completion, and return results."""
-        from datetime import date, timedelta
+        from datetime import timedelta
 
-        # Build proper date range if not provided
         if not date_range:
-            end = date.today().isoformat()
-            start = (date.today() - timedelta(days=30)).isoformat()
+            today = marketplace_today(self.marketplace, self.client.region)
+            end = today.isoformat()
+            start = (today - timedelta(days=30)).isoformat()
             date_range = {"startDate": start, "endDate": end}
 
         report_config = {

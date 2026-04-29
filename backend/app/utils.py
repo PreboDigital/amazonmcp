@@ -4,10 +4,104 @@ import logging
 import re
 from typing import Any, Optional
 import uuid as uuid_mod
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
 from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
+
+
+# ── Amazon marketplace → IANA timezone map ────────────────────────────
+# Used to compute "today" in the advertiser's reporting timezone, which is
+# how Amazon Ads aggregates daily metrics. Server-local time (or UTC) can
+# return data for the wrong day around midnight in the advertiser's locale.
+MARKETPLACE_TIMEZONES: dict[str, str] = {
+    # North America
+    "US": "America/Los_Angeles",  # Amazon reports use account-level TZ; PT is the default for US Sellers/Vendors
+    "CA": "America/Los_Angeles",
+    "MX": "America/Mexico_City",
+    "BR": "America/Sao_Paulo",
+    # Europe
+    "GB": "Europe/London",
+    "UK": "Europe/London",
+    "IE": "Europe/Dublin",
+    "DE": "Europe/Berlin",
+    "FR": "Europe/Paris",
+    "ES": "Europe/Madrid",
+    "IT": "Europe/Rome",
+    "NL": "Europe/Amsterdam",
+    "BE": "Europe/Brussels",
+    "AT": "Europe/Vienna",
+    "PT": "Europe/Lisbon",
+    "FI": "Europe/Helsinki",
+    "LU": "Europe/Luxembourg",
+    "SE": "Europe/Stockholm",
+    "PL": "Europe/Warsaw",
+    "TR": "Europe/Istanbul",
+    # Asia-Pacific
+    "JP": "Asia/Tokyo",
+    "AU": "Australia/Sydney",
+    "IN": "Asia/Kolkata",
+    "SG": "Asia/Singapore",
+    # Middle East & Africa
+    "AE": "Asia/Dubai",
+    "SA": "Asia/Riyadh",
+    "EG": "Africa/Cairo",
+    "ZA": "Africa/Johannesburg",
+}
+
+REGION_FALLBACK_TIMEZONES: dict[str, str] = {
+    "na": "America/Los_Angeles",
+    "eu": "Europe/London",
+    "fe": "Asia/Tokyo",
+}
+
+
+def resolve_marketplace_timezone(
+    marketplace: Optional[str] = None,
+    region: Optional[str] = None,
+) -> ZoneInfo:
+    """
+    Resolve the IANA timezone for a marketplace code (e.g. "US", "GB").
+    Falls back to the region-level default and finally UTC.
+    """
+    if marketplace:
+        tz_name = MARKETPLACE_TIMEZONES.get(str(marketplace).upper())
+        if tz_name:
+            try:
+                return ZoneInfo(tz_name)
+            except ZoneInfoNotFoundError:
+                pass
+    if region:
+        tz_name = REGION_FALLBACK_TIMEZONES.get(str(region).lower())
+        if tz_name:
+            try:
+                return ZoneInfo(tz_name)
+            except ZoneInfoNotFoundError:
+                pass
+    return ZoneInfo("UTC")
+
+
+def marketplace_now(
+    marketplace: Optional[str] = None,
+    region: Optional[str] = None,
+) -> datetime:
+    """Current time in the advertiser's marketplace timezone (UTC fallback)."""
+    return datetime.now(resolve_marketplace_timezone(marketplace, region))
+
+
+def marketplace_today(
+    marketplace: Optional[str] = None,
+    region: Optional[str] = None,
+) -> date:
+    """
+    Today's date in the advertiser's marketplace timezone.
+
+    Use this — never ``date.today()`` — when computing report ranges, "yesterday",
+    rolling windows, or anything else compared against Amazon Ads daily buckets.
+    """
+    return marketplace_now(marketplace, region).date()
 
 
 def parse_uuid(value: str, field_name: str = "id") -> uuid_mod.UUID:

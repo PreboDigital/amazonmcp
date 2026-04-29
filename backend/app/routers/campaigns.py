@@ -2101,43 +2101,61 @@ async def sync_status(
 @router.get("/stats")
 async def campaign_stats(
     credential_id: Optional[str] = Query(None),
+    profile_id: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get summary counts for campaigns, ad groups, targets, and ads."""
+    """Get summary counts for campaigns, ad groups, targets, and ads.
+
+    Scoped by ``profile_id`` so multi-profile credentials don't leak totals
+    across marketplaces — matches the list endpoints' default behaviour.
+    Pass ``profile_id=null`` (or omit) to fall back to the credential's
+    default profile.
+    """
     cred = await _get_credential(db, credential_id)
-    cred_filter = lambda model: model.credential_id == cred.id
+    selected_profile_id = profile_id if profile_id is not None else cred.profile_id
+
+    def _scoped(model):
+        clauses = [model.credential_id == cred.id]
+        if hasattr(model, "profile_id"):
+            if selected_profile_id is not None:
+                clauses.append(model.profile_id == selected_profile_id)
+            else:
+                clauses.append(model.profile_id.is_(None))
+        return and_(*clauses)
 
     campaigns_total = (await db.execute(
-        select(func.count()).select_from(Campaign).where(cred_filter(Campaign))
+        select(func.count()).select_from(Campaign).where(_scoped(Campaign))
     )).scalar() or 0
     campaigns_enabled = (await db.execute(
         select(func.count()).select_from(Campaign).where(
-            cred_filter(Campaign), func.lower(Campaign.state) == "enabled"
+            _scoped(Campaign), func.lower(Campaign.state) == "enabled"
         )
     )).scalar() or 0
     campaigns_paused = (await db.execute(
         select(func.count()).select_from(Campaign).where(
-            cred_filter(Campaign), func.lower(Campaign.state) == "paused"
+            _scoped(Campaign), func.lower(Campaign.state) == "paused"
         )
     )).scalar() or 0
     ad_groups_total = (await db.execute(
-        select(func.count()).select_from(AdGroup).where(cred_filter(AdGroup))
+        select(func.count()).select_from(AdGroup).where(_scoped(AdGroup))
     )).scalar() or 0
     targets_total = (await db.execute(
-        select(func.count()).select_from(Target).where(cred_filter(Target))
+        select(func.count()).select_from(Target).where(_scoped(Target))
     )).scalar() or 0
     ads_total = (await db.execute(
-        select(func.count()).select_from(Ad).where(cred_filter(Ad))
+        select(func.count()).select_from(Ad).where(_scoped(Ad))
     )).scalar() or 0
 
     total_spend = (await db.execute(
-        select(func.sum(Campaign.spend)).where(cred_filter(Campaign))
+        select(func.sum(Campaign.spend)).where(_scoped(Campaign))
     )).scalar() or 0
     total_sales = (await db.execute(
-        select(func.sum(Campaign.sales)).where(cred_filter(Campaign))
+        select(func.sum(Campaign.sales)).where(_scoped(Campaign))
     )).scalar() or 0
 
     return {
+        "credential_id": str(cred.id),
+        "profile_id": selected_profile_id,
         "campaigns": {"total": campaigns_total, "enabled": campaigns_enabled, "paused": campaigns_paused},
         "ad_groups": {"total": ad_groups_total},
         "targets": {"total": targets_total},

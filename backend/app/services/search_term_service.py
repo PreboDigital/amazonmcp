@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.mcp_client import AmazonAdsMCP
 from app.models import SearchTermPerformance
+from app.utils import marketplace_today
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +33,11 @@ class SearchTermService:
         self,
         client: AmazonAdsMCP,
         advertiser_account_id: Optional[str] = None,
+        marketplace: Optional[str] = None,
     ):
         self.client = client
         self.advertiser_account_id = advertiser_account_id
+        self.marketplace = marketplace
         if advertiser_account_id:
             self.client.set_advertiser_account_id(advertiser_account_id)
 
@@ -59,11 +62,12 @@ class SearchTermService:
         Returns:
             dict with status, rows_stored, or _pending_report_id if still processing.
         """
-        # Default to last 30 days
         if not end_date:
-            end_date = date.today().isoformat()
+            end_date = marketplace_today(self.marketplace, self.client.region).isoformat()
         if not start_date:
-            start_date = (date.today() - timedelta(days=30)).isoformat()
+            start_date = (
+                marketplace_today(self.marketplace, self.client.region) - timedelta(days=30)
+            ).isoformat()
 
         try:
             report_ids = []
@@ -232,6 +236,17 @@ class SearchTermService:
             def _str(val):
                 return str(val) if val is not None else None
 
+            row_date = row.get("date")
+            if isinstance(row_date, str) and row_date.strip():
+                stored_date = row_date.strip()
+                row_time_unit = "DAILY"
+            else:
+                # Range-aggregate row — keep date as the range end so
+                # date-bound queries still find it; flag with time_unit so
+                # readers can filter daily vs aggregate explicitly.
+                stored_date = end_date
+                row_time_unit = "SUMMARY"
+
             stp = SearchTermPerformance(
                 credential_id=credential_id,
                 profile_id=profile_id,
@@ -245,7 +260,8 @@ class SearchTermService:
                 campaign_name=row.get("campaignName") or row.get("campaign_name"),
                 amazon_ad_group_id=_str(row.get("adGroupId") or row.get("ad_group_id")),
                 ad_group_name=row.get("adGroupName") or row.get("ad_group_name"),
-                date=row.get("date") or "SUMMARY",
+                date=stored_date,
+                time_unit=row_time_unit,
                 impressions=impressions,
                 clicks=clicks,
                 cost=cost,
