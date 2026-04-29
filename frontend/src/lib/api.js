@@ -682,6 +682,13 @@ export const cronApi = {
     const qs = params.toString()
     return request(`/cron/trigger/products${qs ? `?${qs}` : ''}`, { method: 'POST' })
   },
+  health: (opts = {}) => {
+    const params = new URLSearchParams()
+    if (opts.credentialId) params.set('credential_id', opts.credentialId)
+    if (opts.profileId) params.set('profile_id', opts.profileId)
+    const qs = params.toString()
+    return request(`/cron/health${qs ? `?${qs}` : ''}`)
+  },
   listSchedules: () => request('/cron/schedules'),
   createSchedule: (job, cron, opts = {}) =>
     request('/cron/schedules', {

@@ -1904,8 +1904,14 @@ async def _run_sync_background(
     credential_id: Optional[str],
     user_email: Optional[str],
     account_name: Optional[str],
+    profile_id_override: Optional[str] = None,
 ) -> None:
-    """Run sync in background, update SyncJob progress, send email on completion."""
+    """Run sync in background, update SyncJob progress, send email on completion.
+
+    ``profile_id_override`` lets cron / programmatic callers target a specific
+    profile on a multi-profile credential without depending on whichever
+    profile is currently marked default in the DB.
+    """
     from app.services.email_service import send_sync_complete_email
 
     async def on_progress(step: str, pct: int, s: dict) -> None:
@@ -1916,7 +1922,13 @@ async def _run_sync_background(
 
     async with async_session() as db:
         try:
-            result = await run_full_sync(db, credential_id, job_id=job_id, on_progress=on_progress)
+            result = await run_full_sync(
+                db,
+                credential_id,
+                job_id=job_id,
+                on_progress=on_progress,
+                profile_id_override=profile_id_override,
+            )
             await db.commit()
 
             # Mark completed
