@@ -25,6 +25,12 @@ from app.utils import marketplace_today
 
 logger = logging.getLogger(__name__)
 
+# Amazon v3 search-term reports often stay PENDING for several minutes (EU API,
+# wide date ranges, queue load). Shorter windows cause spurious timeouts while
+# the report would have completed shortly after.
+SEARCH_TERM_REPORT_POLL_MAX_WAIT_SEC = 420
+SEARCH_TERM_REPORT_POLL_INTERVAL_SEC = 10
+
 
 class SearchTermService:
     """Fetches and stores search term reports from Amazon Ads."""
@@ -49,13 +55,13 @@ class SearchTermService:
         end_date: str = None,
         ad_product: str = "SPONSORED_PRODUCTS",
         pending_report_id: str = None,
-        max_wait: int = 120,
+        max_wait: int = SEARCH_TERM_REPORT_POLL_MAX_WAIT_SEC,
         profile_id: Optional[str] = None,
     ) -> dict:
         """
         Full sync pipeline:
         1. Create (or resume) a search term report via MCP
-        2. Poll for completion
+        2. Poll for completion (default up to SEARCH_TERM_REPORT_POLL_MAX_WAIT_SEC)
         3. Download and parse GZIP_JSON data
         4. Store rows in SearchTermPerformance table
 
@@ -118,7 +124,9 @@ class SearchTermService:
 
             # Phase 3: Poll for completion using v3 API
             report_id = report_ids[0]
-            completed = await self._poll_report_v3(report_id, max_wait, interval=10)
+            completed = await self._poll_report_v3(
+                report_id, max_wait, interval=SEARCH_TERM_REPORT_POLL_INTERVAL_SEC
+            )
 
             status = self.client._get_report_status(completed)
             if status == "COMPLETED":
@@ -152,7 +160,10 @@ class SearchTermService:
             return {"status": "error", "message": str(e)}
 
     async def _poll_report_v3(
-        self, report_id: str, max_wait: int = 120, interval: int = 10
+        self,
+        report_id: str,
+        max_wait: int = SEARCH_TERM_REPORT_POLL_MAX_WAIT_SEC,
+        interval: int = SEARCH_TERM_REPORT_POLL_INTERVAL_SEC,
     ) -> dict:
         """Poll for search term report completion using v3 API."""
         import asyncio

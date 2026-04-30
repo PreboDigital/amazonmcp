@@ -1670,8 +1670,9 @@ async def sync_search_terms(
     """
     Trigger a search term report sync from Amazon Ads.
     Creates the report, polls for completion, downloads data, and stores it.
-    Reports can take 30-120+ seconds — if still processing, returns a
-    pending_report_id that can be passed on the next call to resume.
+    Amazon may keep the report in PENDING for several minutes; the server polls
+    for up to ~7 minutes per request. If still processing, returns
+    ``pending_report_id`` for the next call to resume.
     """
     cred = await _get_cred(db, payload.credential_id)
     cred_id = cred.id

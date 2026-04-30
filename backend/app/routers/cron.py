@@ -528,9 +528,9 @@ async def cron_search_terms(
 
     Idempotent: when SearchTermPerformance rows for the exact requested
     range were synced within :data:`DEFAULT_FRESHNESS_HOURS`, returns
-    ``status=skipped_fresh`` instead of creating another 60-120s Amazon
-    report. Avoids 4 redundant 30-day fetches/day on a ``every 6h ×
-    last_30_days`` schedule.
+    ``status=skipped_fresh`` instead of creating another long-running Amazon
+    report when data is already fresh. Reduces redundant 30-day pulls when
+    the schedule runs frequently (e.g. every 6h with a ``last_30_days`` range).
     """
     try:
         cred, selected_profile_id = await _get_cred_and_profile(db, credential_id, profile_id)
