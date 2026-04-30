@@ -20,6 +20,7 @@ from app.models import (
 from app.mcp_client import create_mcp_client, MCPError
 from app.services.account_scope import resolve_campaign_sync_scope
 from app.services.token_service import get_mcp_client_with_fresh_token
+from app.services.reporting_service import apply_targeting_performance_to_db_targets
 from app.utils import (
     parse_uuid,
     safe_error_detail,
@@ -638,6 +639,30 @@ async def list_targets(
                 db.add(target)
 
         await db.flush()
+
+        marketplace_for_reports: Optional[str] = None
+        if cred.profile_id:
+            mp_res = await db.execute(
+                select(Account.marketplace)
+                .where(
+                    Account.credential_id == cred.id,
+                    Account.profile_id == cred.profile_id,
+                )
+                .limit(1)
+            )
+            marketplace_for_reports = mp_res.scalar_one_or_none()
+        try:
+            await apply_targeting_performance_to_db_targets(
+                db,
+                cred.id,
+                client,
+                marketplace=marketplace_for_reports,
+                amazon_campaign_id=str(campaign_id) if campaign_id else None,
+                lookback_days=30,
+                max_wait=120,
+            )
+        except Exception as e:
+            logger.warning("Target report merge during list targets failed: %s", e)
 
         # Return from DB
         query = select(Target).where(Target.credential_id == cred.id)

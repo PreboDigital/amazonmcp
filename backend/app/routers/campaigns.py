@@ -24,7 +24,12 @@ from app.models import (
 )
 from app.services.account_scope import resolve_campaign_sync_scope
 from app.services.token_service import get_mcp_client_with_fresh_token
-from app.services.reporting_service import get_date_range, DATE_PRESETS, resolve_perf_date_source
+from app.services.reporting_service import (
+    get_date_range,
+    DATE_PRESETS,
+    resolve_perf_date_source,
+    apply_targeting_performance_to_db_targets,
+)
 from app.services.product_image_service import get_product_image_url
 from app.utils import (
     parse_uuid,
@@ -1818,6 +1823,32 @@ async def run_full_sync(
                 )
                 db.add(target)
             stats["targets"] += 1
+
+        await db.flush()
+        marketplace_for_reports: Optional[str] = None
+        if active_profile_id:
+            mp_res = await db.execute(
+                select(Account.marketplace)
+                .where(
+                    Account.credential_id == cred.id,
+                    Account.profile_id == active_profile_id,
+                )
+                .limit(1)
+            )
+            marketplace_for_reports = mp_res.scalar_one_or_none()
+        try:
+            perf_merge = await apply_targeting_performance_to_db_targets(
+                db,
+                cred.id,
+                client,
+                marketplace=marketplace_for_reports,
+                amazon_campaign_id=None,
+                lookback_days=30,
+                max_wait=120,
+            )
+            stats["target_report_merge"] = perf_merge
+        except Exception as e:
+            logger.warning("Target report merge during full sync failed: %s", e)
 
         await _progress("Syncing ads...", 85, stats)
         # 4. Sync ads

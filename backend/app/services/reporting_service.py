@@ -16,7 +16,7 @@ import httpx
 from app.mcp_client import AmazonAdsMCP
 from app.models import (
     CampaignPerformanceDaily, AccountPerformanceDaily,
-    Campaign, Credential,
+    Campaign, Credential, Target,
 )
 from app.utils import marketplace_today, normalize_amazon_date, normalize_state_value
 
@@ -1220,10 +1220,20 @@ class ReportingService:
                 row.get("purchases7d") or row.get("purchases14d")
                 or row.get("purchases") or row.get("metric.purchases") or 0
             )
+            impressions = int(
+                row.get("impressions") or row.get("metric.impressions") or 0
+            )
             agg = out.setdefault(
                 tid,
-                {"clicks": 0, "spend": 0.0, "sales": 0.0, "orders": 0},
+                {
+                    "impressions": 0,
+                    "clicks": 0,
+                    "spend": 0.0,
+                    "sales": 0.0,
+                    "orders": 0,
+                },
             )
+            agg["impressions"] += impressions
             agg["clicks"] += clicks
             agg["spend"] += spend
             agg["sales"] += sales
@@ -1341,12 +1351,14 @@ class ReportingService:
                 prev = combined.get(tid)
                 if not prev:
                     combined[tid] = {
+                        "impressions": metrics["impressions"],
                         "clicks": metrics["clicks"],
                         "spend": metrics["spend"],
                         "sales": metrics["sales"],
                         "orders": metrics["orders"],
                     }
                 else:
+                    prev["impressions"] += metrics["impressions"]
                     prev["clicks"] += metrics["clicks"]
                     prev["spend"] += metrics["spend"]
                     prev["sales"] += metrics["sales"]
@@ -1703,3 +1715,88 @@ class ReportingService:
             row["top_of_search_impression_share"] = round(weighted_sum / den, 2) if den > 0 else None
             aggregated.append(row)
         return enrich_campaigns(aggregated)
+
+
+def targeting_perf_acos(spend: float, sales: float) -> Optional[float]:
+    if sales and sales > 0:
+        return round((spend / sales) * 100.0, 4)
+    return None
+
+
+async def apply_targeting_performance_to_db_targets(
+    db: AsyncSession,
+    credential_id: uuid.UUID,
+    client: AmazonAdsMCP,
+    *,
+    marketplace: Optional[str] = None,
+    amazon_campaign_id: Optional[str] = None,
+    lookback_days: int = 30,
+    max_wait: int = 120,
+) -> dict:
+    """
+    Pull SP/SB/SD targeting reports and merge impressions/clicks/spend/sales/orders
+    onto cached ``Target`` rows (keyed by ``amazon_target_id``).
+
+    If ``amazon_campaign_id`` is set, only targets in that campaign are updated;
+    targets missing from the report get zeroed perf for the window.
+
+    If the report pipeline returns no keyed rows (empty dict), existing perf
+    columns are left unchanged so a failed/empty fetch does not wipe the cache.
+    """
+    adv = getattr(client, "advertiser_account_id", None)
+    if not adv:
+        return {"skipped": True, "reason": "no_advertiser_account_id", "updated": 0}
+
+    lb = max(1, min(int(lookback_days or 30), 90))
+    today = marketplace_today(marketplace, getattr(client, "region", None))
+    end = today.isoformat()
+    start = (today - timedelta(days=lb)).isoformat()
+
+    report_svc = ReportingService(client, advertiser_account_id=adv)
+    try:
+        metrics = await report_svc.generate_mcp_targeting_performance(
+            start, end, max_wait=max_wait
+        )
+    except Exception as e:
+        logger.warning("Targeting performance fetch for DB targets failed: %s", e)
+        return {"skipped": True, "reason": "fetch_error", "error": str(e), "updated": 0}
+
+    if not metrics:
+        return {
+            "skipped": False,
+            "metric_keys": 0,
+            "updated": 0,
+            "note": "empty_metrics_unchanged",
+            "date_range": {"start": start, "end": end},
+        }
+
+    q = select(Target).where(Target.credential_id == credential_id)
+    if amazon_campaign_id:
+        q = q.where(Target.amazon_campaign_id == str(amazon_campaign_id))
+
+    result = await db.execute(q)
+    targets = result.scalars().all()
+    updated = 0
+    for t in targets:
+        row = metrics.get(t.amazon_target_id)
+        if row:
+            t.impressions = int(row.get("impressions", 0))
+            t.clicks = int(row["clicks"])
+            t.spend = float(row["spend"])
+            t.sales = float(row["sales"])
+            t.orders = int(row["orders"])
+            t.acos = targeting_perf_acos(t.spend, t.sales)
+        else:
+            t.impressions = 0
+            t.clicks = 0
+            t.spend = 0.0
+            t.sales = 0.0
+            t.orders = 0
+            t.acos = None
+        updated += 1
+    await db.flush()
+    return {
+        "metric_keys": len(metrics),
+        "updated": updated,
+        "date_range": {"start": start, "end": end},
+    }

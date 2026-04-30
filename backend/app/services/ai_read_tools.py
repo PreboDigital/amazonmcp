@@ -136,8 +136,11 @@ _READ_TOOLS: list[dict[str, Any]] = [
             "Search the locally synced search-term-report cache. Customer search "
             "queries with full per-term metrics. Use for 'what did customers actually "
             "search for?' / 'wasted search terms' / 'terms to harvest as keywords'. "
-            "If the date range is outside what's cached the result will say so — "
-            "then call _request_sync(kind=search_terms)."
+            "Also the most reliable source of per-keyword spend/clicks/sales — the "
+            "``targets`` cache often has zero metrics on keyword/product targets "
+            "(sync limitation), so when ``db_query_targets`` returns rows with all-"
+            "zero perf, fall back here. If the date range is outside what's cached "
+            "the result will say so — then call ``_request_sync(kind=search_terms)``."
         ),
         "parameters": {
             "type": "object",
@@ -145,6 +148,7 @@ _READ_TOOLS: list[dict[str, Any]] = [
                 "start_date": {**_STRING, "description": "ISO date YYYY-MM-DD. Required."},
                 "end_date": {**_STRING, "description": "ISO date YYYY-MM-DD. Required."},
                 "campaign_id": _STRING,
+                "ad_group_id": {**_STRING, "description": "Filter to a single ad group's search terms."},
                 "term_search": {**_STRING, "description": "Substring match on search_term text."},
                 "non_converting": _BOOL,
                 "high_acos": _BOOL,
@@ -462,13 +466,96 @@ async def _exec_db_query_targets(
     q = q.limit(limit)
 
     rows = (await db.execute(q)).scalars().all()
-    return {
+
+    # Enrich each target with rolled-up search-term metrics. The
+    # ``targets`` cache config-only path leaves ``bid``/``spend``/
+    # ``clicks``/``sales`` as NULL/0 for many accounts (the targeting-
+    # report sync isn't always wired). The same data — at higher
+    # fidelity — lives in ``search_term_performance`` keyed by
+    # ``keyword_id`` (= Amazon ``targetId``). Rolling that in lets the
+    # AI answer "what's the CPC?" / "is this wasting spend?" without
+    # asking the user to re-sync. Surfaced as ``perf_from_search_terms``
+    # so the AI can prefer it when the native columns are empty.
+    perf_by_target: dict[str, dict] = {}
+    target_ids = [str(t.amazon_target_id) for t in rows if t.amazon_target_id]
+    if target_ids:
+        from sqlalchemy import func as _func
+        st_q = (
+            select(
+                SearchTermPerformance.keyword_id.label("kid"),
+                _func.sum(SearchTermPerformance.clicks).label("clicks"),
+                _func.sum(SearchTermPerformance.cost).label("spend"),
+                _func.sum(SearchTermPerformance.purchases).label("orders"),
+                _func.sum(SearchTermPerformance.sales).label("sales"),
+            )
+            .where(
+                SearchTermPerformance.credential_id == cred.id,
+                SearchTermPerformance.keyword_id.in_(target_ids),
+            )
+            .group_by(SearchTermPerformance.keyword_id)
+        )
+        st_q = _scope_profile(st_q, SearchTermPerformance, cred.profile_id)
+        for r in (await db.execute(st_q)).all():
+            spend = float(r.spend or 0)
+            clicks = int(r.clicks or 0)
+            sales = float(r.sales or 0)
+            orders = int(r.orders or 0)
+            acos = (spend / sales * 100) if sales > 0 else None
+            cpc = (spend / clicks) if clicks > 0 else None
+            perf_by_target[str(r.kid)] = {
+                "clicks": clicks,
+                "spend": round(spend, 2),
+                "orders": orders,
+                "sales": round(sales, 2),
+                "acos": round(acos, 2) if acos is not None else None,
+                "cpc": round(cpc, 2) if cpc is not None else None,
+            }
+
+    enriched: list[dict] = []
+    cache_zero_perf_rows = 0
+    for t in rows:
+        d = _target_dict(t)
+        st_perf = perf_by_target.get(str(t.amazon_target_id))
+        if st_perf:
+            d["perf_from_search_terms"] = st_perf
+        cache_clicks = int(t.clicks or 0)
+        cache_spend = float(t.spend or 0)
+        if cache_clicks == 0 and cache_spend == 0:
+            cache_zero_perf_rows += 1
+        enriched.append(d)
+
+    payload: dict = {
         "source": "db",
         "table": "targets",
         "filters": {k: v for k, v in args.items() if v is not None},
         "count": len(rows),
-        "rows": [_target_dict(t) for t in rows],
+        "rows": enriched,
     }
+    # Hint when the targets cache is missing perf for this scope. The
+    # search-term roll-up above already filled gaps per row when the
+    # ``keyword_id`` linked back, but if even that came up empty
+    # (e.g. ad group has no targets cached at all, or the targets'
+    # ``keyword_id`` is missing in search_term_performance), point the
+    # AI at ``db_query_search_terms(ad_group_id=..., start_date=...,
+    # end_date=...)`` for the ground-truth roll-up.
+    if rows and cache_zero_perf_rows == len(rows):
+        payload["hint"] = (
+            "Every target row has zero clicks/spend in the targets "
+            "cache. The targeting-report sync may be incomplete for "
+            "this account. Use db_query_search_terms with the same "
+            "ad_group_id (or campaign_id) over a recent date range "
+            "(e.g. last 30 days) to get the real per-keyword "
+            "spend/clicks/sales numbers before recommending a bid."
+        )
+    elif not rows and (args.get("ad_group_id") or args.get("campaign_id")):
+        payload["hint"] = (
+            "No targets cached for this scope. Likely a sync gap — "
+            "use db_query_search_terms with the same ad_group_id / "
+            "campaign_id over the last 30 days to read perf, or call "
+            "_request_sync(kind='campaigns') to refresh the targets "
+            "cache before retrying."
+        )
+    return payload
 
 
 async def _exec_db_query_search_terms(
@@ -490,6 +577,8 @@ async def _exec_db_query_search_terms(
     ))
     if args.get("campaign_id"):
         q = q.where(SearchTermPerformance.amazon_campaign_id == args["campaign_id"])
+    if args.get("ad_group_id"):
+        q = q.where(SearchTermPerformance.amazon_ad_group_id == args["ad_group_id"])
     if args.get("term_search"):
         q = q.where(SearchTermPerformance.search_term.ilike(f"%{args['term_search']}%"))
     if args.get("non_converting"):
