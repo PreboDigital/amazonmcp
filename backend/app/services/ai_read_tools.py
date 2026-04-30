@@ -382,11 +382,12 @@ async def _exec_db_query_ad_groups(
         q = q.where(AdGroup.amazon_campaign_id == args["campaign_id"])
     if args.get("state"):
         q = q.where(AdGroup.state == args["state"])
-    if args.get("name_search"):
-        q = q.where(AdGroup.ad_group_name.ilike(f"%{args['name_search']}%"))
+    name_search = args.get("name_search")
+    if name_search:
+        q = q.where(AdGroup.ad_group_name.ilike(f"%{name_search}%"))
     q = q.limit(limit)
     rows = (await db.execute(q)).scalars().all()
-    return {
+    payload = {
         "source": "db",
         "table": "ad_groups",
         "count": len(rows),
@@ -401,6 +402,24 @@ async def _exec_db_query_ad_groups(
             for ag in rows
         ],
     }
+    # Recovery hint when a name lookup misses. The AI tends to give up on
+    # an empty ad_groups response — but the user phrase often refers to
+    # the *campaign* suffix (e.g. "Product & KW Targeting" is the
+    # campaign name's tail, not an ad-group name). Tell the model the
+    # exact next-step tool calls right next to the empty result so it
+    # can't claim the prompt rule was unclear.
+    if not rows and name_search and not args.get("campaign_id"):
+        payload["hint"] = (
+            f"No ad groups match name_search={name_search!r}. The phrase "
+            "may be a campaign-name suffix rather than an ad-group name. "
+            "Required next step before replying to the user: call "
+            f"db_query_campaigns(name_search={name_search!r}) and then "
+            "db_query_ad_groups(campaign_id=<each campaign id>) to "
+            "enumerate the actual ad groups inside the matching "
+            "campaign(s). Present those results to the user as a table "
+            "and ask which one they meant."
+        )
+    return payload
 
 
 async def _exec_db_query_targets(
