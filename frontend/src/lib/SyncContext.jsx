@@ -34,12 +34,14 @@ export function SyncProvider({ children }) {
     completedAt: null,
   })
 
-  // Report search terms sync
+  // Report search terms sync (syncStart/End must match the Amazon report request + _store_rows keys)
   const [reportSearchTermsSync, setReportSearchTermsSync] = useState({
     pendingReportId: null,
     status: null, // 'running' | 'completed' | 'failed'
     credentialId: null,
     profileId: null,
+    syncStartDate: null,
+    syncEndDate: null,
     error: null,
     completedAt: null,
   })
@@ -188,13 +190,19 @@ export function SyncProvider({ children }) {
   }, [campaignSync.status, campaignSync.jobId, notifySuccess, notifyError, showBrowserNotification])
 
   // ── Report search terms sync ────────────────────────────────────────
-  const startReportSearchTermsSync = useCallback(async (credentialId, profileId = null, pendingReportId = null) => {
+  const startReportSearchTermsSync = useCallback(async (credentialId, profileId = null, pendingReportId = null, range = null) => {
     if (reportSearchTermsSync.status === 'running') return
+    const fromRange =
+      range && range.startDate && range.endDate
+        ? { startDate: range.startDate, endDate: range.endDate }
+        : {}
     setReportSearchTermsSync({
       pendingReportId: pendingReportId || null,
       status: 'running',
       credentialId,
       profileId,
+      syncStartDate: fromRange.startDate ?? null,
+      syncEndDate: fromRange.endDate ?? null,
       error: null,
       completedAt: null,
     })
@@ -203,6 +211,7 @@ export function SyncProvider({ children }) {
     try {
       const result = await reports.searchTermSync(credentialId, {
         pendingReportId: pendingReportId || undefined,
+        ...(fromRange.startDate && fromRange.endDate ? fromRange : {}),
       })
       if (result.status === 'completed') {
         setReportSearchTermsSync(prev => ({
@@ -246,6 +255,8 @@ export function SyncProvider({ children }) {
       status: null,
       credentialId: null,
       profileId: null,
+      syncStartDate: null,
+      syncEndDate: null,
       error: null,
       completedAt: null,
     })
@@ -257,8 +268,10 @@ export function SyncProvider({ children }) {
 
     const poll = async () => {
       try {
+        const { syncStartDate, syncEndDate } = reportSearchTermsSync
         const result = await reports.searchTermSync(reportSearchTermsSync.credentialId, {
           pendingReportId: reportSearchTermsSync.pendingReportId,
+          ...(syncStartDate && syncEndDate ? { startDate: syncStartDate, endDate: syncEndDate } : {}),
         })
         if (result.status === 'completed') {
           setReportSearchTermsSync(prev => ({
@@ -299,7 +312,16 @@ export function SyncProvider({ children }) {
     return () => {
       if (reportStPollRef.current) clearTimeout(reportStPollRef.current)
     }
-  }, [reportSearchTermsSync.status, reportSearchTermsSync.pendingReportId, reportSearchTermsSync.credentialId, notifySuccess, notifyError, showBrowserNotification])
+  }, [
+    reportSearchTermsSync.status,
+    reportSearchTermsSync.pendingReportId,
+    reportSearchTermsSync.credentialId,
+    reportSearchTermsSync.syncStartDate,
+    reportSearchTermsSync.syncEndDate,
+    notifySuccess,
+    notifyError,
+    showBrowserNotification,
+  ])
 
   // ── Product report sync ────────────────────────────────────────────
   const startProductReportSync = useCallback(async (credentialId, profileId = null, opts = {}, pendingReportId = null) => {

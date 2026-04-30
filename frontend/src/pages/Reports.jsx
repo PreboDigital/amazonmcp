@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import {
   BarChart3,
   TrendingUp,
@@ -626,12 +626,8 @@ function SearchTermsSection({ accountId, syncing, data, error, filter, onSync, o
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [exportMenuOpen])
 
-  // Load actual search term rows on first expand or filter/date change
-  useEffect(() => {
-    if (expanded && accountId) loadTerms()
-  }, [expanded, accountId, filter, dateRange?.start, dateRange?.end])
-
-  async function loadTerms() {
+  const loadTerms = useCallback(async () => {
+    if (!accountId) return
     setStLoading(true)
     try {
       const opts = {
@@ -656,7 +652,13 @@ function SearchTermsSection({ accountId, syncing, data, error, filter, onSync, o
     } finally {
       setStLoading(false)
     }
-  }
+  }, [accountId, dateRange?.start, dateRange?.end, filter])
+
+  // Reload rows when summary updates (e.g. after sync) — previously only
+  // date/filter/expand changed, so the table stayed empty until full refresh.
+  useEffect(() => {
+    if (expanded && accountId) loadTerms()
+  }, [expanded, accountId, loadTerms, data?.total, data?.has_data])
 
   const filtered = useMemo(() => {
     if (!stTerms) return []
@@ -759,7 +761,12 @@ function SearchTermsSection({ accountId, syncing, data, error, filter, onSync, o
               <Database size={36} className="mx-auto text-slate-200 mb-3" />
               <p className="text-sm font-medium text-slate-600">No search term data synced yet</p>
               <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto">
-                Click "Sync Search Terms" to pull the last 30 days of search term reports from Amazon Ads.
+                Click &quot;Sync Search Terms&quot; to pull search term data from Amazon Ads for{' '}
+                <span className="font-medium text-slate-500">{dateRange?.start}</span>
+                {' '}–{' '}
+                <span className="font-medium text-slate-500">{dateRange?.end}</span>
+                {dateRange?.label ? ` (${dateRange.label})` : ''}
+                {' '}— same window as the date range picker at the top of Reports.
                 This shows the actual customer queries that triggered your ads.
               </p>
               <button
@@ -1418,7 +1425,10 @@ export default function Reports() {
   }
 
   function syncSearchTerms() {
-    startReportSearchTermsSync(activeAccountId, activeProfileId, reportSearchTermsSync.pendingReportId)
+    startReportSearchTermsSync(activeAccountId, activeProfileId, reportSearchTermsSync.pendingReportId, {
+      startDate: dateRange.start,
+      endDate: dateRange.end,
+    })
   }
 
   async function syncProducts(pendingId = null) {
