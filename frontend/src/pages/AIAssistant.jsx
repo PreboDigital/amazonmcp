@@ -487,11 +487,24 @@ export default function AIAssistant() {
         content: result.message,
         timestamp: new Date().toISOString(),
         actions: result.actions || [],
+        rejectedActions: result.rejected_actions || [],
+        rejectedMessage: result.rejected_message || null,
       }
       setMessages(prev => [...prev, assistantMsg])
       if (result.queued_count > 0) {
         setSuccessMsg(result.queued_message || `${result.queued_count} change(s) sent to Approval Queue`)
         setTimeout(() => setSuccessMsg(null), 6000)
+      }
+      if (result.rejected_actions?.length) {
+        const reasons = result.rejected_actions
+          .map((r) => r.error)
+          .filter(Boolean)
+          .join('; ')
+        setError(
+          `${result.rejected_actions.length} AI action(s) rejected before queuing${
+            reasons ? `: ${reasons}` : ''
+          }`,
+        )
       }
     } catch (err) {
       setError(err.message)
@@ -935,6 +948,23 @@ export default function AIAssistant() {
                             })}
                           </div>
                         )}
+                        {(() => {
+                          const rejected = msg.rejectedActions || msg.rejected_actions || []
+                          if (!rejected.length) return null
+                          return (
+                            <div className="mt-3 pt-3 border-t border-amber-100 space-y-1.5 bg-amber-50/40 -mx-4 -mb-3 px-4 pb-3 rounded-b-2xl">
+                              <div className="text-xs font-medium text-amber-800">
+                                {rejected.length} suggested change(s) blocked before apply
+                              </div>
+                              {rejected.map((r, rIdx) => (
+                                <div key={rIdx} className="text-xs text-amber-900/80">
+                                  <span className="font-medium">{r.label || r.tool || 'action'}:</span>{' '}
+                                  <span className="text-amber-900/70">{r.error || 'invalid'}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )
+                        })()}
                       </>
                     )}
                   </div>

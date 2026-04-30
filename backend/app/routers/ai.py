@@ -854,12 +854,35 @@ async def ai_chat(payload: ChatRequest, db: AsyncSession = Depends(get_db)):
     # Update conversation (store actions for UI display).
     # Append to the *live tail* (conversation.messages), NOT the prompt-ready
     # history — the latter may include a synthetic head_summary system turn.
+    # Persist ONLY the *accepted* inline actions so reloaded conversations
+    # don't render orphan "Apply" chips for rows the validator rejected.
+    # Rejection metadata is kept under ``rejected_actions`` so the UI can
+    # still show the warning banner on history reload.
     now = utcnow().isoformat()
     live_tail = list(conversation.messages or [])
     live_tail.append({"role": "user", "content": payload.message, "timestamp": now})
     assistant_msg = {"role": "assistant", "content": result["message"], "timestamp": now}
-    if actions:
-        assistant_msg["actions"] = actions
+    if inline_actions:
+        assistant_msg["actions"] = inline_actions
+    if rejected_actions:
+        assistant_msg["rejected_actions"] = [
+            {
+                "label": (r["action"] or {}).get("label"),
+                "tool": r.get("tool"),
+                "error": r.get("error"),
+            }
+            for r in rejected_actions
+        ]
+    if sync_requests:
+        assistant_msg["sync_requests"] = [
+            {
+                "kind": (a.get("arguments") or {}).get("kind"),
+                "range_preset": (a.get("arguments") or {}).get("range_preset"),
+                "label": a.get("label"),
+                "reason": a.get("reason"),
+            }
+            for a in sync_requests
+        ]
     live_tail.append(assistant_msg)
     conversation.messages = live_tail
     conversation.updated_at = utcnow()

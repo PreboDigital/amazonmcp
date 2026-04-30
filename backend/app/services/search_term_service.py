@@ -20,7 +20,7 @@ from sqlalchemy import and_, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.mcp_client import AmazonAdsMCP
-from app.models import SearchTermPerformance
+from app.models import AdGroup, SearchTermPerformance, Target
 from app.utils import marketplace_today
 
 logger = logging.getLogger(__name__)
@@ -410,7 +410,49 @@ async def get_search_term_summary(
     non_converting = [t for t in all_terms if (t.clicks or 0) > 0 and (t.purchases or 0) == 0]
     high_acos = [t for t in all_terms if (t.acos or 0) > 50 and (t.cost or 0) > 0]
 
+    # Enrich each search-term row so the AI can emit valid mutations:
+    #   - target_id + current_bid → update_target_bid (per-keyword cuts)
+    #   - ad_group_id + ad_group_default_bid → update_ad_group fallback
+    #     when search term came from an auto / product-targeting ad group
+    #     (no matching keyword target exists).
+    # Without these, the AI emits `bid: 0.0` for relative changes and the
+    # action validator rejects every row. See ai_action_validator MIN_BID.
+    keyword_ids = {t.keyword_id for t in all_terms if t.keyword_id}
+    target_lookup: dict[str, tuple[str, Optional[float], Optional[str]]] = {}
+    if keyword_ids:
+        tq = select(
+            Target.amazon_target_id,
+            Target.bid,
+            Target.state,
+        ).where(
+            Target.credential_id == credential_id,
+            Target.amazon_target_id.in_(keyword_ids),
+        )
+        tres = await db.execute(tq)
+        for tid, bid, state in tres.all():
+            target_lookup[str(tid)] = (str(tid), bid, state)
+
+    ag_ids = {t.amazon_ad_group_id for t in all_terms if t.amazon_ad_group_id}
+    ag_lookup: dict[str, tuple[str, Optional[float]]] = {}
+    if ag_ids:
+        agq = select(
+            AdGroup.amazon_ad_group_id,
+            AdGroup.default_bid,
+        ).where(
+            AdGroup.credential_id == credential_id,
+            AdGroup.amazon_ad_group_id.in_(ag_ids),
+        )
+        agres = await db.execute(agq)
+        for agid, dbid in agres.all():
+            ag_lookup[str(agid)] = (str(agid), dbid)
+
     def _term_dict(t):
+        target_id, current_bid, target_state = (None, None, None)
+        if t.keyword_id and str(t.keyword_id) in target_lookup:
+            target_id, current_bid, target_state = target_lookup[str(t.keyword_id)]
+        ad_group_id, ad_group_default_bid = (None, None)
+        if t.amazon_ad_group_id and str(t.amazon_ad_group_id) in ag_lookup:
+            ad_group_id, ad_group_default_bid = ag_lookup[str(t.amazon_ad_group_id)]
         return {
             "search_term": t.search_term,
             "keyword": t.keyword,
@@ -418,6 +460,12 @@ async def get_search_term_summary(
             "keyword_type": t.keyword_type,
             "campaign_name": t.campaign_name,
             "ad_group_name": t.ad_group_name,
+            "campaign_id": t.amazon_campaign_id,
+            "ad_group_id": ad_group_id,
+            "ad_group_default_bid": ad_group_default_bid,
+            "target_id": target_id,
+            "current_bid": current_bid,
+            "target_state": target_state,
             "impressions": t.impressions or 0,
             "clicks": t.clicks or 0,
             "cost": t.cost or 0,

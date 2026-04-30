@@ -600,6 +600,22 @@ async def _validate_harvest_args(
             return "harvest: target_campaign_id is required when target_mode='existing'", warnings
         if not await _campaign_exists(db, cred.id, profile_id, str(target_id)):
             return f"harvest: target campaign {target_id} not found — sync campaigns first", warnings
+        # Amazon SP keywords/targets live on an ad group, not a campaign.
+        # Require the caller to pin the exact ad group instead of letting
+        # the harvester pick the first ad group it finds at run-time
+        # (which silently lands keywords in product-targeting groups when
+        # the campaign mixes ad-group types).
+        target_ag_id = args.get("target_ad_group_id")
+        if not target_ag_id:
+            return (
+                "harvest: target_ad_group_id is required when target_mode='existing'",
+                warnings,
+            )
+        if not await _ad_group_exists(db, cred.id, str(target_ag_id)):
+            return (
+                f"harvest: target ad group {target_ag_id} not found — sync ad groups first",
+                warnings,
+            )
 
     match_type = args.get("match_type")
     if match_type is not None and _coerce_match_type(match_type) is None:

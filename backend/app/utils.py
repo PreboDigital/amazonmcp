@@ -357,6 +357,37 @@ def extract_mcp_error(result: Any) -> Optional[str]:
     if status in ("FAILED", "FAILURE", "ERROR", "CANCELLED"):
         return str(result.get("message") or status)[:500]
 
+    # Amazon SP/SB v2 multi-status: each entity container often embeds a
+    # ``success`` AND an ``error`` array. The top-level can return 200 OK
+    # while every individual row in ``targets.error`` was rejected. Catch
+    # those so a "200 OK with all-rows-failed" gets surfaced as failure.
+    for entity_key in (
+        "campaigns",
+        "adGroups",
+        "ads",
+        "targets",
+        "keywords",
+        "productAds",
+        "negativeKeywords",
+        "negativeTargets",
+        "campaignNegativeKeywords",
+        "campaignNegativeTargets",
+    ):
+        bucket = result.get(entity_key)
+        if isinstance(bucket, dict):
+            for ek in ("error", "errors", "errorResults", "failure", "failureResults"):
+                err_list = bucket.get(ek)
+                if isinstance(err_list, list) and err_list:
+                    return str(err_list)[:500]
+                if isinstance(err_list, dict) and err_list:
+                    return str(err_list)[:500]
+
+    # SP/SB v2 top-level multi-status: {"successResults": [...], "errorResults": [...]}
+    for k in ("errorResults", "failureResults", "failedResults"):
+        val = result.get(k)
+        if isinstance(val, list) and val:
+            return str(val)[:500]
+
     # Recurse into common nested payloads
     for key in ("result", "results", "success", "data", "items"):
         nested = result.get(key)

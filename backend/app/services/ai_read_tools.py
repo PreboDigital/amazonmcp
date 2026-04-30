@@ -507,29 +507,72 @@ async def _exec_db_query_search_terms(
                 "range_preset to fetch this window."
             ),
         }
+
+    # Enrich with target / ad-group bid info so a subsequent
+    # update_target_bid / update_ad_group call can be emitted directly
+    # from this tool result without another lookup hop.
+    keyword_ids = {r.keyword_id for r in rows if r.keyword_id}
+    target_lookup: dict[str, tuple[Optional[float], Optional[str]]] = {}
+    if keyword_ids:
+        tres = await db.execute(
+            select(Target.amazon_target_id, Target.bid, Target.state).where(
+                Target.credential_id == cred.id,
+                Target.amazon_target_id.in_(keyword_ids),
+            )
+        )
+        for tid, bid, state in tres.all():
+            target_lookup[str(tid)] = (bid, state)
+
+    ag_ids = {r.amazon_ad_group_id for r in rows if r.amazon_ad_group_id}
+    ag_lookup: dict[str, Optional[float]] = {}
+    if ag_ids:
+        agres = await db.execute(
+            select(AdGroup.amazon_ad_group_id, AdGroup.default_bid).where(
+                AdGroup.credential_id == cred.id,
+                AdGroup.amazon_ad_group_id.in_(ag_ids),
+            )
+        )
+        for agid, dbid in agres.all():
+            ag_lookup[str(agid)] = dbid
+
+    enriched_rows: list[dict] = []
+    for st in rows:
+        target_bid, target_state = (None, None)
+        if st.keyword_id and str(st.keyword_id) in target_lookup:
+            target_bid, target_state = target_lookup[str(st.keyword_id)]
+        ag_default_bid = (
+            ag_lookup.get(str(st.amazon_ad_group_id))
+            if st.amazon_ad_group_id
+            else None
+        )
+        enriched_rows.append({
+            "date": st.date,
+            "search_term": st.search_term,
+            "campaign_id": st.amazon_campaign_id,
+            "campaign_name": st.campaign_name,
+            "ad_group_id": st.amazon_ad_group_id,
+            "ad_group_name": st.ad_group_name,
+            "ad_group_default_bid": ag_default_bid,
+            "keyword": st.keyword,
+            "keyword_id": st.keyword_id,
+            "target_id": st.keyword_id if st.keyword_id and str(st.keyword_id) in target_lookup else None,
+            "current_bid": target_bid,
+            "target_state": target_state,
+            "match_type": st.match_type,
+            "impressions": st.impressions,
+            "clicks": st.clicks,
+            "cost": st.cost,
+            "sales": st.sales,
+            "purchases": st.purchases,
+            "acos": st.acos,
+        })
+
     return {
         "source": "db",
         "table": "search_terms",
         "date_range": f"{start_date}..{end_date}",
         "count": len(rows),
-        "rows": [
-            {
-                "date": st.date,
-                "search_term": st.search_term,
-                "campaign_id": st.amazon_campaign_id,
-                "campaign_name": st.campaign_name,
-                "ad_group_id": st.amazon_ad_group_id,
-                "keyword": st.keyword,
-                "match_type": st.match_type,
-                "impressions": st.impressions,
-                "clicks": st.clicks,
-                "cost": st.cost,
-                "sales": st.sales,
-                "purchases": st.purchases,
-                "acos": st.acos,
-            }
-            for st in rows
-        ],
+        "rows": enriched_rows,
     }
 
 

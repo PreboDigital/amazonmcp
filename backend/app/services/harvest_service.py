@@ -169,28 +169,30 @@ class HarvestService:
                     "message": "No keywords met the harvest thresholds.",
                 }
 
-            # Step 3: If no ad group specified, find first ad group in target campaign
-            if not target_ad_group_id:
-                ad_groups_result = await self.client.query_ad_groups(campaign_id=target_campaign_id)
-                ad_group_list = []
-                if isinstance(ad_groups_result, dict):
-                    for key in ["adGroups", "result", "results", "items"]:
-                        if key in ad_groups_result and isinstance(ad_groups_result[key], list):
-                            ad_group_list = ad_groups_result[key]
-                            break
-                if ad_group_list:
-                    target_ad_group_id = (
-                        ad_group_list[0].get("adGroupId")
-                        or ad_group_list[0].get("id")
-                    )
-
+            # Step 3: An explicit ad-group id is mandatory.
+            #
+            # The legacy fallback used to call ``query_ad_groups`` and grab
+            # ``adGroups[0]``, which silently dumped harvested keywords
+            # into whichever ad group came back first — including
+            # product-targeting ad groups that Amazon then rejected, and
+            # the wrong ad group when a manual campaign held several.
+            # The ``ai_action_validator`` and harvester UI both now
+            # require ``target_ad_group_id``, so any caller that reaches
+            # this branch without one is a bug — fail loud instead of
+            # guessing.
             if not target_ad_group_id:
                 return {
                     "status": "error",
                     "mode": "existing_campaign",
                     "source_campaign_id": source_campaign_id,
                     "target_campaign_id": target_campaign_id,
-                    "error": "No ad group found in the target manual campaign. Create an ad group first.",
+                    "error": (
+                        "target_ad_group_id is required for harvest "
+                        "target_mode='existing'. Edit the harvest rule "
+                        "and pick the exact ad group that should receive "
+                        "the harvested keywords (Amazon SP keywords "
+                        "belong to an ad group, not a campaign)."
+                    ),
                 }
 
             # Step 4: Add keywords as targets to the existing manual campaign

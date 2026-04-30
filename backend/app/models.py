@@ -468,6 +468,14 @@ class HarvestConfig(Base):
     target_mode: Mapped[str] = mapped_column(String(50), default="new")  # "new" or "existing"
     # Target campaign detail: {amazon_campaign_id, campaign_name} when targeting existing campaign
     target_campaign_selection: Mapped[dict] = mapped_column(JSON, nullable=True)
+    # Per Amazon SP API the keyword/target *belongs* to an ad group, not a
+    # campaign. When ``target_mode == "existing"`` the user must pick the
+    # ad group inside the chosen manual campaign so harvested keywords
+    # land in the right targeting bucket (an SP campaign can hold ad
+    # groups that mix keyword vs product targeting; auto-picking the
+    # first one Amazon returns silently lands keywords in the wrong group).
+    target_ad_group_id: Mapped[str] = mapped_column(String(255), nullable=True)
+    target_ad_group_name: Mapped[str] = mapped_column(String(255), nullable=True)
     # Negative keyword handling
     negate_in_source: Mapped[bool] = mapped_column(Boolean, default=True)
     sales_threshold: Mapped[float] = mapped_column(Float, default=1.0)

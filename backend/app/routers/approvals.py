@@ -18,6 +18,7 @@ from app.mcp_client import create_mcp_client
 from app.services.token_service import get_mcp_client_with_fresh_token
 from app.services.harvest_service import HarvestService
 from app.services.campaign_creation_service import CampaignCreationService
+from app.services.ai_action_validator import validate_ai_action
 from app.services.mutation_aftercare import (
     build_aftercare,
     verify_mutation,
@@ -451,13 +452,55 @@ async def apply_approved_changes(
                     change.status = "failed"
                     change.error_message = "Unknown MCP tool in payload"
                     failed += 1
-                    results.append({"id": str(change.id), "status": "failed", "error": "Unknown tool"})
+                    stats["failed"] += 1
+                    entry = {"id": str(change.id), "status": "failed", "error": "Unknown tool"}
+                    results.append(entry)
+                    stats["results"].append(entry)
                     continue
 
-                if isinstance(raw_tool_name, str) and raw_tool_name.startswith("_"):
-                    tool_name, arguments = raw_tool_name, (raw_arguments or {})
-                else:
-                    tool_name, arguments = normalize_mcp_call(raw_tool_name, raw_arguments)
+                # Re-validate every change immediately *before* shipping to
+                # Amazon. Queue-time validation can go stale: targets get
+                # deleted, ad groups archived, the user re-syncs and IDs
+                # change, etc. Without this re-check the apply path used
+                # to forward a stale ``targetId`` straight to MCP and
+                # surface Amazon's generic 400 instead of a clear
+                # validator error. ``allow_queue_only_tools=True`` so
+                # ``_harvest_execute`` / ``_ai_campaign_create`` /
+                # ``_request_sync`` aren't rejected here.
+                preflight_action = {
+                    "tool": raw_tool_name,
+                    "arguments": raw_arguments or {},
+                    "label": change.entity_name or change.proposed_value,
+                }
+                preflight = await validate_ai_action(
+                    preflight_action,
+                    db,
+                    cred,
+                    profile_id=profile_id or cred.profile_id,
+                    allow_queue_only_tools=True,
+                )
+                if not preflight.ok:
+                    change.status = "failed"
+                    change.error_message = (
+                        f"Pre-flight validation failed: {preflight.error}"
+                    )
+                    failed += 1
+                    stats["failed"] += 1
+                    entry = {
+                        "id": str(change.id),
+                        "status": "failed",
+                        "error": preflight.error or "validation failed",
+                        "stage": "preflight",
+                    }
+                    results.append(entry)
+                    stats["results"].append(entry)
+                    continue
+
+                # Use the validator's normalised tool / arguments — this is
+                # already through ``normalize_mcp_call`` for native tools and
+                # leaves synthetic ``_*`` tools intact.
+                tool_name = preflight.tool or raw_tool_name
+                arguments = preflight.arguments or raw_arguments or {}
 
                 # Handle harvest "existing" mode: requires multi-step service execution
                 if tool_name == "_harvest_execute":
@@ -468,6 +511,7 @@ async def apply_approved_changes(
                         acos_threshold=arguments.get("acos_threshold"),
                         target_mode=arguments.get("target_mode", "existing"),
                         target_campaign_id=arguments.get("target_campaign_id"),
+                        target_ad_group_id=arguments.get("target_ad_group_id"),
                         match_type=arguments.get("match_type"),
                         negate_in_source=arguments.get("negate_in_source", True),
                         clicks_threshold=arguments.get("clicks_threshold"),

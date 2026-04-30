@@ -278,6 +278,48 @@ async def test_harvest_rejects_negative_clicks_threshold(db_with_existing_ids, c
 
 
 @pytest.mark.asyncio
+async def test_harvest_existing_requires_ad_group(db_with_existing_ids, cred):
+    """Amazon SP keywords live on an ad group, not a campaign.
+
+    The harvester used to silently dump keywords into whichever ad
+    group came back first from ``query_ad_groups``. Now the validator
+    enforces an explicit ``target_ad_group_id`` whenever the user
+    selects ``target_mode='existing'``.
+    """
+    action = {
+        "tool": "_harvest_execute",
+        "arguments": {
+            "source_campaign_id": "c1",
+            "target_mode": "existing",
+            "target_campaign_id": "c2",
+        },
+    }
+    result = await validator.validate_ai_action(
+        action, db_with_existing_ids, cred, allow_queue_only_tools=True,
+    )
+    assert not result.ok
+    assert "target_ad_group_id" in result.error
+
+
+@pytest.mark.asyncio
+async def test_harvest_existing_with_ad_group_ok(db_with_existing_ids, cred):
+    action = {
+        "tool": "_harvest_execute",
+        "arguments": {
+            "source_campaign_id": "c1",
+            "target_mode": "existing",
+            "target_campaign_id": "c2",
+            "target_ad_group_id": "g1",
+        },
+    }
+    result = await validator.validate_ai_action(
+        action, db_with_existing_ids, cred, allow_queue_only_tools=True,
+    )
+    assert result.ok, result.error
+    assert result.arguments["target_ad_group_id"] == "g1"
+
+
+@pytest.mark.asyncio
 async def test_harvest_rejects_lookback_out_of_range(db_with_existing_ids, cred):
     action = {
         "tool": "_harvest_execute",
@@ -291,3 +333,69 @@ async def test_harvest_rejects_lookback_out_of_range(db_with_existing_ids, cred)
     )
     assert not result.ok
     assert "lookback_days" in result.error
+
+
+# ── Relative bid changes (the "reduce bid by 20%" path) ──────────────
+
+
+@pytest.mark.asyncio
+async def test_relative_bid_reduction_round_trip(db_with_existing_ids, cred):
+    """Mimic what the AI emits after computing ``current_bid * 0.8``.
+
+    Validates that the round-trip envelope produced by our prompt rule
+    actually clears the validator instead of being silently rejected
+    with ``Bid 0.0 below minimum`` (the original failure).
+    """
+
+    def _proposed(current: float, pct: float) -> float:
+        return max(round(current * (1 - pct / 100), 2), 0.02)
+
+    targets = [
+        {"targetId": f"t{i}", "bid": _proposed(orig, 20)}
+        for i, orig in enumerate([1.50, 0.75, 0.25])
+    ]
+    action = {
+        "tool": "campaign_management-update_target_bid",
+        "arguments": {"body": {"targets": targets}},
+        "label": "Reduce bid 20% on 3 search terms",
+    }
+    result = await validator.validate_ai_action(action, db_with_existing_ids, cred)
+    assert result.ok, result.error
+    bids = [t["bid"] for t in result.arguments["body"]["targets"]]
+    assert bids == [1.20, 0.60, 0.20]
+
+
+@pytest.mark.asyncio
+async def test_relative_bid_clamps_to_minimum(db_with_existing_ids, cred):
+    """A 95% cut on a $0.10 bid would land at $0.005 — the AI must clamp.
+
+    The validator stays strict (rejects < $0.02). The test enforces that
+    the clamping rule the prompt teaches the AI is *necessary* — the
+    naive un-clamped payload still gets rejected here, mirroring what
+    happens in production today.
+    """
+    action = {
+        "tool": "campaign_management-update_target_bid",
+        "arguments": {"body": {"targets": [{"targetId": "t1", "bid": 0.005}]}},
+    }
+    result = await validator.validate_ai_action(action, db_with_existing_ids, cred)
+    assert not result.ok
+    assert "minimum" in result.error
+
+
+@pytest.mark.asyncio
+async def test_ad_group_default_bid_relative_change(db_with_existing_ids, cred):
+    """Fallback path for product/auto search terms — adjust ad-group default bid."""
+    action = {
+        "tool": "campaign_management-update_ad_group",
+        "arguments": {
+            "body": {
+                "adGroups": [
+                    {"adGroupId": "g1", "defaultBid": round(0.85 * 0.9, 2)},
+                ]
+            }
+        },
+    }
+    result = await validator.validate_ai_action(action, db_with_existing_ids, cred)
+    assert result.ok, result.error
+    assert result.arguments["body"]["adGroups"][0]["defaultBid"] == 0.77

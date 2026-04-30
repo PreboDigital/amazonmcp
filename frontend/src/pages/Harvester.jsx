@@ -230,6 +230,121 @@ function CampaignSingleSelect({ campaigns, selected, onChange, loading, onRefres
   )
 }
 
+// Single-select ad-group dropdown — required when target_mode === 'existing'
+// because Amazon SP keywords/targets are an ad-group entity, not a
+// campaign entity (campaign → ad group → keyword/target).
+function AdGroupSingleSelect({ adGroups, selected, onChange, loading, onRefresh, disabled }) {
+  const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
+  const ref = useRef(null)
+
+  useEffect(() => {
+    function onClickOutside(e) {
+      if (ref.current && !ref.current.contains(e.target)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onClickOutside)
+    return () => document.removeEventListener('mousedown', onClickOutside)
+  }, [])
+
+  const filtered = (adGroups || []).filter((g) => {
+    const q = search.toLowerCase()
+    return (
+      (g.ad_group_name || '').toLowerCase().includes(q) ||
+      (g.amazon_ad_group_id || '').toLowerCase().includes(q)
+    )
+  })
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => !disabled && setOpen(!open)}
+        className="input flex items-center justify-between gap-2 text-left min-h-[42px] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        <div className="flex-1 min-w-0">
+          {!selected ? (
+            <span className="text-slate-400">{disabled ? 'Pick a target campaign first…' : 'Select target ad group...'}</span>
+          ) : (
+            <span className="text-sm font-medium text-slate-800 truncate">
+              {selected.ad_group_name || selected.amazon_ad_group_id}
+            </span>
+          )}
+        </div>
+        <ChevronDown size={16} className={`text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+
+      {open && !disabled && (
+        <div className="absolute z-50 mt-1 w-full bg-white border border-slate-200 rounded-xl shadow-xl max-h-[280px] overflow-hidden flex flex-col">
+          <div className="p-2 border-b border-slate-100 flex items-center gap-2">
+            <Search size={14} className="text-slate-400 shrink-0" />
+            <input
+              type="text"
+              placeholder="Search ad groups..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="flex-1 text-sm border-0 outline-none bg-transparent placeholder:text-slate-300"
+              autoFocus
+            />
+            <button type="button" onClick={onRefresh} className="p-1 hover:bg-slate-100 rounded transition-colors">
+              <RefreshCw size={12} className={`text-slate-400 ${loading ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
+          <div className="overflow-y-auto flex-1">
+            {loading ? (
+              <div className="flex items-center justify-center py-6 text-sm text-slate-400">
+                <Loader2 size={14} className="animate-spin mr-2" /> Loading ad groups…
+              </div>
+            ) : filtered.length === 0 ? (
+              <div className="py-6 text-center text-sm text-slate-400">
+                {(adGroups || []).length === 0
+                  ? 'No ad groups found in this campaign. Try refresh.'
+                  : 'No matches.'}
+              </div>
+            ) : (
+              filtered.map((g) => {
+                const isSel = selected?.amazon_ad_group_id === g.amazon_ad_group_id
+                return (
+                  <button
+                    key={g.amazon_ad_group_id}
+                    type="button"
+                    onClick={() => { onChange(g); setOpen(false) }}
+                    className={`w-full px-3 py-2.5 flex items-center gap-3 hover:bg-slate-50 transition-colors text-left ${isSel ? 'bg-brand-50/50' : ''}`}
+                  >
+                    <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 ${isSel ? 'bg-brand-600 border-brand-600' : 'border-slate-300'}`}>
+                      {isSel && <Check size={10} className="text-white" />}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-slate-800 truncate">{g.ad_group_name || 'Unnamed Ad Group'}</p>
+                      <div className="flex items-center gap-3 mt-0.5">
+                        <span className="text-[10px] font-mono text-slate-400 truncate">{g.amazon_ad_group_id}</span>
+                        {g.default_bid != null && (
+                          <span className="text-[10px] text-slate-500">defaultBid: ${Number(g.default_bid).toFixed(2)}</span>
+                        )}
+                        {g.state && (
+                          <span className={`text-[10px] font-medium px-1.5 py-0 rounded ${
+                            g.state.toLowerCase() === 'enabled'
+                              ? 'text-emerald-700 bg-emerald-50'
+                              : g.state.toLowerCase() === 'paused'
+                                ? 'text-amber-700 bg-amber-50'
+                                : 'text-slate-700 bg-slate-100'
+                          }`}>
+                            {g.state}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </button>
+                )
+              })
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function CampaignOption({ campaign, selected, onToggle }) {
   const stateColors = { enabled: 'bg-emerald-500', paused: 'bg-amber-500', archived: 'bg-slate-400' }
   return (
@@ -272,12 +387,15 @@ export default function Harvester() {
 
   const [campaigns, setCampaigns] = useState([])
   const [campaignsLoading, setCampaignsLoading] = useState(false)
+  const [adGroups, setAdGroups] = useState([])
+  const [adGroupsLoading, setAdGroupsLoading] = useState(false)
 
   const [form, setForm] = useState({
     name: '',
     source_campaigns: [],
     target_mode: 'new', // "new" or "existing"
     target_campaign: null, // selected existing manual campaign
+    target_ad_group: null, // selected ad group inside target_campaign (existing mode)
     negate_in_source: true,
     sales_threshold: 1.0,
     acos_threshold: '',
@@ -301,6 +419,27 @@ export default function Harvester() {
     finally { setCampaignsLoading(false) }
   }
 
+  async function loadAdGroups(campaignId) {
+    if (!campaignId) { setAdGroups([]); return }
+    setAdGroupsLoading(true)
+    try { setAdGroups(await harvest.adGroups(campaignId, activeAccountId)) }
+    catch (err) {
+      setAdGroups([])
+      setError('Failed to load ad groups: ' + err.message)
+    }
+    finally { setAdGroupsLoading(false) }
+  }
+
+  // When the target campaign changes, refresh ad groups and clear any
+  // stale ad-group pick (changing campaign invalidates the prior ad-group
+  // selection, since adGroupIds are scoped to a campaign).
+  useEffect(() => {
+    if (form.target_mode !== 'existing') { setAdGroups([]); return }
+    const campId = form.target_campaign?.amazon_campaign_id
+    if (!campId) { setAdGroups([]); return }
+    loadAdGroups(campId)
+  }, [form.target_mode, form.target_campaign?.amazon_campaign_id])
+
   async function loadRunHistory(configId) {
     try { setRunHistory((prev) => ({ ...prev, [configId]: [] })); const runs = await harvest.runs(configId, activeAccountId); setRunHistory((prev) => ({ ...prev, [configId]: runs })) } catch {}
   }
@@ -310,7 +449,8 @@ export default function Harvester() {
       setError(activeScope.warning || 'Select a marketplace child profile before creating a harvest rule.')
       return
     }
-    setForm({ name: '', source_campaigns: [], target_mode: 'new', target_campaign: null, negate_in_source: true, sales_threshold: 1.0, acos_threshold: '', clicks_threshold: '', match_type: '', lookback_days: 30 })
+    setForm({ name: '', source_campaigns: [], target_mode: 'new', target_campaign: null, target_ad_group: null, negate_in_source: true, sales_threshold: 1.0, acos_threshold: '', clicks_threshold: '', match_type: '', lookback_days: 30 })
+    setAdGroups([])
     setCreateStep(1)
     setEditingConfig(null)
     setShowCreate(true)
@@ -323,6 +463,7 @@ export default function Harvester() {
       source_campaigns: (config.source_campaigns || []).map(c => ({ amazon_campaign_id: c.amazon_campaign_id, campaign_name: c.campaign_name, targeting_type: c.targeting_type, state: c.state, daily_budget: c.daily_budget })),
       target_mode: config.target_mode || 'new',
       target_campaign: config.target_campaign_selection || null,
+      target_ad_group: config.target_ad_group_selection || (config.target_ad_group_id ? { amazon_ad_group_id: config.target_ad_group_id, ad_group_name: config.target_ad_group_name } : null),
       negate_in_source: config.negate_in_source !== false,
       sales_threshold: config.sales_threshold || 1.0,
       acos_threshold: config.acos_threshold || '',
@@ -330,6 +471,7 @@ export default function Harvester() {
       match_type: config.match_type || '',
       lookback_days: config.lookback_days || 30,
     })
+    setAdGroups([])
     setCreateStep(1)
     setEditingConfig(config)
     setShowCreate(true)
@@ -342,6 +484,10 @@ export default function Harvester() {
       setCreateStep(2)
     } else if (createStep === 2) {
       if (form.target_mode === 'existing' && !form.target_campaign) { setError('Select a target manual campaign'); return }
+      if (form.target_mode === 'existing' && !form.target_ad_group) {
+        setError('Select a target ad group — Amazon SP keywords belong to an ad group, not a campaign.')
+        return
+      }
       if (!form.name.trim()) {
         const names = form.source_campaigns.map(c => c.campaign_name || 'Campaign').slice(0, 2).join(', ')
         setForm(f => ({ ...f, name: `Harvest: ${names}${form.source_campaigns.length > 2 ? ` +${form.source_campaigns.length - 2}` : ''}` }))
@@ -361,6 +507,7 @@ export default function Harvester() {
         source_campaigns: form.source_campaigns.map(c => ({ amazon_campaign_id: c.amazon_campaign_id, campaign_name: c.campaign_name, targeting_type: c.targeting_type, state: c.state, daily_budget: c.daily_budget })),
         target_mode: form.target_mode,
         target_campaign_selection: form.target_mode === 'existing' && form.target_campaign ? { amazon_campaign_id: form.target_campaign.amazon_campaign_id, campaign_name: form.target_campaign.campaign_name } : null,
+        target_ad_group_selection: form.target_mode === 'existing' && form.target_ad_group ? { amazon_ad_group_id: form.target_ad_group.amazon_ad_group_id, ad_group_name: form.target_ad_group.ad_group_name } : null,
         negate_in_source: form.negate_in_source,
         sales_threshold: parseFloat(form.sales_threshold) || 1.0,
         acos_threshold: form.acos_threshold ? parseFloat(form.acos_threshold) : null,
@@ -571,9 +718,37 @@ export default function Harvester() {
                     </div>
 
                     {form.target_mode === 'existing' && (
-                      <div className="mt-3">
-                        <label className="text-xs text-slate-500 font-medium mb-1 block">Select Target Manual Campaign</label>
-                        <CampaignSingleSelect campaigns={campaigns} selected={form.target_campaign} onChange={(c) => setForm({ ...form, target_campaign: c })} loading={campaignsLoading} onRefresh={loadCampaigns} filterType="manual" />
+                      <div className="mt-3 space-y-3">
+                        <div>
+                          <label className="text-xs text-slate-500 font-medium mb-1 block">Select Target Manual Campaign</label>
+                          <CampaignSingleSelect
+                            campaigns={campaigns}
+                            selected={form.target_campaign}
+                            onChange={(c) => setForm({ ...form, target_campaign: c, target_ad_group: null })}
+                            loading={campaignsLoading}
+                            onRefresh={loadCampaigns}
+                            filterType="manual"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs text-slate-500 font-medium mb-1 block flex items-center gap-1.5">
+                            Select Target Ad Group
+                            <span className="text-[10px] text-slate-400 font-normal">(required — keywords are per ad group)</span>
+                          </label>
+                          <AdGroupSingleSelect
+                            adGroups={adGroups}
+                            selected={form.target_ad_group}
+                            onChange={(g) => setForm({ ...form, target_ad_group: g })}
+                            loading={adGroupsLoading}
+                            onRefresh={() => form.target_campaign && loadAdGroups(form.target_campaign.amazon_campaign_id)}
+                            disabled={!form.target_campaign}
+                          />
+                          {form.target_campaign && !adGroupsLoading && adGroups.length === 0 && (
+                            <p className="text-xs text-amber-700 mt-1.5">
+                              No ad groups cached for this campaign. Click refresh to fetch live, or sync the account first.
+                            </p>
+                          )}
+                        </div>
                       </div>
                     )}
 
@@ -704,6 +879,12 @@ export default function Harvester() {
                         <div className="col-span-2">
                           <p className="text-xs text-slate-400">Target Campaign</p>
                           <p className="font-medium text-slate-800">{form.target_campaign.campaign_name} <span className="font-mono text-xs text-slate-400">({form.target_campaign.amazon_campaign_id})</span></p>
+                        </div>
+                      )}
+                      {form.target_mode === 'existing' && form.target_ad_group && (
+                        <div className="col-span-2">
+                          <p className="text-xs text-slate-400">Target Ad Group</p>
+                          <p className="font-medium text-slate-800">{form.target_ad_group.ad_group_name || 'Unnamed'} <span className="font-mono text-xs text-slate-400">({form.target_ad_group.amazon_ad_group_id})</span></p>
                         </div>
                       )}
                       <div>
@@ -904,7 +1085,15 @@ export default function Harvester() {
                           <div>
                             <p className="text-sm font-medium text-slate-800">{targetSel.campaign_name || 'Unnamed'}</p>
                             <p className="text-[10px] font-mono text-slate-400 mt-0.5">{targetSel.amazon_campaign_id}</p>
-                            <p className="text-xs text-blue-600 mt-1">Keywords will be added as targets to this existing manual campaign</p>
+                            {config.target_ad_group_id ? (
+                              <div className="mt-1.5 text-xs text-blue-700">
+                                Ad Group: <span className="font-medium">{config.target_ad_group_name || 'Unnamed'}</span>{' '}
+                                <span className="font-mono text-slate-400">({config.target_ad_group_id})</span>
+                              </div>
+                            ) : (
+                              <p className="text-xs text-amber-700 mt-1">No ad group selected — edit this rule to pick one before running.</p>
+                            )}
+                            <p className="text-xs text-blue-600 mt-1">Keywords will be added as targets to the selected ad group inside this manual campaign.</p>
                           </div>
                         ) : config.target_campaign_id ? (
                           <div>

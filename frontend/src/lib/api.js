@@ -223,6 +223,12 @@ export const harvest = {
     const qs = params.toString()
     return request(`/harvest/campaigns${qs ? `?${qs}` : ''}`)
   },
+  adGroups: (campaignId, credentialId) => {
+    const params = new URLSearchParams()
+    params.set('campaign_id', campaignId)
+    if (credentialId) params.set('credential_id', credentialId)
+    return request(`/harvest/ad-groups?${params.toString()}`)
+  },
   runs: (configId, credentialId) => {
     const params = new URLSearchParams()
     if (configId) params.set('config_id', configId)

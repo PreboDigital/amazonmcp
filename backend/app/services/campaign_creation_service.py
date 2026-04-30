@@ -126,11 +126,14 @@ class CampaignCreationService:
             ag_payload = {
                 "campaignId": results["campaign_id"],
                 "name": ag.get("name", "Ad Group"),
-                "state": "enabled",
+                "state": str(ag.get("state") or "ENABLED").upper(),
             }
             bid = ag.get("defaultBid") or ag.get("default_bid")
             if bid is not None:
-                ag_payload["defaultBid"] = float(bid) if isinstance(bid, (int, float)) else bid
+                try:
+                    ag_payload["defaultBid"] = float(bid)
+                except (TypeError, ValueError):
+                    ag_payload["defaultBid"] = bid
 
             try:
                 ag_result = await self.client.create_ad_group([ag_payload])
@@ -150,10 +153,12 @@ class CampaignCreationService:
                     ad_payload = {
                         "adGroupId": ad_group_id,
                         "asin": asin,
-                        "state": "enabled",
+                        "state": str(ad_data.get("state") or "ENABLED").upper(),
                     }
                     if ad_data.get("name"):
                         ad_payload["name"] = ad_data["name"]
+                    if ad_data.get("sku"):
+                        ad_payload["sku"] = ad_data["sku"]
                     try:
                         ad_result = await self.client.create_ad([ad_payload])
                         ad_id = _extract_id(ad_result, ["ads", "adId", "success"])
@@ -163,22 +168,49 @@ class CampaignCreationService:
                     except Exception as e:
                         results["errors"].append(f"Ad creation failed: {str(e)}")
 
-                # 4. Create targets (keywords) — soft errors only
+                # 4. Create targets (keywords) — soft errors only.
+                # AUTO campaigns reject keyword targets, so skip them
+                # there. Per Amazon SP API a manual campaign's ad group
+                # holds either keyword OR product targets; we only
+                # produce keyword targets here.
+                campaign_targeting = (
+                    campaign.get("targetingType")
+                    or campaign.get("targeting_type")
+                    or "MANUAL"
+                )
                 keywords = ag.get("keywords", [])
-                if keywords:
+                if keywords and str(campaign_targeting).upper() == "MANUAL":
                     target_payloads = []
                     for kw in keywords:
-                        text = kw.get("text") or kw.get("keyword")
+                        text = (kw.get("text") or kw.get("keyword") or "").strip()
                         if not text:
                             continue
-                        match = (kw.get("match_type") or kw.get("matchType") or "broad").lower()
-                        bid_val = kw.get("suggested_bid") or kw.get("suggestedBid") or kw.get("bid") or bid
+                        match_raw = (kw.get("match_type") or kw.get("matchType") or "BROAD")
+                        match = str(match_raw).upper()
+                        if match not in ("EXACT", "PHRASE", "BROAD"):
+                            match = "BROAD"
+                        bid_val = (
+                            kw.get("suggested_bid")
+                            or kw.get("suggestedBid")
+                            or kw.get("bid")
+                            or bid
+                        )
+                        try:
+                            bid_num = float(bid_val) if bid_val is not None else 0.5
+                        except (TypeError, ValueError):
+                            bid_num = 0.5
+                        # Clamp to Amazon SP minimum so the create call
+                        # doesn't bounce the entire batch over a single
+                        # row that defaulted to 0.0.
+                        if bid_num < 0.02:
+                            bid_num = 0.02
                         target_payloads.append({
                             "adGroupId": ad_group_id,
                             "expression": text,
-                            "expressionType": "keyword",
-                            "matchType": match if match in ("exact", "phrase", "broad") else "broad",
-                            "bid": float(bid_val) if bid_val else 0.5,
+                            "expressionType": "KEYWORD",
+                            "matchType": match,
+                            "bid": bid_num,
+                            "state": "ENABLED",
                         })
                     if target_payloads:
                         try:
@@ -238,13 +270,26 @@ class CampaignCreationService:
                 results["rollback_errors"].append(err)
 
     def _build_campaign_payload(self, campaign: dict) -> dict:
-        """Build MCP campaign payload from plan."""
-        ad_product = campaign.get("adProduct") or campaign.get("ad_product") or campaign.get("type") or "SPONSORED_PRODUCTS"
-        targeting = campaign.get("targetingType") or campaign.get("targeting_type") or "manual"
+        """Build MCP campaign payload from plan.
+
+        Amazon SP API enums are case-sensitive uppercase
+        (``adProduct = SPONSORED_PRODUCTS``, ``targetingType = MANUAL|AUTO``,
+        ``state = ENABLED|PAUSED|ARCHIVED``). Older callers passed
+        lowercase values which Amazon silently accepted only sometimes;
+        normalising here removes that variance.
+        """
+        ad_product = (
+            campaign.get("adProduct")
+            or campaign.get("ad_product")
+            or campaign.get("type")
+            or "SPONSORED_PRODUCTS"
+        )
+        targeting = campaign.get("targetingType") or campaign.get("targeting_type") or "MANUAL"
+        state = campaign.get("state") or "ENABLED"
         return {
             "name": campaign.get("name", "New Campaign"),
-            "adProduct": ad_product,
-            "targetingType": targeting,
-            "state": campaign.get("state", "enabled"),
+            "adProduct": str(ad_product).upper(),
+            "targetingType": str(targeting).upper(),
+            "state": str(state).upper(),
             "dailyBudget": float(campaign.get("dailyBudget") or campaign.get("daily_budget") or 50),
         }

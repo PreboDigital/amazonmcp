@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from typing import Optional
 from app.database import get_db
 from app.models import (
-    Credential, Campaign, HarvestConfig, HarvestRun,
+    Credential, Campaign, AdGroup, HarvestConfig, HarvestRun,
     HarvestedKeyword, ActivityLog, PendingChange,
 )
 from app.mcp_client import create_mcp_client
@@ -44,6 +44,20 @@ class TargetCampaignSelection(BaseModel):
     campaign_name: Optional[str] = None
 
 
+class TargetAdGroupSelection(BaseModel):
+    """Ad-group inside the target manual campaign.
+
+    Required when ``target_mode == 'existing'``. Per the Amazon SP API,
+    keywords/targets are created at the ad-group level, so callers must
+    point at one specific ad group rather than a campaign — otherwise
+    the harvester would have to guess and could mix keyword targets
+    into a product-targeting ad group (which Amazon rejects).
+    """
+
+    amazon_ad_group_id: str
+    ad_group_name: Optional[str] = None
+
+
 class HarvestCreateRequest(BaseModel):
     credential_id: Optional[str] = None
     name: str
@@ -54,6 +68,9 @@ class HarvestCreateRequest(BaseModel):
     # Target campaign: where harvested keywords go
     target_mode: str = "new"  # "new" = Amazon creates new campaign, "existing" = user selects
     target_campaign_selection: Optional[TargetCampaignSelection] = None  # when target_mode="existing"
+    # Required when target_mode == "existing": which ad group inside that
+    # campaign should receive the harvested keywords/targets.
+    target_ad_group_selection: Optional[TargetAdGroupSelection] = None
     # Negative keyword handling
     negate_in_source: bool = True  # Negate harvested keywords in source auto campaign
     # Thresholds
@@ -110,8 +127,18 @@ async def list_harvest_configs(
             "source_campaigns": c.source_campaigns or [],
             "target_campaign_id": c.target_campaign_id,
             "target_campaign_name": c.target_campaign_name,
+            "target_ad_group_id": c.target_ad_group_id,
+            "target_ad_group_name": c.target_ad_group_name,
             "target_mode": c.target_mode or "new",
             "target_campaign_selection": c.target_campaign_selection,
+            "target_ad_group_selection": (
+                {
+                    "amazon_ad_group_id": c.target_ad_group_id,
+                    "ad_group_name": c.target_ad_group_name,
+                }
+                if c.target_ad_group_id
+                else None
+            ),
             "negate_in_source": c.negate_in_source if c.negate_in_source is not None else True,
             "sales_threshold": c.sales_threshold,
             "acos_threshold": c.acos_threshold,
@@ -154,6 +181,21 @@ async def create_harvest_config(payload: HarvestCreateRequest, db: AsyncSession 
     if not primary_campaign_id and not source_campaigns_data:
         raise HTTPException(status_code=400, detail="At least one source campaign is required")
 
+    if payload.target_mode == "existing":
+        if not payload.target_campaign_selection:
+            raise HTTPException(
+                status_code=400,
+                detail="target_campaign_selection is required when target_mode='existing'",
+            )
+        if not payload.target_ad_group_selection:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "target_ad_group_selection is required when target_mode='existing' — "
+                    "Amazon SP keywords belong to an ad group, not a campaign."
+                ),
+            )
+
     config = HarvestConfig(
         credential_id=cred.id,
         name=payload.name,
@@ -164,6 +206,8 @@ async def create_harvest_config(payload: HarvestCreateRequest, db: AsyncSession 
         target_campaign_selection=payload.target_campaign_selection.model_dump() if payload.target_campaign_selection else None,
         target_campaign_id=payload.target_campaign_selection.amazon_campaign_id if payload.target_campaign_selection else None,
         target_campaign_name=payload.target_campaign_selection.campaign_name if payload.target_campaign_selection else None,
+        target_ad_group_id=payload.target_ad_group_selection.amazon_ad_group_id if payload.target_ad_group_selection else None,
+        target_ad_group_name=payload.target_ad_group_selection.ad_group_name if payload.target_ad_group_selection else None,
         negate_in_source=payload.negate_in_source,
         sales_threshold=payload.sales_threshold,
         acos_threshold=payload.acos_threshold,
@@ -381,6 +425,7 @@ async def run_harvest(payload: HarvestRunRequest, db: AsyncSession = Depends(get
                         "config_id": str(config.id),
                         "source_campaign_id": campaign_id,
                         "target_campaign_id": target_selection.get("amazon_campaign_id") if target_selection else None,
+                        "target_ad_group_id": config.target_ad_group_id,
                         "sales_threshold": config.sales_threshold,
                         "acos_threshold": config.acos_threshold,
                         "clicks_threshold": config.clicks_threshold,
@@ -459,6 +504,7 @@ async def run_harvest(payload: HarvestRunRequest, db: AsyncSession = Depends(get
                 acos_threshold=config.acos_threshold,
                 target_mode=target_mode,
                 target_campaign_id=target_selection.get("amazon_campaign_id") if target_selection else None,
+                target_ad_group_id=config.target_ad_group_id,
                 match_type=config.match_type,
                 negate_in_source=negate_in_source,
                 clicks_threshold=config.clicks_threshold,
@@ -648,6 +694,25 @@ async def update_harvest_config(config_id: str, payload: HarvestCreateRequest, d
     if payload.target_campaign_selection:
         config.target_campaign_id = payload.target_campaign_selection.amazon_campaign_id
         config.target_campaign_name = payload.target_campaign_selection.campaign_name
+    else:
+        config.target_campaign_id = None
+        config.target_campaign_name = None
+    if payload.target_ad_group_selection:
+        config.target_ad_group_id = payload.target_ad_group_selection.amazon_ad_group_id
+        config.target_ad_group_name = payload.target_ad_group_selection.ad_group_name
+    else:
+        config.target_ad_group_id = None
+        config.target_ad_group_name = None
+    if payload.target_mode == "existing" and not (
+        payload.target_campaign_selection and payload.target_ad_group_selection
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "target_campaign_selection AND target_ad_group_selection are required "
+                "when target_mode='existing'."
+            ),
+        )
 
     if payload.source_campaigns:
         config.source_campaigns = [c.model_dump() for c in payload.source_campaigns]
@@ -776,4 +841,84 @@ async def list_auto_campaigns(
             "daily_budget": c.daily_budget,
         }
         for c in campaigns
+    ]
+
+
+@router.get("/ad-groups")
+async def list_ad_groups_for_campaign(
+    campaign_id: str = Query(..., description="Amazon campaignId to list ad groups for."),
+    credential_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """List ad groups for a manual campaign.
+
+    Used by the harvester UI when ``target_mode == 'existing'`` so the
+    user can pin the *exact* ad group that should receive harvested
+    keywords (Amazon SP keywords belong to an ad group, not a
+    campaign). DB-cache first; falls back to a live MCP query if the
+    cache is empty for that campaign.
+    """
+    cred = await _get_cred(db, credential_id)
+    if not cred.profile_id:
+        raise HTTPException(
+            status_code=400,
+            detail="No account profile selected. Use the account dropdown to select an account first.",
+        )
+
+    # AdGroup is scoped via credential_id only — the SQLAlchemy model
+    # has no profile_id column (the parent campaign carries that).
+    q = (
+        select(AdGroup)
+        .where(
+            AdGroup.credential_id == cred.id,
+            AdGroup.amazon_campaign_id == campaign_id,
+        )
+        .order_by(AdGroup.ad_group_name)
+    )
+    rows = (await db.execute(q)).scalars().all()
+
+    if not rows:
+        client = await get_mcp_client_with_fresh_token(cred, db)
+        try:
+            raw = await client.query_ad_groups(campaign_id=campaign_id)
+            items: list[dict] = []
+            if isinstance(raw, dict):
+                for key in ("adGroups", "result", "results", "items"):
+                    if key in raw and isinstance(raw[key], list):
+                        items = raw[key]
+                        break
+            elif isinstance(raw, list):
+                items = raw
+
+            for ag in items:
+                amazon_ag_id = ag.get("adGroupId") or ag.get("id")
+                if not amazon_ag_id:
+                    continue
+                db.add(AdGroup(
+                    credential_id=cred.id,
+                    amazon_ad_group_id=str(amazon_ag_id),
+                    amazon_campaign_id=str(ag.get("campaignId") or campaign_id),
+                    ad_group_name=ag.get("name") or ag.get("adGroupName"),
+                    state=ag.get("state") or ag.get("status"),
+                    default_bid=float(ag["defaultBid"]) if ag.get("defaultBid") is not None else None,
+                    raw_data=ag,
+                ))
+            if items:
+                await db.flush()
+                rows = (await db.execute(q)).scalars().all()
+        except Exception as e:
+            raise HTTPException(
+                status_code=502,
+                detail=safe_error_detail(e, "Failed to fetch ad groups for campaign."),
+            )
+
+    return [
+        {
+            "amazon_ad_group_id": ag.amazon_ad_group_id,
+            "ad_group_name": ag.ad_group_name,
+            "state": ag.state,
+            "default_bid": ag.default_bid,
+            "amazon_campaign_id": ag.amazon_campaign_id,
+        }
+        for ag in rows
     ]

@@ -241,6 +241,79 @@ async def _read_ad_groups_for_ids(
     }
 
 
+async def _read_ad_groups_for_campaign(client, campaign_id: Optional[str]) -> list[dict]:
+    """List the ad groups currently in a campaign (used by create-verify)."""
+    if not campaign_id:
+        return []
+    try:
+        result = await client.query_ad_groups(campaign_id=campaign_id, all_products=True)
+    except Exception as exc:
+        logger.warning("Aftercare query_ad_groups(campaign=%s) failed: %s", campaign_id, exc)
+        return []
+    groups = result.get("adGroups") if isinstance(result, dict) else None
+    return groups if isinstance(groups, list) else []
+
+
+async def _read_ads_for_ids(
+    client,
+    ad_ids: list[str],
+    *,
+    ad_group_id: Optional[str] = None,
+    campaign_id: Optional[str] = None,
+) -> dict[str, dict]:
+    """Read back specific product ads. Scoped query first, then full account.
+
+    Mirrors the target / ad-group helpers: tries the cheapest matching
+    query (ad-group → campaign → all) and indexes by ``adId``.
+    """
+    if not ad_ids:
+        return {}
+    wanted = {str(a) for a in ad_ids if a}
+
+    fallback_calls: list = []
+    if ad_group_id:
+        fallback_calls.append(
+            lambda: client.query_ads(ad_group_id=ad_group_id, all_products=True)
+        )
+    if campaign_id:
+        fallback_calls.append(
+            lambda: client.query_ads(campaign_id=campaign_id, all_products=True)
+        )
+    fallback_calls.append(lambda: client.query_ads(all_products=True))
+
+    for call in fallback_calls:
+        try:
+            result = await call()
+        except Exception as exc:
+            logger.debug("Aftercare query_ads fallback failed: %s", exc)
+            continue
+        ads = result.get("ads") if isinstance(result, dict) else None
+        if not isinstance(ads, list):
+            continue
+        by_id: dict[str, dict] = {}
+        for ad in ads:
+            if not isinstance(ad, dict):
+                continue
+            aid = ad.get("adId") or ad.get("id")
+            if aid and str(aid) in wanted:
+                by_id[str(aid)] = ad
+        if by_id:
+            return by_id
+    return {}
+
+
+async def _read_ads_for_ad_group(client, ad_group_id: Optional[str]) -> list[dict]:
+    if not ad_group_id:
+        return []
+    try:
+        result = await client.query_ads(ad_group_id=ad_group_id, all_products=True)
+    except Exception as exc:
+        logger.warning("Aftercare query_ads(ad_group=%s) failed: %s", ad_group_id, exc)
+        return []
+    ads = result.get("ads") if isinstance(result, dict) else None
+    return ads if isinstance(ads, list) else []
+
+
 # ── Per-tool verifiers ───────────────────────────────────────────────
 
 async def _verify_target_update(client, body: dict) -> dict:
@@ -424,6 +497,252 @@ async def _verify_ad_group_update(client, body: dict) -> dict:
     }
 
 
+async def _verify_campaign_delete(client, body: dict) -> dict:
+    """Confirm the requested campaigns are gone after a delete call."""
+    campaign_ids = [str(c) for c in (body.get("campaignIds") or []) if c]
+    actual = await _read_campaigns_for_ids(client, campaign_ids)
+    drift: list[dict] = []
+    for cid in campaign_ids:
+        observed = actual.get(cid)
+        if observed is None:
+            continue
+        # Some accounts soft-delete by flipping state to ARCHIVED instead
+        # of physically removing the row. Treat ARCHIVED as success but
+        # surface ENABLED/PAUSED as drift.
+        observed_state = str(observed.get("state") or "").upper()
+        if observed_state == "ARCHIVED":
+            continue
+        drift.append({
+            "campaignId": cid,
+            "field": "_existence",
+            "expected": "deleted",
+            "observed": f"still present ({observed_state or 'unknown state'})",
+        })
+    return {
+        "checked": len(campaign_ids),
+        "found_after_delete": len(actual),
+        "drift": drift,
+        "ok": not drift,
+    }
+
+
+async def _verify_ad_group_delete(client, body: dict) -> dict:
+    """Confirm the requested ad groups are gone after a delete call."""
+    ag_ids = [str(g) for g in (body.get("adGroupIds") or []) if g]
+    actual = await _read_ad_groups_for_ids(client, ag_ids)
+    drift: list[dict] = []
+    for gid in ag_ids:
+        observed = actual.get(gid)
+        if observed is None:
+            continue
+        observed_state = str(observed.get("state") or "").upper()
+        if observed_state == "ARCHIVED":
+            continue
+        drift.append({
+            "adGroupId": gid,
+            "field": "_existence",
+            "expected": "deleted",
+            "observed": f"still present ({observed_state or 'unknown state'})",
+        })
+    return {
+        "checked": len(ag_ids),
+        "found_after_delete": len(actual),
+        "drift": drift,
+        "ok": not drift,
+    }
+
+
+async def _verify_ad_delete(client, body: dict) -> dict:
+    """Confirm the requested ads are gone after a delete call."""
+    ad_ids = [str(a) for a in (body.get("adIds") or []) if a]
+    actual = await _read_ads_for_ids(client, ad_ids)
+    drift: list[dict] = []
+    for aid in ad_ids:
+        observed = actual.get(aid)
+        if observed is None:
+            continue
+        observed_state = str(observed.get("state") or "").upper()
+        if observed_state == "ARCHIVED":
+            continue
+        drift.append({
+            "adId": aid,
+            "field": "_existence",
+            "expected": "deleted",
+            "observed": f"still present ({observed_state or 'unknown state'})",
+        })
+    return {
+        "checked": len(ad_ids),
+        "found_after_delete": len(actual),
+        "drift": drift,
+        "ok": not drift,
+    }
+
+
+async def _verify_ad_group_create(client, body: dict) -> dict:
+    """After create_ad_group, look up the parent campaigns and match by name.
+
+    The MCP response usually returns the new ``adGroupId`` directly,
+    but we cannot rely on that being exposed to the verifier in a
+    consistent shape across SP/SB/SD. Matching by ``(campaignId, name)``
+    is robust and catches the "Amazon accepted but never persisted"
+    case as well as duplicate-name silent rejections.
+    """
+    requested = body.get("adGroups") or []
+    if not requested:
+        return {"checked": 0, "drift": [], "ok": True}
+
+    by_campaign: dict[str, list[dict]] = {}
+    for ag in requested:
+        cid = str(ag.get("campaignId") or "")
+        if cid:
+            by_campaign.setdefault(cid, []).append(ag)
+
+    drift: list[dict] = []
+    matched = 0
+    for cid, asks in by_campaign.items():
+        existing = await _read_ad_groups_for_campaign(client, cid)
+        existing_by_name = {
+            str(g.get("name") or "").strip().lower(): g
+            for g in existing
+            if isinstance(g, dict)
+        }
+        for req in asks:
+            name = str(req.get("name") or "").strip().lower()
+            if not name:
+                drift.append({
+                    "campaignId": cid,
+                    "field": "name",
+                    "expected": "non-empty",
+                    "observed": "empty",
+                })
+                continue
+            observed = existing_by_name.get(name)
+            if observed is None:
+                drift.append({
+                    "campaignId": cid,
+                    "field": "_existence",
+                    "expected": f"ad group named {name!r}",
+                    "observed": "missing",
+                })
+                continue
+            matched += 1
+            if "defaultBid" in req:
+                req_b = _to_float(req["defaultBid"])
+                obs_b = _to_float(observed.get("defaultBid"))
+                if not _bid_close_enough(req_b, obs_b):
+                    drift.append({
+                        "campaignId": cid,
+                        "adGroupId": observed.get("adGroupId"),
+                        "field": "defaultBid",
+                        "expected": req_b,
+                        "observed": obs_b,
+                    })
+    return {
+        "checked": len(requested),
+        "matched": matched,
+        "drift": drift,
+        "ok": not drift,
+    }
+
+
+async def _verify_ad_create(client, body: dict) -> dict:
+    """After create_ad, confirm each (adGroupId, asin|sku) is present."""
+    requested = body.get("ads") or []
+    if not requested:
+        return {"checked": 0, "drift": [], "ok": True}
+
+    by_ad_group: dict[str, list[dict]] = {}
+    for ad in requested:
+        gid = str(ad.get("adGroupId") or "")
+        if gid:
+            by_ad_group.setdefault(gid, []).append(ad)
+
+    drift: list[dict] = []
+    matched = 0
+    for gid, asks in by_ad_group.items():
+        existing = await _read_ads_for_ad_group(client, gid)
+        existing_keys: set[str] = set()
+        for ad in existing:
+            if not isinstance(ad, dict):
+                continue
+            asin = str(ad.get("asin") or "").strip().upper()
+            sku = str(ad.get("sku") or "").strip()
+            if asin:
+                existing_keys.add(f"asin:{asin}")
+            if sku:
+                existing_keys.add(f"sku:{sku}")
+        for req in asks:
+            asin = str(req.get("asin") or "").strip().upper()
+            sku = str(req.get("sku") or "").strip()
+            key = f"asin:{asin}" if asin else (f"sku:{sku}" if sku else "")
+            if not key:
+                drift.append({
+                    "adGroupId": gid,
+                    "field": "identifier",
+                    "expected": "asin or sku",
+                    "observed": "missing",
+                })
+                continue
+            if key in existing_keys:
+                matched += 1
+            else:
+                drift.append({
+                    "adGroupId": gid,
+                    "field": "_existence",
+                    "expected": key,
+                    "observed": "missing",
+                })
+    return {
+        "checked": len(requested),
+        "matched": matched,
+        "drift": drift,
+        "ok": not drift,
+    }
+
+
+async def _verify_ad_update(client, body: dict) -> dict:
+    """After update_ad, diff state for each requested adId."""
+    requested = body.get("ads") or []
+    ids = [str(a.get("adId")) for a in requested if a.get("adId")]
+    actual = await _read_ads_for_ids(client, ids)
+    drift: list[dict] = []
+    for req in requested:
+        aid = str(req.get("adId") or "")
+        if not aid:
+            continue
+        observed = actual.get(aid)
+        if observed is None:
+            drift.append({
+                "adId": aid,
+                "field": "_existence",
+                "expected": "present",
+                "observed": "missing",
+            })
+            continue
+        if "state" in req:
+            if str(req["state"]).upper() != str(observed.get("state") or "").upper():
+                drift.append({
+                    "adId": aid,
+                    "field": "state",
+                    "expected": req["state"],
+                    "observed": observed.get("state"),
+                })
+        if "name" in req:
+            if str(req["name"]) != str(observed.get("name") or ""):
+                drift.append({
+                    "adId": aid,
+                    "field": "name",
+                    "expected": req["name"],
+                    "observed": observed.get("name"),
+                })
+    return {
+        "checked": len(ids),
+        "found": len(actual),
+        "drift": drift,
+        "ok": not drift and len(actual) == len(ids),
+    }
+
+
 def campaign_id_from_harvest_mcp_result(mcp_result: Any) -> Optional[str]:
     """Best-effort new manual campaign id from create_campaign_harvest_targets or harvest service result."""
     if not isinstance(mcp_result, dict):
@@ -550,7 +869,13 @@ _VERIFIERS = {
     "campaign_management-update_campaign_budget": _verify_campaign_update,
     "campaign_management-update_campaign_state": _verify_campaign_update,
     "campaign_management-update_campaign": _verify_campaign_update,
+    "campaign_management-delete_campaign": _verify_campaign_delete,
     "campaign_management-update_ad_group": _verify_ad_group_update,
+    "campaign_management-create_ad_group": _verify_ad_group_create,
+    "campaign_management-delete_ad_group": _verify_ad_group_delete,
+    "campaign_management-create_ad": _verify_ad_create,
+    "campaign_management-update_ad": _verify_ad_update,
+    "campaign_management-delete_ad": _verify_ad_delete,
 }
 
 
@@ -630,6 +955,46 @@ def _next_prompts_for(tool: str, drift: list[dict]) -> list[str]:
         ]
     if tool == "campaign_management-update_ad_group":
         return ["Show ad group performance for the last 7 days"]
+    if tool == "campaign_management-create_ad_group":
+        if has_drift:
+            return [
+                "List ad groups in the parent campaign and confirm names",
+                "Re-attempt the create with a different ad group name",
+            ]
+        return [
+            "Add keywords to the new ad group",
+            "Set bid rules on the new ad group",
+        ]
+    if tool == "campaign_management-delete_ad_group":
+        if has_drift:
+            return [
+                "Force-archive the ad group instead of delete",
+                "Re-sync ad groups and retry",
+            ]
+        return ["Show campaigns left without ad groups (cleanup)"]
+    if tool == "campaign_management-delete_campaign":
+        if has_drift:
+            return [
+                "Force-archive the campaign instead of delete",
+                "Re-sync campaigns and retry",
+            ]
+        return ["Show 30-day spend recovered from deleted campaigns"]
+    if tool == "campaign_management-create_ad":
+        if has_drift:
+            return [
+                "Confirm the ASIN/SKU is valid in the seller catalog",
+                "Re-sync ads and verify Amazon accepted the create",
+            ]
+        return ["Show first-day impressions for the new ads"]
+    if tool == "campaign_management-update_ad":
+        return ["Show 7-day performance for the updated ads"]
+    if tool == "campaign_management-delete_ad":
+        if has_drift:
+            return [
+                "Force-archive the ad instead of delete",
+                "Re-sync ads and retry",
+            ]
+        return ["Show ad groups now missing ads (cleanup)"]
     if tool == "_harvest_execute":
         if has_drift:
             return [

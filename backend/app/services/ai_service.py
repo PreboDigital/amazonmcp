@@ -164,6 +164,26 @@ Tool tiers (use the cheapest one that answers the question):
 You may call multiple read tools in a single turn. Use the results to
 answer; do not narrate the tool calls themselves to the user.
 
+**MANDATORY LOOKUP RULE — never reply "I couldn't find X":**
+If the user references an entity by *name* (campaign, ad group, keyword,
+or search term) that is not visible in the context summary, you MUST
+call a ``db_query_*`` tool with the matching ``name_search`` /
+``keyword_search`` / ``term_search`` parameter BEFORE telling the user
+the data is missing. Lookup chain to follow:
+
+  1. Ad group by name → ``db_query_ad_groups(name_search="...")``.
+     The result row gives ``id`` (Amazon ad group id), ``campaign_id``,
+     and ``defaultBid``.
+  2. Keyword/target by text → ``db_query_targets(keyword_search="...",
+     ad_group_id=<id from step 1>)``. The result row gives ``id``
+     (Amazon target id) and the current ``bid``.
+  3. Search term by text → ``db_query_search_terms(term_search="...",
+     start_date=<7-day window>, end_date=<today>)``.
+
+Only after these calls return zero rows may you say the data is
+missing — and in that case suggest a sync (``_request_sync``) instead
+of giving up.
+
 **ACTIONS — USE NATIVE TOOL CALLS:**
 Every supported mutation (bid / budget / state / rename / create_target
 / delete_target / ad_group update) is exposed as a native tool. The
@@ -174,6 +194,39 @@ When the user asks for a change you can execute, emit a tool call.
 Numeric fields like ``bid`` and ``dailyBudget`` MUST be real numbers
 (``0.50``), never strings (``"$0.50"``). Use the exact ``id:`` values
 from the provided context — do not invent IDs.
+
+**RELATIVE BID CHANGES (e.g. "reduce bid by 20%"):**
+Search-term rows expose the matched keyword's ``targetId`` and current
+``bid`` in the ``[Matched: ... targetId: ... bid: $X.XX]`` tag. Ad-group
+rows expose ``defaultBid``. To apply a percentage change:
+  1. ``new_bid = round(current_bid * (1 - pct / 100), 2)`` for a cut, or
+     ``round(current_bid * (1 + pct / 100), 2)`` for an increase.
+  2. Clamp: ``new_bid = max(new_bid, 0.02)`` and ``min(new_bid, 1000.00)``.
+  3. Pick the right tool:
+     - Per-keyword bid → ``campaign_management-update_target_bid`` with
+       a ``targets`` array, one entry per row:
+       ``{"targetId": "<id>", "bid": <new_bid>}``.
+     - Per ad-group default bid → ``campaign_management-update_ad_group``
+       with an ``adGroups`` array: ``{"adGroupId": "<id>", "defaultBid":
+       <new_bid>}``.
+     - Per campaign daily budget → ``campaign_management-update_campaign_budget``
+       with a ``campaigns`` array: ``{"campaignId": "<id>",
+       "dailyBudget": <new_value>}``.
+  4. SKIP any source row where the ``targetId`` / ``adGroupId`` /
+     ``campaignId`` or the *current value* needed for the math is
+     missing — never emit ``bid: 0.0`` or ``dailyBudget: 0.0``. If every
+     candidate row is missing data, call the matching ``db_query_*``
+     lookup tool first; only if that also returns nothing should you
+     ask the user to sync.
+  5. Show the user a "current → proposed" table for the rows you act on.
+
+**FALLBACK FOR PRODUCT/AUTO TARGETING SEARCH TERMS:**
+Search terms from auto or product-targeting ad groups often have no
+matching keyword (``targetId``/``bid`` show as ``unknown`` in the tag,
+but the row still has ``adGroupId`` and ``adGroupDefaultBid``). For
+those rows, fall back to ``campaign_management-update_ad_group`` to
+adjust the ad group's ``defaultBid`` rather than the per-target bid.
+Tell the user this is an ad-group-level change, not a per-keyword one.
 
 The legacy ``[ACTIONS]`` text block is still parsed as a final fallback
 for providers that fail to emit a tool call, but new responses should
@@ -1169,14 +1222,40 @@ Design a full campaign structure. Respond ONLY with valid JSON:
                 f"Total orders: {summary.get('total_purchases', 0):,}"
             )
 
-            # Top search terms by sales
+            def _matched_tag(t: dict) -> str:
+                """Render the IDs + bids the AI needs to emit valid mutations.
+
+                Includes ``targetId``+``bid`` when a matching keyword
+                target exists. Always includes ``adGroupId``+``defaultBid``
+                when known so the AI can fall back to
+                ``update_ad_group`` for auto/product-targeting search
+                terms that have no per-keyword bid.
+                """
+                kw = t.get("keyword", "?")
+                mt = t.get("match_type", "?")
+                tid = t.get("target_id")
+                bid = t.get("current_bid")
+                agid = t.get("ad_group_id")
+                ag_default = t.get("ad_group_default_bid")
+                pieces = [f"Matched: \"{kw}\" {mt}"]
+                if tid:
+                    pieces.append(f"targetId: {tid}")
+                pieces.append(
+                    f"bid: ${float(bid):.2f}" if bid is not None else "bid: unknown"
+                )
+                if agid:
+                    pieces.append(f"adGroupId: {agid}")
+                if ag_default is not None:
+                    pieces.append(f"adGroupDefaultBid: ${float(ag_default):.2f}")
+                return "[" + ", ".join(pieces) + "]"
+
             top_sales = st.get("top_by_sales", [])
             if top_sales:
                 parts.append(f"\n### Top Search Terms by Sales ({len(top_sales)} shown)")
                 for t in top_sales:
                     parts.append(
                         f"  - \"{t.get('search_term', '?')}\" "
-                        f"[Matched: \"{t.get('keyword', '?')}\" {t.get('match_type', '?')}] "
+                        f"{_matched_tag(t)} "
                         f"Campaign: {t.get('campaign_name', '?')}"
                     )
                     parts.append(
@@ -1186,7 +1265,6 @@ Design a full campaign structure. Respond ONLY with valid JSON:
                         f"Clicks: {t.get('clicks', 0)}, Impressions: {t.get('impressions', 0)}"
                     )
 
-            # Non-converting search terms
             non_conv = st.get("top_non_converting", [])
             if non_conv:
                 total_wasted = sum(t.get("cost") or 0 for t in non_conv)
@@ -1197,7 +1275,7 @@ Design a full campaign structure. Respond ONLY with valid JSON:
                 for t in non_conv:
                     parts.append(
                         f"  - \"{t.get('search_term', '?')}\" "
-                        f"[Matched: \"{t.get('keyword', '?')}\" {t.get('match_type', '?')}] "
+                        f"{_matched_tag(t)} "
                         f"Campaign: {t.get('campaign_name', '?')}"
                     )
                     parts.append(
@@ -1205,13 +1283,13 @@ Design a full campaign structure. Respond ONLY with valid JSON:
                         f"Impressions: {t.get('impressions', 0)}, Orders: 0"
                     )
 
-            # High ACOS search terms
             high_acos = st.get("top_high_acos", [])
             if high_acos:
                 parts.append(f"\n### High ACOS Search Terms (>50%)")
                 for t in high_acos:
                     parts.append(
                         f"  - \"{t.get('search_term', '?')}\" "
+                        f"{_matched_tag(t)} "
                         f"ACOS: {t.get('acos') or 0:.1f}%, "
                         f"Spend: ${t.get('cost', 0):,.2f}, Sales: ${t.get('sales', 0):,.2f}, "
                         f"Clicks: {t.get('clicks', 0)}"

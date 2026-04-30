@@ -20,18 +20,43 @@ from app.services import mutation_aftercare as mac  # noqa: E402
 
 
 class FakeMCP:
-    def __init__(self, *, targets=None, campaigns=None, ad_groups=None, raise_on=None):
+    def __init__(
+        self,
+        *,
+        targets=None,
+        campaigns=None,
+        ad_groups=None,
+        ads=None,
+        raise_on=None,
+    ):
         self._targets = targets or []
         self._campaigns = campaigns or []
         self._ad_groups = ad_groups or []
+        self._ads = ads or []
         self._raise_on = raise_on or set()
 
-    async def query_targets(self, ad_group_id=None, all_products=False, **_):
+    async def call_tool(self, tool, args=None, **_):
+        if "call_tool" in self._raise_on:
+            raise RuntimeError("simulated MCP error")
+        # Used by ``_read_targets_for_ids`` for the targetIdFilter path.
+        if tool == "campaign_management-query_target":
+            body = (args or {}).get("body") or {}
+            wanted = set(((body.get("targetIdFilter") or {}).get("include")) or [])
+            rows = [
+                t for t in self._targets
+                if str(t.get("targetId") or t.get("id") or "") in wanted
+            ]
+            return {"targets": rows}
+        return {}
+
+    async def query_targets(self, ad_group_id=None, campaign_id=None, all_products=False, **_):
         if "query_targets" in self._raise_on:
             raise RuntimeError("simulated MCP error")
         items = self._targets
         if ad_group_id:
             items = [t for t in items if t.get("adGroupId") == ad_group_id]
+        if campaign_id:
+            items = [t for t in items if t.get("campaignId") == campaign_id]
         return {"targets": items}
 
     async def query_campaigns(self, all_products=False, **_):
@@ -39,10 +64,23 @@ class FakeMCP:
             raise RuntimeError("simulated MCP error")
         return {"campaigns": self._campaigns}
 
-    async def query_ad_groups(self, all_products=False, **_):
+    async def query_ad_groups(self, campaign_id=None, all_products=False, **_):
         if "query_ad_groups" in self._raise_on:
             raise RuntimeError("simulated MCP error")
-        return {"adGroups": self._ad_groups}
+        items = self._ad_groups
+        if campaign_id:
+            items = [g for g in items if g.get("campaignId") == campaign_id]
+        return {"adGroups": items}
+
+    async def query_ads(self, ad_group_id=None, campaign_id=None, all_products=False, **_):
+        if "query_ads" in self._raise_on:
+            raise RuntimeError("simulated MCP error")
+        items = self._ads
+        if ad_group_id:
+            items = [a for a in items if a.get("adGroupId") == ad_group_id]
+        if campaign_id:
+            items = [a for a in items if a.get("campaignId") == campaign_id]
+        return {"ads": items}
 
 
 def _run(coro):
@@ -252,3 +290,132 @@ def test_build_aftercare_skipped_for_synthetic_tool():
     )
     assert "no aftercare verifier" in aftercare["headline"]
     assert "did not run a read-back" in aftercare["summary"]
+
+
+# ── Campaign / ad-group / ad delete verifiers ────────────────────────
+
+
+def test_verify_campaign_delete_ok_when_absent():
+    client = FakeMCP(campaigns=[])
+    args = {"body": {"campaignIds": ["c-1", "c-2"]}}
+    report = _run(mac.verify_mutation(client, "campaign_management-delete_campaign", args))
+    assert report["ok"] is True
+
+
+def test_verify_campaign_delete_ok_when_archived():
+    client = FakeMCP(campaigns=[{"campaignId": "c-1", "state": "ARCHIVED"}])
+    args = {"body": {"campaignIds": ["c-1"]}}
+    report = _run(mac.verify_mutation(client, "campaign_management-delete_campaign", args))
+    assert report["ok"] is True
+
+
+def test_verify_campaign_delete_drift_when_still_enabled():
+    client = FakeMCP(campaigns=[{"campaignId": "c-1", "state": "ENABLED"}])
+    args = {"body": {"campaignIds": ["c-1"]}}
+    report = _run(mac.verify_mutation(client, "campaign_management-delete_campaign", args))
+    assert report["ok"] is False
+    assert report["drift"][0]["expected"] == "deleted"
+
+
+def test_verify_ad_group_delete_drift_when_still_enabled():
+    client = FakeMCP(ad_groups=[{"adGroupId": "ag-1", "state": "ENABLED"}])
+    args = {"body": {"adGroupIds": ["ag-1"]}}
+    report = _run(mac.verify_mutation(client, "campaign_management-delete_ad_group", args))
+    assert report["ok"] is False
+    assert any(d.get("adGroupId") == "ag-1" for d in report["drift"])
+
+
+def test_verify_ad_delete_ok_when_absent():
+    client = FakeMCP(ads=[])
+    args = {"body": {"adIds": ["ad-1"]}}
+    report = _run(mac.verify_mutation(client, "campaign_management-delete_ad", args))
+    assert report["ok"] is True
+
+
+def test_verify_ad_delete_drift_when_still_enabled():
+    client = FakeMCP(ads=[{"adId": "ad-1", "state": "ENABLED"}])
+    args = {"body": {"adIds": ["ad-1"]}}
+    report = _run(mac.verify_mutation(client, "campaign_management-delete_ad", args))
+    assert report["ok"] is False
+
+
+# ── Ad-group create verifier ─────────────────────────────────────────
+
+
+def test_verify_ad_group_create_ok_when_named_group_exists():
+    client = FakeMCP(ad_groups=[
+        {"adGroupId": "ag-1", "campaignId": "c-1", "name": "Brand KW", "defaultBid": 0.50},
+    ])
+    args = {"body": {"adGroups": [
+        {"campaignId": "c-1", "name": "Brand KW", "defaultBid": 0.50, "state": "ENABLED"},
+    ]}}
+    report = _run(mac.verify_mutation(client, "campaign_management-create_ad_group", args))
+    assert report["ok"] is True
+    assert report["matched"] == 1
+
+
+def test_verify_ad_group_create_drift_when_name_missing():
+    client = FakeMCP(ad_groups=[])
+    args = {"body": {"adGroups": [
+        {"campaignId": "c-1", "name": "Ghost AG", "defaultBid": 0.30},
+    ]}}
+    report = _run(mac.verify_mutation(client, "campaign_management-create_ad_group", args))
+    assert report["ok"] is False
+    assert any(d.get("expected", "").startswith("ad group named") for d in report["drift"])
+
+
+def test_verify_ad_group_create_drift_when_default_bid_clamped():
+    client = FakeMCP(ad_groups=[
+        {"adGroupId": "ag-9", "campaignId": "c-1", "name": "AG9", "defaultBid": 1.00},
+    ])
+    args = {"body": {"adGroups": [{"campaignId": "c-1", "name": "AG9", "defaultBid": 0.30}]}}
+    report = _run(mac.verify_mutation(client, "campaign_management-create_ad_group", args))
+    assert report["ok"] is False
+    assert any(d["field"] == "defaultBid" for d in report["drift"])
+
+
+# ── Ad create / update / delete verifiers ────────────────────────────
+
+
+def test_verify_ad_create_ok_when_asin_landed():
+    client = FakeMCP(ads=[
+        {"adId": "ad-77", "adGroupId": "ag-1", "asin": "B0ABCDEF12"},
+    ])
+    args = {"body": {"ads": [
+        {"adGroupId": "ag-1", "asin": "B0ABCDEF12", "state": "ENABLED"},
+    ]}}
+    report = _run(mac.verify_mutation(client, "campaign_management-create_ad", args))
+    assert report["ok"] is True
+    assert report["matched"] == 1
+
+
+def test_verify_ad_create_supports_sku_match():
+    client = FakeMCP(ads=[
+        {"adId": "ad-77", "adGroupId": "ag-1", "sku": "SKU-1"},
+    ])
+    args = {"body": {"ads": [{"adGroupId": "ag-1", "sku": "SKU-1"}]}}
+    report = _run(mac.verify_mutation(client, "campaign_management-create_ad", args))
+    assert report["ok"] is True
+
+
+def test_verify_ad_create_drift_when_neither_asin_nor_sku_landed():
+    client = FakeMCP(ads=[])
+    args = {"body": {"ads": [{"adGroupId": "ag-1", "asin": "B0ZZZZZZZZ"}]}}
+    report = _run(mac.verify_mutation(client, "campaign_management-create_ad", args))
+    assert report["ok"] is False
+    assert report["drift"][0]["observed"] == "missing"
+
+
+def test_verify_ad_update_state_drift():
+    client = FakeMCP(ads=[{"adId": "ad-1", "state": "ENABLED"}])
+    args = {"body": {"ads": [{"adId": "ad-1", "state": "PAUSED"}]}}
+    report = _run(mac.verify_mutation(client, "campaign_management-update_ad", args))
+    assert report["ok"] is False
+    assert any(d["field"] == "state" for d in report["drift"])
+
+
+def test_verify_ad_update_ok_when_state_matches():
+    client = FakeMCP(ads=[{"adId": "ad-1", "state": "PAUSED"}])
+    args = {"body": {"ads": [{"adId": "ad-1", "state": "PAUSED"}]}}
+    report = _run(mac.verify_mutation(client, "campaign_management-update_ad", args))
+    assert report["ok"] is True
