@@ -110,30 +110,38 @@ async def build_tables_and_jobs_freshness(
     }
 
     last_acct_perf = await _max_ts(AccountPerformanceDaily, AccountPerformanceDaily.date)
+    last_acct_synced = await _max_ts(AccountPerformanceDaily, AccountPerformanceDaily.synced_at)
     tables["account_performance_daily"] = {
         "row_count": await _row_count(AccountPerformanceDaily),
         "latest_date": str(last_acct_perf) if last_acct_perf else None,
+        "last_synced_at": last_acct_synced.isoformat() if last_acct_synced else None,
         "staleness": staleness_label_from_iso_date(last_acct_perf, warn_days=2, crit_days=4),
         "source": "Reports cron (POST /api/cron/reports)",
     }
     last_camp_perf = await _max_ts(CampaignPerformanceDaily, CampaignPerformanceDaily.date)
+    last_camp_synced = await _max_ts(CampaignPerformanceDaily, CampaignPerformanceDaily.synced_at)
     tables["campaign_performance_daily"] = {
         "row_count": await _row_count(CampaignPerformanceDaily),
         "latest_date": str(last_camp_perf) if last_camp_perf else None,
+        "last_synced_at": last_camp_synced.isoformat() if last_camp_synced else None,
         "staleness": staleness_label_from_iso_date(last_camp_perf, warn_days=2, crit_days=4),
         "source": "Reports cron",
     }
     last_st_perf = await _max_ts(SearchTermPerformance, SearchTermPerformance.date)
+    last_st_synced = await _max_ts(SearchTermPerformance, SearchTermPerformance.synced_at)
     tables["search_term_performance"] = {
         "row_count": await _row_count(SearchTermPerformance),
         "latest_date": str(last_st_perf) if last_st_perf else None,
+        "last_synced_at": last_st_synced.isoformat() if last_st_synced else None,
         "staleness": staleness_label_from_iso_date(last_st_perf, warn_days=2, crit_days=7),
         "source": "Search-terms cron (POST /api/cron/search-terms)",
     }
     last_prod_perf = await _max_ts(ProductPerformanceDaily, ProductPerformanceDaily.date)
+    last_prod_synced = await _max_ts(ProductPerformanceDaily, ProductPerformanceDaily.synced_at)
     tables["product_performance_daily"] = {
         "row_count": await _row_count(ProductPerformanceDaily),
         "latest_date": str(last_prod_perf) if last_prod_perf else None,
+        "last_synced_at": last_prod_synced.isoformat() if last_prod_synced else None,
         "staleness": staleness_label_from_iso_date(last_prod_perf, warn_days=2, crit_days=7),
         "source": "Products cron (POST /api/cron/products)",
     }
