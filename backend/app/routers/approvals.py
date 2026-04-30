@@ -18,7 +18,12 @@ from app.mcp_client import create_mcp_client
 from app.services.token_service import get_mcp_client_with_fresh_token
 from app.services.harvest_service import HarvestService
 from app.services.campaign_creation_service import CampaignCreationService
-from app.services.mutation_aftercare import build_aftercare, verify_mutation
+from app.services.mutation_aftercare import (
+    build_aftercare,
+    verify_mutation,
+    verify_harvest_execution,
+    verify_harvest_create_campaign_result,
+)
 from app.utils import (
     parse_uuid,
     utcnow,
@@ -465,6 +470,8 @@ async def apply_approved_changes(
                         target_campaign_id=arguments.get("target_campaign_id"),
                         match_type=arguments.get("match_type"),
                         negate_in_source=arguments.get("negate_in_source", True),
+                        clicks_threshold=arguments.get("clicks_threshold"),
+                        lookback_days=int(arguments.get("lookback_days") or 30),
                     )
                 elif tool_name == "_ai_campaign_create":
                     # Full campaign creation: campaign → ad group → ad → targets
@@ -478,11 +485,27 @@ async def apply_approved_changes(
                 # whether Amazon actually applied what we asked for
                 # (vs. silently clamping or queueing).
                 aftercare: Optional[dict] = None
-                if not (isinstance(tool_name, str) and tool_name.startswith("_")):
-                    try:
+                verification: dict
+                try:
+                    if tool_name == "_harvest_execute" and isinstance(mcp_result, dict):
+                        verification = await verify_harvest_execution(client, arguments, mcp_result)
+                        aftercare = build_aftercare(tool_name, arguments, mcp_result, verification)
+                    elif (
+                        tool_name == "campaign_management-create_campaign_harvest_targets"
+                        and isinstance(mcp_result, dict)
+                    ):
+                        verification = await verify_harvest_create_campaign_result(
+                            client, arguments, mcp_result
+                        )
+                        aftercare = build_aftercare(tool_name, arguments, mcp_result, verification)
+                    elif isinstance(tool_name, str) and tool_name.startswith("_"):
+                        verification = {"ok": True, "skipped": True, "reason": "synthetic tool"}
+                        aftercare = None
+                    else:
                         verification = await verify_mutation(client, tool_name, arguments)
-                    except Exception as ver_exc:
-                        verification = {"ok": False, "error": str(ver_exc)[:300]}
+                        aftercare = build_aftercare(tool_name, arguments, mcp_result, verification)
+                except Exception as ver_exc:
+                    verification = {"ok": False, "error": str(ver_exc)[:300]}
                     aftercare = build_aftercare(tool_name, arguments, mcp_result, verification)
 
                 change.status = "applied"

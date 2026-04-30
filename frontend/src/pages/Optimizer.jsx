@@ -192,11 +192,13 @@ export default function Optimizer() {
 
   async function loadRules() {
     setLoading(true)
+    setError(null)
     try {
       const data = await optimizer.rules(activeAccountId)
       setRules(data)
     } catch (err) {
-      // Ignore
+      setError(err.message || 'Failed to load bid rules')
+      setRules([])
     } finally {
       setLoading(false)
     }

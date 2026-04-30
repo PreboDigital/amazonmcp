@@ -19,6 +19,10 @@ from app.models import (
 from app.mcp_client import create_mcp_client
 from app.services.account_scope import resolve_campaign_sync_scope
 from app.services.token_service import get_mcp_client_with_fresh_token
+from app.services.harvest_filtering import (
+    filter_target_list_for_harvest,
+    normalize_target_list,
+)
 from app.services.harvest_service import HarvestService
 from app.utils import parse_uuid, safe_error_detail, utcnow
 
@@ -228,10 +232,24 @@ async def preview_harvest(payload: HarvestPreviewRequest, db: AsyncSession = Dep
         campaign_id = camp.get("amazon_campaign_id", "")
         try:
             candidates = await service.get_harvest_candidates(campaign_id)
+            raw = candidates.get("targets", [])
+            target_list = normalize_target_list(raw)
+            qualified, metrics_window = filter_target_list_for_harvest(
+                target_list,
+                sales_threshold=config.sales_threshold,
+                acos_threshold=config.acos_threshold,
+                clicks_threshold=config.clicks_threshold,
+                lookback_days=config.lookback_days or 30,
+                match_type_filter=config.match_type,
+            )
             all_candidates.append({
                 "campaign_id": campaign_id,
                 "campaign_name": camp.get("campaign_name", "Unknown"),
                 "targets": candidates.get("targets", []),
+                "target_count": len(target_list),
+                "qualified_keywords": qualified,
+                "qualified_count": len(qualified),
+                "metrics_window": metrics_window,
             })
         except Exception as e:
             all_candidates.append({
@@ -240,15 +258,26 @@ async def preview_harvest(payload: HarvestPreviewRequest, db: AsyncSession = Dep
                 "error": str(e),
             })
 
+    tm = config.target_mode or "new"
     return {
         "config_id": str(config.id),
         "config_name": config.name,
+        "target_mode": tm,
         "source_campaigns": all_candidates,
         "thresholds": {
             "sales": config.sales_threshold,
             "acos": config.acos_threshold,
             "clicks": config.clicks_threshold,
+            "lookback_days": config.lookback_days or 30,
         },
+        "preview_note": (
+            "qualified_keywords use sales, ACOS, clicks, lookback, and match-type the same way as "
+            "'add to existing' harvest. For new manual campaign mode, Amazon's harvest API applies "
+            "sales and ACOS from this config when the change runs; use qualified_keywords as a "
+            "directional preview only."
+            if tm == "new"
+            else "qualified_keywords match rows that would be added after approval (existing manual target)."
+        ),
     }
 
 
@@ -354,6 +383,8 @@ async def run_harvest(payload: HarvestRunRequest, db: AsyncSession = Depends(get
                         "target_campaign_id": target_selection.get("amazon_campaign_id") if target_selection else None,
                         "sales_threshold": config.sales_threshold,
                         "acos_threshold": config.acos_threshold,
+                        "clicks_threshold": config.clicks_threshold,
+                        "lookback_days": config.lookback_days or 30,
                         "match_type": config.match_type,
                         "negate_in_source": negate_in_source,
                         "target_mode": target_mode,
@@ -430,6 +461,8 @@ async def run_harvest(payload: HarvestRunRequest, db: AsyncSession = Depends(get
                 target_campaign_id=target_selection.get("amazon_campaign_id") if target_selection else None,
                 match_type=config.match_type,
                 negate_in_source=negate_in_source,
+                clicks_threshold=config.clicks_threshold,
+                lookback_days=config.lookback_days or 30,
             )
 
             kw_count = harvest_result.get("keywords_harvested", 0)

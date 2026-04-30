@@ -5,15 +5,12 @@ import {
   XCircle,
   Clock,
   Loader2,
-  ArrowUpRight,
-  ArrowDownRight,
   Bot,
   User,
   TrendingUp,
   DollarSign,
   Target,
   Zap,
-  Filter,
   CheckSquare,
   Send,
   AlertTriangle,
@@ -60,6 +57,82 @@ const sourceLabels = {
   harvester: { label: 'Harvester', icon: Zap, color: 'text-amber-600' },
 }
 
+/** Strip synthetic UI keys for raw JSON dump when structured aftercare is shown separately. */
+function rawApplyResultForJson(applyResult) {
+  if (!applyResult || typeof applyResult !== 'object') return applyResult
+  const { _aftercare, ...rest } = applyResult
+  return Object.keys(rest).length ? rest : applyResult
+}
+
+function ApplyResultPanel({ applyResult }) {
+  if (applyResult == null) return null
+  if (typeof applyResult !== 'object') {
+    return (
+      <div className="mt-3 bg-emerald-50 rounded-lg p-3 border border-emerald-100">
+        <p className="text-xs text-emerald-600 mb-1">Applied result</p>
+        <pre className="text-xs text-emerald-800 whitespace-pre-wrap">{String(applyResult)}</pre>
+      </div>
+    )
+  }
+
+  const aftercare = applyResult._aftercare
+  const rawPayload = aftercare ? rawApplyResultForJson(applyResult) : applyResult
+
+  return (
+    <div className="mt-3 space-y-2">
+      {aftercare && (
+        <div
+          className={`rounded-lg p-3 border ${
+            aftercare.verification?.ok && !aftercare.verification?.skipped
+              ? 'bg-emerald-50 border-emerald-200'
+              : aftercare.verification?.skipped
+                ? 'bg-slate-50 border-slate-200'
+                : 'bg-amber-50 border-amber-200'
+          }`}
+        >
+          <p className="text-xs font-medium text-slate-500 mb-0.5">Verification</p>
+          <p className="text-sm font-semibold text-slate-900">{aftercare.headline}</p>
+          {aftercare.summary && (
+            <p className="text-xs text-slate-600 mt-1">{aftercare.summary}</p>
+          )}
+          {Array.isArray(aftercare.verification?.drift) && aftercare.verification.drift.length > 0 && (
+            <ul className="mt-2 text-xs text-amber-900 list-disc pl-4 space-y-0.5">
+              {aftercare.verification.drift.slice(0, 8).map((d, i) => (
+                <li key={i}>
+                  {typeof d === 'object' && d !== null
+                    ? `${d.field ?? 'field'}: ${JSON.stringify(d.expected)} → ${JSON.stringify(d.actual)}`
+                    : String(d)}
+                </li>
+              ))}
+              {aftercare.verification.drift.length > 8 && (
+                <li className="list-none text-slate-500">
+                  +{aftercare.verification.drift.length - 8} more
+                </li>
+              )}
+            </ul>
+          )}
+        </div>
+      )}
+
+      <div className="bg-emerald-50 rounded-lg p-3 border border-emerald-100">
+        <p className="text-xs text-emerald-600 mb-1">{aftercare ? 'Raw MCP payload' : 'Applied result'}</p>
+        {aftercare ? (
+          <details>
+            <summary className="text-xs text-emerald-700 cursor-pointer hover:underline">Expand JSON</summary>
+            <pre className="mt-2 text-xs text-emerald-800 overflow-x-auto max-h-64 overflow-y-auto">
+              {JSON.stringify(rawPayload, null, 2)}
+            </pre>
+          </details>
+        ) : (
+          <pre className="text-xs text-emerald-800 overflow-x-auto max-h-64 overflow-y-auto">
+            {JSON.stringify(applyResult, null, 2)}
+          </pre>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export default function ApprovalQueue() {
   const { activeAccount, activeAccountId, activeProfileId } = useAccount()
   const [changes, setChanges] = useState([])
@@ -70,7 +143,6 @@ export default function ApprovalQueue() {
   const [expandedId, setExpandedId] = useState(null)
   const [applying, setApplying] = useState(false)
   const [reviewNote, setReviewNote] = useState('')
-  const [showBatchReview, setShowBatchReview] = useState(false)
   const [error, setError] = useState(null)
   const [successMsg, setSuccessMsg] = useState(null)
   const [deletingId, setDeletingId] = useState(null)
@@ -115,7 +187,6 @@ export default function ApprovalQueue() {
       await approvals.batchReview([...selected], action, reviewNote || null)
       flash(`${selected.size} changes ${action}d`)
       setSelected(new Set())
-      setShowBatchReview(false)
       setReviewNote('')
       await loadData()
     } catch (err) {
@@ -157,7 +228,18 @@ export default function ApprovalQueue() {
   }
 
   async function applyApproved() {
-    const approvedIds = changes.filter(c => c.status === 'approved').map(c => c.id)
+    let approvedIds = changes.filter((c) => c.status === 'approved').map((c) => c.id)
+    if (approvedIds.length === 0) {
+      try {
+        const rows = await approvals.list(activeAccountId, 'approved', {
+          profile_id: activeProfileId || undefined,
+        })
+        approvedIds = rows.map((c) => c.id)
+      } catch (err) {
+        setError(err.message)
+        return
+      }
+    }
     if (approvedIds.length === 0) return
 
     setApplying(true)
@@ -195,7 +277,10 @@ export default function ApprovalQueue() {
     setTimeout(() => setSuccessMsg(null), 4000)
   }
 
-  const approvedCount = changes.filter(c => c.status === 'approved').length
+  const approvedInView = changes.filter((c) => c.status === 'approved').length
+  const totalApproved = summary?.total_approved ?? 0
+  const pushCount = Math.max(totalApproved, approvedInView)
+  const canPushApproved = pushCount > 0
 
   return (
     <div className="space-y-6">
@@ -214,10 +299,10 @@ export default function ApprovalQueue() {
             </p>
           </div>
         </div>
-        {approvedCount > 0 && (
-          <button onClick={applyApproved} disabled={applying} className="btn-primary">
+        {canPushApproved && (
+          <button type="button" onClick={applyApproved} disabled={applying} className="btn-primary">
             {applying ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
-            Push {approvedCount} to Ads Manager
+            Push {pushCount} to Ads Manager
           </button>
         )}
       </div>
@@ -287,29 +372,46 @@ export default function ApprovalQueue() {
 
       {/* Batch Actions Bar */}
       {selected.size > 0 && (filter === 'pending' || filter === 'rejected') && (
-        <div className="card bg-brand-50 border-brand-200 p-4 flex items-center gap-4">
-          <div className="flex items-center gap-2">
-            <CheckSquare size={16} className="text-brand-600" />
-            <p className="text-sm font-medium text-brand-800">{selected.size} selected</p>
+        <div className="card bg-brand-50 border-brand-200 p-4 flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-2">
+              <CheckSquare size={16} className="text-brand-600" />
+              <p className="text-sm font-medium text-brand-800">{selected.size} selected</p>
+            </div>
+            <div className="flex-1 min-w-[1rem]" />
+            {filter === 'pending' && (
+              <>
+                <button type="button" onClick={() => batchReview('approve')} className="btn-primary text-xs">
+                  <CheckCircle size={14} /> Approve All
+                </button>
+                <button type="button" onClick={() => batchReview('reject')} className="btn-ghost text-red-600 text-xs hover:bg-red-50">
+                  <XCircle size={14} /> Reject All
+                </button>
+              </>
+            )}
+            <button type="button" onClick={batchDelete} disabled={deletingBatch} className="btn-ghost text-red-600 text-xs hover:bg-red-50">
+              {deletingBatch ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+              Delete All
+            </button>
+            <button type="button" onClick={() => setSelected(new Set())} className="btn-ghost text-xs">
+              Clear
+            </button>
           </div>
-          <div className="flex-1" />
           {filter === 'pending' && (
-            <>
-              <button onClick={() => batchReview('approve')} className="btn-primary text-xs">
-                <CheckCircle size={14} /> Approve All
-              </button>
-              <button onClick={() => batchReview('reject')} className="btn-ghost text-red-600 text-xs hover:bg-red-50">
-                <XCircle size={14} /> Reject All
-              </button>
-            </>
+            <div>
+              <label htmlFor="batch-review-note" className="text-xs font-medium text-brand-800">
+                Review note (optional)
+              </label>
+              <textarea
+                id="batch-review-note"
+                value={reviewNote}
+                onChange={(e) => setReviewNote(e.target.value)}
+                placeholder="Stored on each change in this batch"
+                rows={2}
+                className="mt-1 w-full rounded-lg border border-brand-200 bg-white px-3 py-2 text-sm text-slate-800 placeholder:text-slate-400 focus:border-brand-400 focus:outline-none focus:ring-1 focus:ring-brand-300"
+              />
+            </div>
           )}
-          <button onClick={batchDelete} disabled={deletingBatch} className="btn-ghost text-red-600 text-xs hover:bg-red-50">
-            {deletingBatch ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
-            Delete All
-          </button>
-          <button onClick={() => setSelected(new Set())} className="btn-ghost text-xs">
-            Clear
-          </button>
         </div>
       )}
 
@@ -510,12 +612,7 @@ export default function ApprovalQueue() {
                     )}
 
                     {change.apply_result && (
-                      <div className="mt-3 bg-emerald-50 rounded-lg p-3">
-                        <p className="text-xs text-emerald-400 mb-1">Applied Result</p>
-                        <pre className="text-xs text-emerald-700 overflow-x-auto">
-                          {JSON.stringify(change.apply_result, null, 2)}
-                        </pre>
-                      </div>
+                      <ApplyResultPanel applyResult={change.apply_result} />
                     )}
 
                     {change.change_detail && (

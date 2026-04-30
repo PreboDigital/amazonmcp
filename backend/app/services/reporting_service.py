@@ -9,7 +9,7 @@ import gzip
 import logging
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func
 import httpx
@@ -1175,6 +1175,184 @@ class ReportingService:
         except Exception as e:
             logger.warning(f"MCP report generation failed: {e}")
             return {}
+
+    @staticmethod
+    def _targeting_row_entity_id(row: dict) -> Optional[str]:
+        for key in (
+            "keywordId", "targetId", "targetingId", "adKeywordId",
+            "keyword_id", "target_id",
+        ):
+            v = row.get(key)
+            if v is not None and str(v).strip():
+                return str(v).strip()
+        for rk, rv in row.items():
+            if not isinstance(rk, str):
+                continue
+            if rk in ("keyword.id", "target.id") or rk.endswith("keywordId") or rk.endswith("targetId"):
+                if rv is not None and str(rv).strip():
+                    return str(rv).strip()
+        return None
+
+    @classmethod
+    def merge_targeting_report_rows(cls, rows: list) -> Dict[str, Dict[str, Any]]:
+        """Aggregate downloaded targeting report rows by entity id (keyword/target)."""
+        out: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            tid = cls._targeting_row_entity_id(row)
+            if not tid:
+                continue
+            clicks = int(
+                row.get("clicks") or row.get("metric.clicks")
+                or row.get("metric.click") or 0
+            )
+            spend = float(
+                row.get("cost") or row.get("metric.totalCost")
+                or row.get("metric.supplyCost") or row.get("spend") or 0
+            )
+            sales = float(
+                row.get("sales7d") or row.get("sales14d") or row.get("sales30d")
+                or row.get("sales") or row.get("metric.sales")
+                or row.get("attributedSales14d") or 0
+            )
+            orders = int(
+                row.get("purchases7d") or row.get("purchases14d")
+                or row.get("purchases") or row.get("metric.purchases") or 0
+            )
+            agg = out.setdefault(
+                tid,
+                {"clicks": 0, "spend": 0.0, "sales": 0.0, "orders": 0},
+            )
+            agg["clicks"] += clicks
+            agg["spend"] += spend
+            agg["sales"] += sales
+            agg["orders"] += orders
+        return out
+
+    async def _fetch_targeting_report_rows(
+        self,
+        start_date: str,
+        end_date: str,
+        report_type_id: str,
+        columns: list[str],
+        *,
+        max_wait: int,
+    ) -> list:
+        if not self.client:
+            return []
+
+        base_report = {
+            "format": "GZIP_JSON",
+            "periods": [{"datePeriod": {"startDate": start_date, "endDate": end_date}}],
+            "reportTypeId": report_type_id,
+            "timeUnit": "SUMMARY",
+        }
+        attempts: list[dict] = [
+            {**base_report, "groupBy": ["targeting"], "columns": columns},
+            {**base_report, "columns": columns},
+        ]
+
+        last_err: Optional[Exception] = None
+        for report_body in attempts:
+            report_config = {"reports": [report_body]}
+            try:
+                result = await self.client.create_report(
+                    report_config,
+                    advertiser_account_id=self.advertiser_account_id,
+                )
+                report_ids = self._extract_report_ids(result)
+                if not report_ids:
+                    continue
+                completed = await self.client.poll_report(
+                    report_ids, max_wait=max_wait, interval=10
+                )
+                if self.client._get_report_status(completed) != "COMPLETED":
+                    continue
+                rows = await self._download_report_data(completed)
+                if rows:
+                    return rows
+            except Exception as e:
+                last_err = e
+                logger.info(
+                    "Targeting report %s variant failed: %s",
+                    report_type_id,
+                    e,
+                )
+                continue
+
+        if last_err:
+            logger.warning(
+                "Targeting report %s could not be fetched: %s",
+                report_type_id,
+                last_err,
+            )
+        return []
+
+    async def generate_mcp_targeting_performance(
+        self,
+        start_date: str,
+        end_date: str,
+        max_wait: int = 150,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Download keyword/target-level metrics (SP, SB, SD) for bid optimization.
+        Merges rows by entity id for lookup against MCP ``targetId`` / ``keywordId``.
+        """
+        combined: Dict[str, Dict[str, Any]] = {}
+        if not self.client:
+            return combined
+
+        specs: list[tuple[str, list[str]]] = [
+            (
+                "spTargeting",
+                [
+                    "campaignId", "adGroupId", "keywordId", "keyword", "matchType",
+                    "targeting", "impressions", "clicks", "cost",
+                    "purchases7d", "sales7d",
+                ],
+            ),
+            (
+                "sbKeywords",
+                [
+                    "campaignId", "adGroupId", "keywordId", "keyword", "matchType",
+                    "impressions", "clicks", "cost", "purchases14d", "sales14d",
+                ],
+            ),
+            (
+                "sdTargeting",
+                [
+                    "campaignId", "adGroupId", "targetId",
+                    "impressions", "clicks", "cost", "purchases14d", "sales14d",
+                ],
+            ),
+        ]
+
+        for report_type_id, columns in specs:
+            rows = await self._fetch_targeting_report_rows(
+                start_date,
+                end_date,
+                report_type_id,
+                columns,
+                max_wait=max_wait,
+            )
+            merged = self.merge_targeting_report_rows(rows)
+            for tid, metrics in merged.items():
+                prev = combined.get(tid)
+                if not prev:
+                    combined[tid] = {
+                        "clicks": metrics["clicks"],
+                        "spend": metrics["spend"],
+                        "sales": metrics["sales"],
+                        "orders": metrics["orders"],
+                    }
+                else:
+                    prev["clicks"] += metrics["clicks"]
+                    prev["spend"] += metrics["spend"]
+                    prev["sales"] += metrics["sales"]
+                    prev["orders"] += metrics["orders"]
+
+        return combined
 
     async def generate_daily_report_rows(
         self,

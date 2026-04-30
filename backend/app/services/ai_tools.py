@@ -215,6 +215,187 @@ _INLINE_TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "campaign_management-create_ad_group",
+        "description": (
+            "Create one or more ad groups inside an existing campaign. "
+            "Always provide campaignId from context."
+        ),
+        "scope": "inline",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "body": {
+                    "type": "object",
+                    "properties": {
+                        "adGroups": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "campaignId": _STRING,
+                                    "name": _STRING,
+                                    "defaultBid": _NUMBER,
+                                    "state": {
+                                        "type": "string",
+                                        "enum": ["ENABLED", "PAUSED"],
+                                    },
+                                },
+                                "required": ["campaignId", "name", "defaultBid"],
+                            },
+                            "minItems": 1,
+                        }
+                    },
+                    "required": ["adGroups"],
+                }
+            },
+            "required": ["body"],
+        },
+    },
+    {
+        "name": "campaign_management-delete_ad_group",
+        "description": "Permanently delete one or more ad group IDs.",
+        "scope": "inline",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "body": {
+                    "type": "object",
+                    "properties": {
+                        "adGroupIds": {
+                            "type": "array",
+                            "items": _STRING,
+                            "minItems": 1,
+                        }
+                    },
+                    "required": ["adGroupIds"],
+                }
+            },
+            "required": ["body"],
+        },
+    },
+    {
+        "name": "campaign_management-update_ad",
+        "description": (
+            "Rename or pause/enable/archive one or more ads. "
+            "Use ad IDs from context."
+        ),
+        "scope": "inline",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "body": {
+                    "type": "object",
+                    "properties": {
+                        "ads": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "adId": _STRING,
+                                    "name": _STRING,
+                                    "state": {
+                                        "type": "string",
+                                        "enum": ["ENABLED", "PAUSED", "ARCHIVED"],
+                                    },
+                                },
+                                "required": ["adId"],
+                            },
+                            "minItems": 1,
+                        }
+                    },
+                    "required": ["ads"],
+                }
+            },
+            "required": ["body"],
+        },
+    },
+    {
+        "name": "campaign_management-create_ad",
+        "description": (
+            "Create one or more product ads inside an existing ad group. "
+            "Always provide adGroupId + ASIN from context."
+        ),
+        "scope": "inline",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "body": {
+                    "type": "object",
+                    "properties": {
+                        "ads": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "adGroupId": _STRING,
+                                    "asin": _STRING,
+                                    "sku": _STRING,
+                                    "name": _STRING,
+                                    "state": {
+                                        "type": "string",
+                                        "enum": ["ENABLED", "PAUSED"],
+                                    },
+                                },
+                                "required": ["adGroupId"],
+                            },
+                            "minItems": 1,
+                        }
+                    },
+                    "required": ["ads"],
+                }
+            },
+            "required": ["body"],
+        },
+    },
+    {
+        "name": "campaign_management-delete_ad",
+        "description": "Permanently delete one or more ad IDs.",
+        "scope": "inline",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "body": {
+                    "type": "object",
+                    "properties": {
+                        "adIds": {
+                            "type": "array",
+                            "items": _STRING,
+                            "minItems": 1,
+                        }
+                    },
+                    "required": ["adIds"],
+                }
+            },
+            "required": ["body"],
+        },
+    },
+    {
+        "name": "campaign_management-delete_campaign",
+        "description": (
+            "Permanently delete one or more campaigns. Destructive — prefer "
+            "update_campaign_state with state=ARCHIVED unless the user "
+            "explicitly asks to delete."
+        ),
+        "scope": "inline",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "body": {
+                    "type": "object",
+                    "properties": {
+                        "campaignIds": {
+                            "type": "array",
+                            "items": _STRING,
+                            "minItems": 1,
+                        }
+                    },
+                    "required": ["campaignIds"],
+                }
+            },
+            "required": ["body"],
+        },
+    },
+    {
         "name": "campaign_management-create_target",
         "description": (
             "Add a new keyword/target to an existing ad group. "

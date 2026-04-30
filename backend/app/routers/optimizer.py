@@ -244,6 +244,7 @@ async def run_optimization(payload: OptimizeRunRequest, db: AsyncSession = Depen
             max_bid=rule.max_bid,
             bid_step=rule.bid_step,
             min_clicks=rule.min_clicks,
+            lookback_days=max(1, min(int(rule.lookback_days or 14), 90)),
             dry_run=payload.dry_run,
         )
 

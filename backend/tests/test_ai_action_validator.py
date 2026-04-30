@@ -259,3 +259,35 @@ async def test_validate_batch_partitions_results(db_with_existing_ids, cred):
     assert len(accepted) == 1
     assert len(rejected) == 1
     assert rejected[0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_harvest_rejects_negative_clicks_threshold(db_with_existing_ids, cred):
+    action = {
+        "tool": "_harvest_execute",
+        "arguments": {
+            "source_campaign_id": "c1",
+            "clicks_threshold": -1,
+        },
+    }
+    result = await validator.validate_ai_action(
+        action, db_with_existing_ids, cred, allow_queue_only_tools=True,
+    )
+    assert not result.ok
+    assert "clicks_threshold" in result.error
+
+
+@pytest.mark.asyncio
+async def test_harvest_rejects_lookback_out_of_range(db_with_existing_ids, cred):
+    action = {
+        "tool": "_harvest_execute",
+        "arguments": {
+            "source_campaign_id": "c1",
+            "lookback_days": 100,
+        },
+    }
+    result = await validator.validate_ai_action(
+        action, db_with_existing_ids, cred, allow_queue_only_tools=True,
+    )
+    assert not result.ok
+    assert "lookback_days" in result.error

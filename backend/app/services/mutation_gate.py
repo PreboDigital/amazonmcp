@@ -129,6 +129,9 @@ def sanitize_mutation_queue_args(
         _clip_list(body, "adGroups", MAX_AD_GROUPS_PER_CALL, f"{tool}.body.adGroups")
         _clip_list(body, "ads", MAX_AD_GROUPS_PER_CALL, f"{tool}.body.ads")
         _clip_list(body, "targetIds", MAX_TARGET_IDS_PER_DELETE, f"{tool}.body.targetIds")
+        _clip_list(body, "campaignIds", MAX_CAMPAIGNS_PER_CALL, f"{tool}.body.campaignIds")
+        _clip_list(body, "adGroupIds", MAX_AD_GROUPS_PER_CALL, f"{tool}.body.adGroupIds")
+        _clip_list(body, "adIds", MAX_AD_GROUPS_PER_CALL, f"{tool}.body.adIds")
 
     encoded = json.dumps(args, default=str)
     if len(encoded) > MAX_ARGUMENT_BYTES:

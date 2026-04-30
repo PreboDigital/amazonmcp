@@ -10,7 +10,12 @@ cannibalization between auto and manual campaigns.
 
 import logging
 from typing import Optional
+
 from app.mcp_client import AmazonAdsMCP
+from app.services.harvest_filtering import (
+    filter_target_list_for_harvest,
+    normalize_target_list,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +34,8 @@ class HarvestService:
         target_ad_group_id: Optional[str] = None,
         match_type: Optional[str] = None,
         negate_in_source: bool = True,
+        clicks_threshold: Optional[int] = None,
+        lookback_days: int = 30,
     ) -> dict:
         """
         Execute keyword harvesting.
@@ -54,6 +61,8 @@ class HarvestService:
                 acos_threshold=acos_threshold,
                 match_type=match_type,
                 negate_in_source=negate_in_source,
+                clicks_threshold=clicks_threshold,
+                lookback_days=lookback_days,
             )
         else:
             return await self._harvest_create_new(
@@ -127,6 +136,8 @@ class HarvestService:
         acos_threshold: Optional[float],
         match_type: Optional[str],
         negate_in_source: bool,
+        clicks_threshold: Optional[int] = None,
+        lookback_days: int = 30,
     ) -> dict:
         """
         Manual harvest: get candidates from source, add as targets to existing campaign.
@@ -134,47 +145,16 @@ class HarvestService:
         try:
             # Step 1: Get keyword candidates from source auto campaign
             candidates = await self.get_harvest_candidates(source_campaign_id)
-            targets = candidates.get("targets", {})
-
-            # Extract target list from response
-            target_list = []
-            if isinstance(targets, dict):
-                for key in ["targets", "result", "results", "items"]:
-                    if key in targets and isinstance(targets[key], list):
-                        target_list = targets[key]
-                        break
-            elif isinstance(targets, list):
-                target_list = targets
-
-            # Step 2: Filter by thresholds
-            qualified_keywords = []
-            for t in target_list:
-                kw_text = t.get("keyword") or t.get("keywordText") or t.get("expression") or t.get("text")
-                if not kw_text:
-                    continue
-
-                sales = t.get("sales") or t.get("attributedSales7d") or 0
-                acos = t.get("acos") or t.get("acos7d") or 0
-                clicks = t.get("clicks") or 0
-
-                # Apply thresholds
-                try:
-                    if float(sales) < sales_threshold:
-                        continue
-                    if acos_threshold and float(acos) > acos_threshold:
-                        continue
-                except (ValueError, TypeError):
-                    continue
-
-                qualified_keywords.append({
-                    "keyword": kw_text,
-                    "matchType": match_type or t.get("matchType", "BROAD"),
-                    "bid": t.get("bid"),
-                    "clicks": clicks,
-                    "sales": sales,
-                    "spend": t.get("spend") or t.get("cost"),
-                    "acos": acos,
-                })
+            raw_targets = candidates.get("targets", {})
+            target_list = normalize_target_list(raw_targets)
+            qualified_keywords, metrics_window = filter_target_list_for_harvest(
+                target_list,
+                sales_threshold=sales_threshold,
+                acos_threshold=acos_threshold,
+                clicks_threshold=clicks_threshold,
+                lookback_days=lookback_days,
+                match_type_filter=match_type,
+            )
 
             if not qualified_keywords:
                 return {
@@ -185,6 +165,7 @@ class HarvestService:
                     "keywords_harvested": 0,
                     "keywords_negated_in_source": 0,
                     "keywords": [],
+                    "metrics_window": metrics_window,
                     "message": "No keywords met the harvest thresholds.",
                 }
 
@@ -250,6 +231,7 @@ class HarvestService:
                 "keywords_harvested": len(qualified_keywords),
                 "keywords_negated_in_source": negated_count,
                 "keywords": qualified_keywords,
+                "metrics_window": metrics_window,
                 "create_result": create_result,
             }
 

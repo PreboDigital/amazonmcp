@@ -303,13 +303,23 @@ async def _verify_target_create(client, body: dict) -> dict:
     for ag_id in ad_group_ids:
         existing = await _read_targets_for_ad_group(client, ag_id)
         existing_expressions = {
-            str(t.get("expression") or t.get("keywordText") or "").strip().lower()
+            str(
+                t.get("expression")
+                or t.get("keywordText")
+                or t.get("keyword")
+                or ""
+            ).strip().lower()
             for t in existing
         }
         for req in requested:
             if str(req.get("adGroupId")) != ag_id:
                 continue
-            expr = str(req.get("expression") or "").strip().lower()
+            expr = str(
+                req.get("expression")
+                or req.get("keyword")
+                or req.get("keywordText")
+                or ""
+            ).strip().lower()
             if expr and expr in existing_expressions:
                 matched += 1
             else:
@@ -414,6 +424,122 @@ async def _verify_ad_group_update(client, body: dict) -> dict:
     }
 
 
+def campaign_id_from_harvest_mcp_result(mcp_result: Any) -> Optional[str]:
+    """Best-effort new manual campaign id from create_campaign_harvest_targets or harvest service result."""
+    if not isinstance(mcp_result, dict):
+        return None
+    for key in ("target_campaign_id", "targetCampaignId", "campaignId", "manualCampaignId"):
+        v = mcp_result.get(key)
+        if v:
+            return str(v)
+    for nested_key in ("raw_result", "result", "data"):
+        inner = mcp_result.get(nested_key)
+        if isinstance(inner, dict):
+            found = campaign_id_from_harvest_mcp_result(inner)
+            if found:
+                return found
+    hr = mcp_result.get("harvestResults") or mcp_result.get("harvestRequestResults")
+    if isinstance(hr, list):
+        for item in hr:
+            if isinstance(item, dict):
+                for key in ("targetCampaignId", "campaignId", "manualCampaignId"):
+                    v = item.get(key)
+                    if v:
+                        return str(v)
+    return None
+
+
+async def verify_harvest_execution(client, arguments: dict, mcp_result: dict) -> dict:
+    """Read-back after ``_harvest_execute`` (existing = keywords on target campaign; new = campaign exists)."""
+    if mcp_result.get("status") == "error":
+        return {"ok": True, "skipped": True, "reason": "harvest service reported error"}
+    mode = mcp_result.get("mode")
+    if mode == "existing_campaign":
+        tcid = mcp_result.get("target_campaign_id")
+        keywords = mcp_result.get("keywords") or []
+        if not tcid:
+            return {"ok": False, "error": "missing target_campaign_id in harvest result", "drift": []}
+        try:
+            res = await client.query_targets(campaign_id=str(tcid), all_products=True)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[:300], "drift": []}
+        targets = res.get("targets") if isinstance(res, dict) else None
+        if not isinstance(targets, list):
+            targets = []
+        found_exprs: set[str] = set()
+        for t in targets:
+            if not isinstance(t, dict):
+                continue
+            txt = str(
+                t.get("keywordText")
+                or t.get("expression")
+                or t.get("keyword")
+                or ""
+            ).strip().lower()
+            if txt:
+                found_exprs.add(txt)
+        drift: list[dict] = []
+        for kw in keywords:
+            if not isinstance(kw, dict):
+                continue
+            ktxt = str(kw.get("keyword") or kw.get("text") or "").strip().lower()
+            if not ktxt:
+                continue
+            if ktxt not in found_exprs:
+                drift.append({
+                    "keyword": ktxt,
+                    "field": "_existence",
+                    "expected": "present in target campaign",
+                    "observed": "missing",
+                })
+        return {
+            "checked": len(keywords),
+            "matched": len(keywords) - len(drift),
+            "drift": drift,
+            "ok": not drift,
+        }
+    if mode == "new_campaign":
+        cid = campaign_id_from_harvest_mcp_result(mcp_result)
+        if not cid:
+            return {"ok": True, "skipped": True, "reason": "no target campaign id in harvest result"}
+        actual = await _read_campaigns_for_ids(client, [cid])
+        if cid not in actual:
+            return {
+                "checked": 1,
+                "found": 0,
+                "drift": [{
+                    "campaignId": cid,
+                    "field": "_existence",
+                    "expected": "present",
+                    "observed": "missing",
+                }],
+                "ok": False,
+            }
+        return {"checked": 1, "found": 1, "drift": [], "ok": True}
+    return {"ok": True, "skipped": True, "reason": "unknown harvest mode in result"}
+
+
+async def verify_harvest_create_campaign_result(client, arguments: dict, mcp_result: dict) -> dict:
+    """Read-back after ``campaign_management-create_campaign_harvest_targets``."""
+    cid = campaign_id_from_harvest_mcp_result(mcp_result)
+    if not cid:
+        return {"ok": True, "skipped": True, "reason": "no campaign id in MCP harvest result"}
+    actual = await _read_campaigns_for_ids(client, [cid])
+    if cid not in actual:
+        return {
+            "checked": 1,
+            "found": 0,
+            "drift": [{
+                "campaignId": cid,
+                "field": "_existence",
+                "expected": "present",
+                "observed": "missing",
+            }],
+            "ok": False,
+        }
+    return {"checked": 1, "found": 1, "drift": [], "ok": True}
+
+
 # ── Public verify entrypoint ─────────────────────────────────────────
 
 _VERIFIERS = {
@@ -504,6 +630,26 @@ def _next_prompts_for(tool: str, drift: list[dict]) -> list[str]:
         ]
     if tool == "campaign_management-update_ad_group":
         return ["Show ad group performance for the last 7 days"]
+    if tool == "_harvest_execute":
+        if has_drift:
+            return [
+                "List targets in the target manual campaign that did not verify",
+                "Re-sync campaigns and retry the harvest batch",
+            ]
+        return [
+            "Review performance of harvested keywords after 48 hours",
+            "Suggest negatives to protect the new manual spend",
+        ]
+    if tool == "campaign_management-create_campaign_harvest_targets":
+        if has_drift:
+            return [
+                "Confirm the new manual campaign exists in Amazon Ads console",
+                "Re-run discover accounts / campaign sync",
+            ]
+        return [
+            "Monitor the new manual campaign's first week of delivery",
+            "Compare ACOS vs the source auto campaign",
+        ]
     return []
 
 

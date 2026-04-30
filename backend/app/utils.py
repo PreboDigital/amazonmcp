@@ -262,6 +262,34 @@ def normalize_mcp_arguments(tool_name: str, arguments: Optional[dict[str, Any]])
         if "targetId" in body and "targetIds" not in body:
             body = {"targetIds": [body["targetId"]]}
 
+    elif tool_name == "campaign_management-delete_campaign":
+        if "campaignId" in body and "campaignIds" not in body:
+            body = {"campaignIds": [body["campaignId"]]}
+
+    elif tool_name == "campaign_management-delete_ad_group":
+        if "adGroupId" in body and "adGroupIds" not in body:
+            body = {"adGroupIds": [body["adGroupId"]]}
+
+    elif tool_name == "campaign_management-delete_ad":
+        if "adId" in body and "adIds" not in body:
+            body = {"adIds": [body["adId"]]}
+
+    elif tool_name == "campaign_management-create_ad_group":
+        if "campaignId" in body and "adGroups" not in body:
+            body = {"adGroups": [body]}
+        if isinstance(body.get("adGroups"), list):
+            groups = _normalize_states(body["adGroups"])
+            for g in groups:
+                if "defaultBid" in g:
+                    g["defaultBid"] = _to_float(g.get("defaultBid"))
+            body["adGroups"] = groups
+
+    elif tool_name == "campaign_management-create_ad":
+        if "adGroupId" in body and "ads" not in body:
+            body = {"ads": [body]}
+        if isinstance(body.get("ads"), list):
+            body["ads"] = _normalize_states(body["ads"])
+
     elif tool_name == "campaign_management-update_ad_group":
         if "adGroupId" in body and "adGroups" not in body:
             body = {"adGroups": [body]}

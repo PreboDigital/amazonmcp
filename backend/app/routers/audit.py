@@ -16,7 +16,6 @@ from app.models import (
     Credential, AuditSnapshot, AuditIssue, AuditOpportunity,
     Report, ActivityLog, Account,
 )
-from app.mcp_client import create_mcp_client
 from app.services.account_scope import resolve_campaign_sync_scope
 from app.services.token_service import get_mcp_client_with_fresh_token
 from app.services.audit_service import AuditService
@@ -48,20 +47,29 @@ async def _get_cred(db: AsyncSession, cred_id: str = None) -> Credential:
     return cred
 
 
-async def _resolve_advertiser_account_id(db: AsyncSession, cred: Credential) -> Optional[str]:
-    """Resolve the advertiserAccountId (amzn1 format) for report creation."""
+async def _resolve_audit_account_scope(
+    db: AsyncSession, cred: Credential,
+) -> tuple[Optional[str], Optional[str]]:
+    """advertiserAccountId + marketplace for the credential's selected profile.
+
+    Marketplace drives ``marketplace_today`` in ``AuditService`` so report windows
+    match Amazon's daily buckets in the account timezone.
+    """
     if not cred.profile_id:
-        return None
+        return None, None
     result = await db.execute(
         select(Account).where(
             Account.credential_id == cred.id,
             Account.profile_id == cred.profile_id,
         )
     )
-    active_account = result.scalar_one_or_none()
-    if active_account and active_account.raw_data:
-        return active_account.raw_data.get("advertiserAccountId")
-    return None
+    acc = result.scalar_one_or_none()
+    if not acc:
+        return None, None
+    adv = None
+    if acc.raw_data:
+        adv = acc.raw_data.get("advertiserAccountId")
+    return adv, (acc.marketplace or None)
 
 
 @router.post("/run")
@@ -83,9 +91,13 @@ async def run_audit(payload: AuditRequest, db: AsyncSession = Depends(get_db)):
     if scope_error:
         raise HTTPException(status_code=400, detail=scope_error)
     client = await get_mcp_client_with_fresh_token(cred, db)
-    adv_account_id = await _resolve_advertiser_account_id(db, cred)
+    adv_account_id, marketplace = await _resolve_audit_account_scope(db, cred)
 
-    service = AuditService(client, advertiser_account_id=adv_account_id)
+    service = AuditService(
+        client,
+        advertiser_account_id=adv_account_id,
+        marketplace=marketplace,
+    )
 
     try:
         audit_result = await service.run_full_audit()
@@ -218,8 +230,12 @@ async def create_report(payload: ReportRequest, db: AsyncSession = Depends(get_d
     if scope_error:
         raise HTTPException(status_code=400, detail=scope_error)
     client = await get_mcp_client_with_fresh_token(cred, db)
-    adv_account_id = await _resolve_advertiser_account_id(db, cred)
-    service = AuditService(client, advertiser_account_id=adv_account_id)
+    adv_account_id, marketplace = await _resolve_audit_account_scope(db, cred)
+    service = AuditService(
+        client,
+        advertiser_account_id=adv_account_id,
+        marketplace=marketplace,
+    )
 
     # Create report record in DB first
     report = Report(

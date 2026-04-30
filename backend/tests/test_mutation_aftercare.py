@@ -101,6 +101,17 @@ def test_verify_target_delete_drift_when_still_present():
 
 # ── Target create ────────────────────────────────────────────────────
 
+def test_verify_target_create_ok_when_keyword_field_present():
+    client = FakeMCP(targets=[
+        {"targetId": "t-99", "adGroupId": "ag-1", "keywordText": "shoes"},
+    ])
+    args = {"body": {"targets": [
+        {"adGroupId": "ag-1", "keyword": "shoes", "matchType": "EXACT"},
+    ]}}
+    report = _run(mac.verify_mutation(client, "campaign_management-create_target", args))
+    assert report["ok"] is True
+
+
 def test_verify_target_create_ok_when_expression_present():
     client = FakeMCP(targets=[
         {"targetId": "t-99", "adGroupId": "ag-1", "expression": "shoes"},

@@ -47,8 +47,13 @@ ALLOWED_INLINE_TOOLS: frozenset[str] = frozenset({
     "campaign_management-update_campaign_budget",
     "campaign_management-update_campaign",
     "campaign_management-update_campaign_state",
+    "campaign_management-delete_campaign",
+    "campaign_management-create_ad_group",
     "campaign_management-update_ad_group",
+    "campaign_management-delete_ad_group",
+    "campaign_management-create_ad",
     "campaign_management-update_ad",
+    "campaign_management-delete_ad",
     "campaign_management-create_target",
     "campaign_management-delete_target",
 })
@@ -438,6 +443,129 @@ async def _validate_delete_target(
     return None, warnings
 
 
+async def _validate_delete_campaign(
+    body: dict,
+    db: AsyncSession,
+    cred: Credential,
+    profile_id: Optional[str],
+) -> tuple[Optional[str], list[str]]:
+    ids = body.get("campaignIds")
+    if not isinstance(ids, list) or not ids:
+        return "body.campaignIds must be a non-empty list", []
+    warnings: list[str] = []
+    for idx, cid in enumerate(ids):
+        if not cid:
+            return f"body.campaignIds[{idx}] is empty", warnings
+        if not await _campaign_exists(db, cred.id, profile_id, str(cid)):
+            warnings.append(f"Campaign {cid} not in cache (may already be deleted)")
+    return None, warnings
+
+
+async def _validate_delete_ad_group(
+    body: dict,
+    db: AsyncSession,
+    cred: Credential,
+) -> tuple[Optional[str], list[str]]:
+    ids = body.get("adGroupIds")
+    if not isinstance(ids, list) or not ids:
+        return "body.adGroupIds must be a non-empty list", []
+    warnings: list[str] = []
+    for idx, gid in enumerate(ids):
+        if not gid:
+            return f"body.adGroupIds[{idx}] is empty", warnings
+        if not await _ad_group_exists(db, cred.id, str(gid)):
+            warnings.append(f"Ad group {gid} not in cache (may already be deleted)")
+    return None, warnings
+
+
+async def _validate_delete_ad(
+    body: dict,
+    db: AsyncSession,
+    cred: Credential,
+) -> tuple[Optional[str], list[str]]:
+    ids = body.get("adIds")
+    if not isinstance(ids, list) or not ids:
+        return "body.adIds must be a non-empty list", []
+    warnings: list[str] = []
+    for idx, aid in enumerate(ids):
+        if not aid:
+            return f"body.adIds[{idx}] is empty", warnings
+        if not await _ad_exists(db, cred.id, str(aid)):
+            warnings.append(f"Ad {aid} not in cache (may already be deleted)")
+    return None, warnings
+
+
+async def _validate_create_ad_group(
+    body: dict,
+    db: AsyncSession,
+    cred: Credential,
+    profile_id: Optional[str],
+) -> tuple[Optional[str], list[str]]:
+    groups = body.get("adGroups")
+    if not isinstance(groups, list) or not groups:
+        return "body.adGroups must be a non-empty list", []
+    warnings: list[str] = []
+    for idx, g in enumerate(groups):
+        if not isinstance(g, dict):
+            return f"body.adGroups[{idx}] must be an object", warnings
+        cid = g.get("campaignId")
+        if not cid:
+            return f"body.adGroups[{idx}].campaignId is required", warnings
+        if not await _campaign_exists(db, cred.id, profile_id, str(cid)):
+            return f"Campaign {cid} not found — sync campaigns first", warnings
+        name = (g.get("name") or "").strip()
+        if not name:
+            return f"body.adGroups[{idx}].name is required", warnings
+        if len(name) > MAX_NAME_LENGTH:
+            return f"body.adGroups[{idx}].name exceeds {MAX_NAME_LENGTH} chars", warnings
+        g["name"] = name
+        bid = _to_float(g.get("defaultBid"))
+        if bid is None:
+            return f"body.adGroups[{idx}].defaultBid is required and must be numeric", warnings
+        bid_err = _bid_in_range(bid)
+        if bid_err:
+            return f"body.adGroups[{idx}] {bid_err}", warnings
+        g["defaultBid"] = bid
+        if "state" in g:
+            st = _coerce_state(g["state"])
+            if st is None:
+                return f"body.adGroups[{idx}].state must be ENABLED|PAUSED|ARCHIVED", warnings
+            g["state"] = st
+    return None, warnings
+
+
+async def _validate_create_ad(
+    body: dict,
+    db: AsyncSession,
+    cred: Credential,
+) -> tuple[Optional[str], list[str]]:
+    ads = body.get("ads")
+    if not isinstance(ads, list) or not ads:
+        return "body.ads must be a non-empty list", []
+    warnings: list[str] = []
+    for idx, a in enumerate(ads):
+        if not isinstance(a, dict):
+            return f"body.ads[{idx}] must be an object", warnings
+        gid = a.get("adGroupId")
+        if not gid:
+            return f"body.ads[{idx}].adGroupId is required", warnings
+        if not await _ad_group_exists(db, cred.id, str(gid)):
+            return f"Ad group {gid} not found — sync ad groups first", warnings
+        if not (a.get("asin") or a.get("sku")):
+            return f"body.ads[{idx}] requires asin or sku", warnings
+        if "state" in a:
+            st = _coerce_state(a["state"])
+            if st is None:
+                return f"body.ads[{idx}].state must be ENABLED|PAUSED|ARCHIVED", warnings
+            a["state"] = st
+        if "name" in a:
+            name = (a.get("name") or "").strip()
+            if len(name) > MAX_NAME_LENGTH:
+                return f"body.ads[{idx}].name exceeds {MAX_NAME_LENGTH} chars", warnings
+            a["name"] = name
+    return None, warnings
+
+
 # ── Queue-only tool plan validators ───────────────────────────────────
 
 async def _validate_harvest_args(
@@ -486,6 +614,24 @@ async def _validate_harvest_args(
         v = _to_float(acos_threshold)
         if v is None or v < 0:
             return "harvest: acos_threshold must be a non-negative number", warnings
+
+    clicks_threshold = args.get("clicks_threshold")
+    if clicks_threshold is not None:
+        try:
+            ci = int(clicks_threshold)
+        except (TypeError, ValueError):
+            return "harvest: clicks_threshold must be an integer", warnings
+        if ci < 0:
+            return "harvest: clicks_threshold cannot be negative", warnings
+
+    lookback_days = args.get("lookback_days")
+    if lookback_days is not None:
+        try:
+            li = int(lookback_days)
+        except (TypeError, ValueError):
+            return "harvest: lookback_days must be an integer", warnings
+        if li < 1 or li > 90:
+            return "harvest: lookback_days must be between 1 and 90", warnings
 
     return None, warnings
 
@@ -792,6 +938,16 @@ async def validate_ai_action(
         err, warnings = await _validate_ad_group_update(body, db, cred)
     elif tool == "campaign_management-update_ad":
         err, warnings = await _validate_ad_update(body, db, cred)
+    elif tool == "campaign_management-delete_campaign":
+        err, warnings = await _validate_delete_campaign(body, db, cred, profile_id)
+    elif tool == "campaign_management-create_ad_group":
+        err, warnings = await _validate_create_ad_group(body, db, cred, profile_id)
+    elif tool == "campaign_management-delete_ad_group":
+        err, warnings = await _validate_delete_ad_group(body, db, cred)
+    elif tool == "campaign_management-create_ad":
+        err, warnings = await _validate_create_ad(body, db, cred)
+    elif tool == "campaign_management-delete_ad":
+        err, warnings = await _validate_delete_ad(body, db, cred)
     else:  # pragma: no cover — already filtered by allow-list above
         return ValidationResult(ok=False, error=f"Tool {tool!r} has no validator", tool=tool)
 

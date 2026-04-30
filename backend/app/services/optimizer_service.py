@@ -4,8 +4,11 @@ Calculates optimal bids based on ACOS targets and applies them.
 """
 
 import logging
-from typing import Optional
+from datetime import timedelta
+from typing import Any, Optional
+
 from app.mcp_client import AmazonAdsMCP
+from app.services.reporting_service import ReportingService
 from app.utils import marketplace_today
 
 logger = logging.getLogger(__name__)
@@ -32,6 +35,7 @@ class OptimizerService:
         max_bid: float = 100.0,
         bid_step: float = 0.10,
         min_clicks: int = 10,
+        lookback_days: int = 14,
         dry_run: bool = True,
     ) -> dict:
         """
@@ -50,41 +54,59 @@ class OptimizerService:
             max_bid: Maximum bid amount
             bid_step: Amount to adjust bids by
             min_clicks: Minimum clicks before making bid decisions
+            lookback_days: Performance window for targeting reports (1–90, clamped)
             dry_run: If True, only preview changes without applying
         """
         logger.info(f"Starting bid optimization (dry_run={dry_run})")
 
-        # Step 1: Get all targets
+        lb = max(1, min(int(lookback_days or 14), 90))
+        today = marketplace_today(self.marketplace, self.client.region)
+        end = today.isoformat()
+        start = (today - timedelta(days=lb)).isoformat()
+
+        # Step 1: Targeting performance (keyword/target-level) for ACOS math
+        metrics_by_target: dict[str, dict[str, Any]] = {}
+        report_meta: dict[str, Any] = {"date_range": {"start": start, "end": end, "lookback_days": lb}}
+        try:
+            report_svc = ReportingService(
+                self.client, advertiser_account_id=self.advertiser_account_id
+            )
+            metrics_by_target = await report_svc.generate_mcp_targeting_performance(
+                start, end, max_wait=150
+            )
+            report_meta["targeting_rows"] = len(metrics_by_target)
+        except Exception as e:
+            logger.warning(f"Targeting performance report unavailable: {e}")
+
+        # Step 2: Get all targets (SP + SB + SD)
         if campaign_ids:
             all_targets = []
             for cid in campaign_ids:
-                targets = await self.client.query_targets(campaign_id=cid)
+                targets = await self.client.query_targets(
+                    campaign_id=cid, all_products=True
+                )
                 all_targets.append({"campaign_id": cid, "targets": targets})
         else:
-            targets_data = await self.client.query_targets()
+            targets_data = await self.client.query_targets(all_products=True)
             all_targets = [{"campaign_id": "all", "targets": targets_data}]
 
-        # Step 2: Get performance report
-        from datetime import timedelta
-        today = marketplace_today(self.marketplace, self.client.region)
-        end = today.isoformat()
-        start = (today - timedelta(days=30)).isoformat()
-        report_config = {
-            "reports": [{
-                "format": "GZIP_JSON",
-                "periods": [{"datePeriod": {"startDate": start, "endDate": end}}],
-            }],
-        }
+        # Step 3: Campaign-level report (audit trail / UI); optional
+        report = {}
         try:
+            report_config = {
+                "reports": [{
+                    "format": "GZIP_JSON",
+                    "periods": [{"datePeriod": {"startDate": start, "endDate": end}}],
+                }],
+            }
             report = await self.client.create_campaign_report(
                 report_config,
                 advertiser_account_id=self.advertiser_account_id,
             )
         except Exception as e:
-            logger.warning(f"Could not generate performance report: {e}")
-            report = {}
+            logger.warning(f"Could not generate campaign summary report: {e}")
 
-        # Step 3: Calculate bid adjustments
+        # Step 4: Calculate bid adjustments (metrics merged from targeting report)
         adjustments = self._calculate_adjustments(
             all_targets=all_targets,
             target_acos=target_acos,
@@ -92,9 +114,10 @@ class OptimizerService:
             max_bid=max_bid,
             bid_step=bid_step,
             min_clicks=min_clicks,
+            metrics_by_target=metrics_by_target,
         )
 
-        # Step 4: Apply if not dry run
+        # Step 5: Apply if not dry run
         applied_count = 0
         if not dry_run and adjustments["changes"]:
             try:
@@ -124,6 +147,7 @@ class OptimizerService:
             "changes": adjustments["changes"],
             "summary": adjustments["summary"],
             "report": report,
+            "report_meta": report_meta,
             "_raw_targets": all_targets,  # raw MCP data for DB caching
         }
 
@@ -135,8 +159,10 @@ class OptimizerService:
         max_bid: float,
         bid_step: float,
         min_clicks: int,
+        metrics_by_target: Optional[dict[str, dict[str, Any]]] = None,
     ) -> dict:
         """Calculate bid adjustments for each target based on performance."""
+        metrics_by_target = metrics_by_target or {}
         changes = []
         analyzed = 0
         increases = 0
@@ -149,16 +175,18 @@ class OptimizerService:
             for target in target_list:
                 analyzed += 1
                 target_id = target.get("targetId") or target.get("id")
+                if target_id is not None:
+                    target_id = str(target_id).strip()
                 # Extract bid from nested MCP format (bid can be dict or float)
                 raw_bid = target.get("bid") or target.get("defaultBid")
                 if isinstance(raw_bid, dict):
                     raw_bid = raw_bid.get("value") or raw_bid.get("monetaryBid", {}).get("value")
                 current_bid = self._safe_float(raw_bid, 0)
-                # Performance metrics may not be in MCP query response (comes from reports)
-                # but we still try to extract them for DB-cached targets
-                clicks = self._safe_int(target.get("clicks"), 0)
-                spend = self._safe_float(target.get("spend") or target.get("cost"), 0)
-                sales = self._safe_float(target.get("sales") or target.get("attributedSales"), 0)
+                # Prefer targeting-report metrics; fall back to MCP query / cache
+                ext = self._metrics_for_target(target_id, metrics_by_target)
+                clicks = ext["clicks"] if ext else self._safe_int(target.get("clicks"), 0)
+                spend = ext["spend"] if ext else self._safe_float(target.get("spend") or target.get("cost"), 0)
+                sales = ext["sales"] if ext else self._safe_float(target.get("sales") or target.get("attributedSales"), 0)
                 state = target.get("state", "").upper()
 
                 # Skip non-enabled targets
@@ -213,7 +241,7 @@ class OptimizerService:
                 # Only record if bid actually changed
                 if abs(new_bid - current_bid) >= 0.01:
                     changes.append({
-                        "target_id": target_id,
+                        "target_id": str(target_id),
                         "current_bid": round(current_bid, 2),
                         "new_bid": round(new_bid, 2),
                         "change": round(new_bid - current_bid, 2),
@@ -237,6 +265,16 @@ class OptimizerService:
                 "target_acos": target_acos,
             },
         }
+
+    @staticmethod
+    def _metrics_for_target(
+        target_id,
+        metrics_by_target: dict[str, dict[str, Any]],
+    ) -> Optional[dict[str, Any]]:
+        if not target_id or not metrics_by_target:
+            return None
+        tid = str(target_id).strip()
+        return metrics_by_target.get(tid)
 
     @staticmethod
     def _extract_targets(data) -> list:
