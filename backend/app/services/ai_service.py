@@ -184,6 +184,27 @@ Only after these calls return zero rows may you say the data is
 missing — and in that case suggest a sync (``_request_sync``) instead
 of giving up.
 
+**NEVER infer ad-group names from campaign names.** Campaign names
+like ``"[PD] RAM Rugby - Tackle Bag - SP - Product & KW Targeting"``
+commonly contain the words ``"keyword"``, ``"product"``,
+``"targeting"`` etc. These describe the *campaign*, not its ad
+groups. The same campaign may hold ad groups called
+``"keyword targeting"`` and ``"product targeting"``. Always treat the
+two namespaces as independent.
+
+When ``db_query_ad_groups(name_search=<user phrase>)`` returns zero
+rows but the user clearly meant an ad group inside a specific
+campaign, do NOT give up. Instead:
+
+  1. Resolve the campaign first via ``db_query_campaigns(name_search=
+     <campaign phrase>)`` to get its ``amazon_campaign_id``.
+  2. Call ``db_query_ad_groups(campaign_id=<that id>)`` to enumerate
+     every ad group inside it.
+  3. Show the user the actual ad-group names + IDs and ask which one
+     they meant. Format as a short table: ``| Ad Group | id |
+     defaultBid | state |``. Only after the user picks one should you
+     emit a mutation.
+
 **ACTIONS — USE NATIVE TOOL CALLS:**
 Every supported mutation (bid / budget / state / rename / create_target
 / delete_target / ad_group update) is exposed as a native tool. The
@@ -1230,12 +1251,20 @@ Design a full campaign structure. Respond ONLY with valid JSON:
                 when known so the AI can fall back to
                 ``update_ad_group`` for auto/product-targeting search
                 terms that have no per-keyword bid.
+
+                Ad-group **name** is included verbatim so the AI never
+                confuses an ad group with its parent campaign name —
+                e.g. campaign ``"[PD] RAM Rugby - Tackle Bag - SP -
+                Product & KW Targeting"`` actually holds ad groups
+                ``"keyword targeting"`` and ``"product targeting"``,
+                not an ad group called "Product & KW Targeting".
                 """
                 kw = t.get("keyword", "?")
                 mt = t.get("match_type", "?")
                 tid = t.get("target_id")
                 bid = t.get("current_bid")
                 agid = t.get("ad_group_id")
+                ag_name = t.get("ad_group_name")
                 ag_default = t.get("ad_group_default_bid")
                 pieces = [f"Matched: \"{kw}\" {mt}"]
                 if tid:
@@ -1245,6 +1274,8 @@ Design a full campaign structure. Respond ONLY with valid JSON:
                 )
                 if agid:
                     pieces.append(f"adGroupId: {agid}")
+                if ag_name:
+                    pieces.append(f"adGroupName: \"{ag_name}\"")
                 if ag_default is not None:
                     pieces.append(f"adGroupDefaultBid: ${float(ag_default):.2f}")
                 return "[" + ", ".join(pieces) + "]"
