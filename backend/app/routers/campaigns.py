@@ -1787,7 +1787,9 @@ async def run_full_sync(
                 _logged_target_debug = True
 
             tgt_type = tgt_data.get("targetType") or tgt_data.get("type") or target_details.get("targetType")
-            match_type = tgt_data.get("matchType") or target_details.get("matchType")
+            _kt = target_details.get("keywordTarget")
+            _kt_m = _kt.get("matchType") if isinstance(_kt, dict) else None
+            match_type = tgt_data.get("matchType") or target_details.get("matchType") or _kt_m
 
             if target:
                 target.target_type = tgt_type or target.target_type

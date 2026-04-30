@@ -28,10 +28,11 @@ import {
   Ban,
   GitBranch,
   ArrowDown,
+  Download,
 } from 'lucide-react'
 import StatusBadge from '../components/StatusBadge'
 import EmptyState from '../components/EmptyState'
-import { harvest } from '../lib/api'
+import { harvest, downloadExport } from '../lib/api'
 import { useAccount } from '../lib/AccountContext'
 import { getAccountScopeMeta } from '../lib/accountScope'
 
@@ -256,7 +257,7 @@ function CampaignOption({ campaign, selected, onToggle }) {
 // ── Main Harvester Page ──────────────────────────────────────────────
 
 export default function Harvester() {
-  const { activeAccount, activeAccountId } = useAccount()
+  const { activeAccount, activeAccountId, activeProfileId } = useAccount()
   const activeScope = getAccountScopeMeta(activeAccount)
   const [configs, setConfigs] = useState([])
   const [loading, setLoading] = useState(true)
@@ -425,7 +426,22 @@ export default function Harvester() {
             </p>
           </div>
         </div>
-        <button onClick={openCreateModal} disabled={!activeAccount || !activeScope.canSyncCampaigns} title={!activeScope.canSyncCampaigns ? activeScope.warning : undefined} className="btn-primary"><Plus size={16} /> New Harvest Rule</button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className="btn-secondary text-sm"
+            disabled={!activeAccountId}
+            onClick={() => {
+              const p = new URLSearchParams()
+              if (activeAccountId) p.set('credential_id', activeAccountId)
+              if (activeProfileId) p.set('profile_id', activeProfileId)
+              downloadExport(`/exports/neg-keyword-packet.csv?${p.toString()}`, 'neg-keyword-packet.csv').catch((e) => setError(e.message))
+            }}
+          >
+            <Download size={14} /> Neg packet CSV
+          </button>
+          <button onClick={openCreateModal} disabled={!activeAccount || !activeScope.canSyncCampaigns} title={!activeScope.canSyncCampaigns ? activeScope.warning : undefined} className="btn-primary"><Plus size={16} /> New Harvest Rule</button>
+        </div>
       </div>
 
       {!activeAccount && (

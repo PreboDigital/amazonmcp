@@ -6,6 +6,7 @@ All data persisted to PostgreSQL — no temporary local storage.
 
 import uuid
 import enum
+from typing import Optional
 from datetime import datetime, timezone
 from sqlalchemy import (
     String, Text, Float, Integer, BigInteger, Boolean, DateTime,
@@ -1048,12 +1049,41 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(50), default="user")  # admin, user
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_login_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+    weekly_digest_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+    saved_views: Mapped[list["SavedView"]] = relationship("SavedView", back_populates="user", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index("ix_users_email", "email"),
         Index("ix_users_role", "role"),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  SAVED VIEWS — User bookmarks for Reports / Dashboard filters
+# ══════════════════════════════════════════════════════════════════════
+
+class SavedView(Base):
+    """Named filter preset for Reports or Dashboard (per user)."""
+    __tablename__ = "saved_views"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    page: Mapped[str] = mapped_column(String(64), nullable=False)  # reports | dashboard
+    credential_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("credentials.id", ondelete="SET NULL"), nullable=True)
+    profile_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+    user: Mapped["User"] = relationship("User", back_populates="saved_views")
+
+    __table_args__ = (
+        Index("ix_saved_views_user_id", "user_id"),
+        Index("ix_saved_views_page", "page"),
     )
 
 

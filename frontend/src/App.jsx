@@ -20,6 +20,7 @@ import Register from './pages/Register'
 import ForgotPassword from './pages/ForgotPassword'
 import ResetPassword from './pages/ResetPassword'
 import UserManagement from './pages/UserManagement'
+import ActivityLedger from './pages/ActivityLedger'
 import { Loader2 } from 'lucide-react'
 
 function ProtectedRoute({ children }) {
@@ -60,6 +61,7 @@ export default function App() {
                     <Route path="/campaigns" element={<CampaignManager />} />
                     <Route path="/ai" element={<AIAssistant />} />
                     <Route path="/approvals" element={<ApprovalQueue />} />
+                    <Route path="/activity" element={<ActivityLedger />} />
                     <Route path="/audit" element={<Audit />} />
                     <Route path="/harvester" element={<Harvester />} />
                     <Route path="/optimizer" element={<Optimizer />} />

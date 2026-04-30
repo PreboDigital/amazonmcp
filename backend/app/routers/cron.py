@@ -29,16 +29,14 @@ from app.database import get_db
 from app.models import (
     Account,
     AccountPerformanceDaily,
-    AdGroup,
-    Campaign,
     CampaignPerformanceDaily,
     ProductPerformanceDaily,
     Report,
     SearchTermPerformance,
     SyncJob,
-    Target,
     User,
 )
+from app.services.data_freshness import build_tables_and_jobs_freshness
 from app.routers.campaigns import _run_sync_background, run_full_sync
 from app.routers.reporting import (
     _find_report_sync_job,
@@ -1068,35 +1066,6 @@ async def trigger_products(
 # ── Health / freshness ──────────────────────────────────────────────────
 
 
-def _staleness_label(dt, *, warn_hours: float, crit_hours: float) -> str:
-    """Map a "last updated" timestamp to fresh|warn|stale|never."""
-    if not dt:
-        return "never"
-    age_hours = (utcnow() - dt).total_seconds() / 3600.0
-    if age_hours < warn_hours:
-        return "fresh"
-    if age_hours < crit_hours:
-        return "warn"
-    return "stale"
-
-
-def _staleness_label_from_iso_date(date_str, *, warn_days: float, crit_days: float) -> str:
-    """Same idea but for date-string columns (e.g. performance daily.date = 'YYYY-MM-DD')."""
-    if not date_str:
-        return "never"
-    try:
-        from datetime import datetime as _dt
-        d = _dt.fromisoformat(str(date_str)[:10])
-    except Exception:
-        return "unknown"
-    age_days = (utcnow().replace(tzinfo=None) - d).days
-    if age_days < warn_days:
-        return "fresh"
-    if age_days < crit_days:
-        return "warn"
-    return "stale"
-
-
 @router.get("/health")
 async def cron_health(
     credential_id: Optional[str] = Query(None),
@@ -1127,142 +1096,10 @@ async def cron_health(
         "checked_at": utcnow().isoformat(),
     }
 
-    # ── Cached table freshness ─────────────────────────────────────────
-    def _scope(query, model):
-        q = query.where(model.credential_id == cred.id)
-        if hasattr(model, "profile_id"):
-            if selected_profile_id is not None:
-                q = q.where(model.profile_id == selected_profile_id)
-            else:
-                q = q.where(model.profile_id.is_(None))
-        return q
-
-    tables: dict[str, dict] = {}
-
-    async def _row_count(model) -> int:
-        from sqlalchemy import func as _func
-        q = _scope(select(_func.count()).select_from(model), model)
-        return int((await db.execute(q)).scalar() or 0)
-
-    async def _max_ts(model, col):
-        from sqlalchemy import func as _func
-        q = _scope(select(_func.max(col)), model)
-        return (await db.execute(q)).scalar()
-
-    # Campaign metadata
-    last_camp_sync = await _max_ts(Campaign, Campaign.synced_at)
-    tables["campaigns"] = {
-        "row_count": await _row_count(Campaign),
-        "last_synced_at": last_camp_sync.isoformat() if last_camp_sync else None,
-        "staleness": _staleness_label(last_camp_sync, warn_hours=24, crit_hours=72),
-        "source": "Campaign sync cron (POST /api/cron/sync)",
-    }
-    last_ag_sync = await _max_ts(AdGroup, AdGroup.synced_at)
-    tables["ad_groups"] = {
-        "row_count": await _row_count(AdGroup),
-        "last_synced_at": last_ag_sync.isoformat() if last_ag_sync else None,
-        "staleness": _staleness_label(last_ag_sync, warn_hours=24, crit_hours=72),
-        "source": "Campaign sync cron",
-    }
-    last_t_sync = await _max_ts(Target, Target.synced_at)
-    tables["targets"] = {
-        "row_count": await _row_count(Target),
-        "last_synced_at": last_t_sync.isoformat() if last_t_sync else None,
-        "staleness": _staleness_label(last_t_sync, warn_hours=24, crit_hours=72),
-        "source": "Campaign sync cron",
-    }
-
-    # Performance daily — date column is a string YYYY-MM-DD
-    last_acct_perf = await _max_ts(AccountPerformanceDaily, AccountPerformanceDaily.date)
-    tables["account_performance_daily"] = {
-        "row_count": await _row_count(AccountPerformanceDaily),
-        "latest_date": str(last_acct_perf) if last_acct_perf else None,
-        "staleness": _staleness_label_from_iso_date(last_acct_perf, warn_days=2, crit_days=4),
-        "source": "Reports cron (POST /api/cron/reports)",
-    }
-    last_camp_perf = await _max_ts(CampaignPerformanceDaily, CampaignPerformanceDaily.date)
-    tables["campaign_performance_daily"] = {
-        "row_count": await _row_count(CampaignPerformanceDaily),
-        "latest_date": str(last_camp_perf) if last_camp_perf else None,
-        "staleness": _staleness_label_from_iso_date(last_camp_perf, warn_days=2, crit_days=4),
-        "source": "Reports cron",
-    }
-    last_st_perf = await _max_ts(SearchTermPerformance, SearchTermPerformance.date)
-    tables["search_term_performance"] = {
-        "row_count": await _row_count(SearchTermPerformance),
-        "latest_date": str(last_st_perf) if last_st_perf else None,
-        "staleness": _staleness_label_from_iso_date(last_st_perf, warn_days=2, crit_days=7),
-        "source": "Search-terms cron (POST /api/cron/search-terms)",
-    }
-    last_prod_perf = await _max_ts(ProductPerformanceDaily, ProductPerformanceDaily.date)
-    tables["product_performance_daily"] = {
-        "row_count": await _row_count(ProductPerformanceDaily),
-        "latest_date": str(last_prod_perf) if last_prod_perf else None,
-        "staleness": _staleness_label_from_iso_date(last_prod_perf, warn_days=2, crit_days=7),
-        "source": "Products cron (POST /api/cron/products)",
-    }
-
+    core = await build_tables_and_jobs_freshness(db, cred, selected_profile_id)
+    tables = core["tables"]
+    latest_jobs = core["latest_jobs"]
     out["tables"] = tables
-
-    # ── Latest jobs ────────────────────────────────────────────────────
-    latest_sync = (await db.execute(
-        select(SyncJob)
-        .where(SyncJob.credential_id == cred.id)
-        .order_by(SyncJob.created_at.desc())
-        .limit(1)
-    )).scalar_one_or_none()
-
-    latest_jobs: dict[str, Optional[dict]] = {
-        "campaign_sync": (
-            {
-                "id": str(latest_sync.id),
-                "status": latest_sync.status,
-                "step": latest_sync.step,
-                "progress_pct": latest_sync.progress_pct or 0,
-                "created_at": latest_sync.created_at.isoformat() if latest_sync.created_at else None,
-                "completed_at": latest_sync.completed_at.isoformat() if latest_sync.completed_at else None,
-                "error_message": latest_sync.error_message,
-            }
-            if latest_sync else None
-        ),
-    }
-
-    for report_type, key in (
-        ("performance_sync", "reports"),
-        ("search_terms_sync", "search_terms"),
-        ("product_sync", "products"),
-    ):
-        rep_q = (
-            select(Report)
-            .where(Report.credential_id == cred.id, Report.report_type == report_type)
-            .order_by(Report.created_at.desc())
-            .limit(5)
-        )
-        rep_rows = (await db.execute(rep_q)).scalars().all()
-        # Pick the most recent that matches our profile (raw_response.profile_id)
-        match = next(
-            (r for r in rep_rows if _schedule_profile_matches(r, selected_profile_id)),
-            rep_rows[0] if rep_rows else None,
-        )
-        if match is None:
-            latest_jobs[key] = None
-            continue
-        raw = match.raw_response or {}
-        latest_jobs[key] = {
-            "id": str(match.id),
-            "status": match.status,
-            "step": raw.get("step"),
-            "range_preset": raw.get("range_preset"),
-            "date_range_start": match.date_range_start,
-            "date_range_end": match.date_range_end,
-            "progress_pct": raw.get("progress_pct"),
-            "days_synced": raw.get("days_synced"),
-            "days_total": raw.get("days_total"),
-            "created_at": match.created_at.isoformat() if match.created_at else None,
-            "completed_at": match.completed_at.isoformat() if match.completed_at else None,
-            "error": raw.get("error"),
-        }
-
     out["latest_jobs"] = latest_jobs
 
     # ── Schedules registered with QStash ───────────────────────────────
@@ -1317,6 +1154,36 @@ async def cron_health(
         ] if schedules_summary.get("configured") else None,
     }
     return out
+
+
+@router.post("/weekly-digest")
+async def cron_weekly_digest(
+    _: None = Depends(_require_cron_secret),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Weekly email digest for all users with ``weekly_digest_enabled``.
+    Schedule via QStash: POST /api/cron/weekly-digest with X-Cron-Secret.
+    """
+    from app.config import get_settings as _gs
+    from app.services.digest_service import build_weekly_digest_html
+    from app.services.email_service import send_weekly_digest_email
+
+    settings = _gs()
+    r = await db.execute(
+        select(User).where(User.is_active == True, User.weekly_digest_enabled == True)
+    )
+    users = list(r.scalars().all())
+    sent = 0
+    for user in users:
+        html = await build_weekly_digest_html(
+            db, user=user, app_base_url=settings.effective_public_url
+        )
+        if not html:
+            continue
+        if await asyncio.to_thread(send_weekly_digest_email, user.email, html):
+            sent += 1
+    return {"sent": sent, "eligible_users": len(users)}
 
 
 # Job type -> cron path suffix

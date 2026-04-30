@@ -469,7 +469,16 @@ def extract_target_expression(tgt_data: dict) -> Optional[str]:
     if "target" in tgt_data and isinstance(tgt_data["target"], dict):
         tgt_data = tgt_data["target"]
     target_details = tgt_data.get("targetDetails") or {}
-    tgt_type = (tgt_data.get("targetType") or "").upper()
+
+    # Structured keyword targets (incl. negative): keyword may be numeric-only;
+    # _is_keyword_like rejects pure digits, but Amazon still sends valid targets.
+    kt = target_details.get("keywordTarget")
+    if isinstance(kt, dict):
+        kw = kt.get("keyword")
+        if kw is not None:
+            s = str(kw).strip()
+            if s:
+                return s
 
     # Direct fields
     for key in ("keywordText", "keyword", "expression", "text", "value", "targetingClause"):
@@ -578,6 +587,29 @@ def extract_ad_asin_sku(ad_data: dict) -> tuple[Optional[str], Optional[str]]:
     asin = ad_data.get("asin")
     sku = ad_data.get("sku")
     creative = ad_data.get("creative") or ad_data.get("productAd") or {}
+    # SP product ads: productCreative → advertisedProduct (SKU + resolved ASIN)
+    prod_creative = creative.get("productCreative")
+    if isinstance(prod_creative, dict):
+        settings = prod_creative.get("productCreativeSettings")
+        adv = settings.get("advertisedProduct") if isinstance(settings, dict) else None
+        if isinstance(adv, dict):
+            rid = adv.get("resolvedProductId")
+            rtype = (adv.get("resolvedProductIdType") or "").upper()
+            if rid and (rtype == "ASIN" or _looks_like_asin(str(rid))):
+                asin = asin or str(rid)
+            pid = adv.get("productId")
+            ptype = (adv.get("productIdType") or "").upper()
+            if pid:
+                pid_str = str(pid)
+                if ptype == "SKU":
+                    sku = sku or pid_str
+                elif ptype == "ASIN" or _looks_like_asin(pid_str):
+                    asin = asin or pid_str
+                elif not asin and not sku:
+                    if _looks_like_asin(pid_str):
+                        asin = pid_str
+                    else:
+                        sku = pid_str
     # Top-level productId (some MCP formats)
     if not asin and _looks_like_asin(str(ad_data.get("productId", ""))):
         asin = str(ad_data["productId"])
@@ -653,7 +685,7 @@ def extract_ad_asin_sku(ad_data: dict) -> tuple[Optional[str], Optional[str]]:
             if depth > 6:
                 return None
             if isinstance(obj, dict):
-                for key in ("asin", "productId", "product_id"):
+                for key in ("asin", "productId", "product_id", "resolvedProductId"):
                     v = obj.get(key)
                     if v and _looks_like_asin(str(v)):
                         return str(v)

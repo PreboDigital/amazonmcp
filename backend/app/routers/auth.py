@@ -53,6 +53,12 @@ class WhoAmIResponse(BaseModel):
     name: str | None
     role: str
     is_active: bool
+    weekly_digest_enabled: bool = True
+
+
+class MeUpdateRequest(BaseModel):
+    name: str | None = None
+    weekly_digest_enabled: bool | None = None
 
 
 class ForgotPasswordRequest(BaseModel):
@@ -90,6 +96,7 @@ async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
             "name": user.name,
             "role": user.role,
             "is_active": user.is_active,
+            "weekly_digest_enabled": getattr(user, "weekly_digest_enabled", True),
         },
     )
 
@@ -174,6 +181,7 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
             "name": user.name,
             "role": user.role,
             "is_active": user.is_active,
+            "weekly_digest_enabled": getattr(user, "weekly_digest_enabled", True),
         },
     )
 
@@ -187,6 +195,31 @@ async def whoami(user: User = Depends(get_current_user)):
         name=user.name,
         role=user.role,
         is_active=user.is_active,
+        weekly_digest_enabled=getattr(user, "weekly_digest_enabled", True),
+    )
+
+
+@router.patch("/me", response_model=WhoAmIResponse)
+async def update_me(
+    payload: MeUpdateRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update current user profile (name, digest preference)."""
+    if payload.name is not None:
+        user.name = payload.name.strip() or user.name
+    if payload.weekly_digest_enabled is not None:
+        user.weekly_digest_enabled = payload.weekly_digest_enabled
+    await db.flush()
+    await db.commit()
+    await db.refresh(user)
+    return WhoAmIResponse(
+        id=str(user.id),
+        email=user.email,
+        name=user.name,
+        role=user.role,
+        is_active=user.is_active,
+        weekly_digest_enabled=getattr(user, "weekly_digest_enabled", True),
     )
 
 
@@ -251,5 +284,6 @@ async def reset_password(payload: ResetPasswordRequest, db: AsyncSession = Depen
             "name": user.name,
             "role": user.role,
             "is_active": user.is_active,
+            "weekly_digest_enabled": getattr(user, "weekly_digest_enabled", True),
         },
     )

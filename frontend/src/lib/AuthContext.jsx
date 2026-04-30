@@ -91,6 +91,7 @@ export function AuthProvider({ children }) {
     resetPassword,
     logout,
     checkAuth,
+    refreshUser: checkAuth,
     isAdmin: user?.role === 'admin',
   }
 

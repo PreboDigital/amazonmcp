@@ -1001,6 +1001,53 @@ async def apply_inline(payload: ApplyInlineRequest, db: AsyncSession = Depends(g
     }
 
 
+class ExplainRowRequest(BaseModel):
+    credential_id: Optional[str] = None
+    source: str  # campaign_performance | search_term | product | account_daily
+    row: dict
+
+
+@router.post("/explain-row")
+async def explain_row(payload: ExplainRowRequest, db: AsyncSession = Depends(get_db)):
+    """Short LLM explanation for one report row (no Amazon API calls)."""
+    if not await _has_ai_config(db):
+        raise HTTPException(
+            status_code=503,
+            detail="AI service not configured. Add OPENAI_API_KEY and/or ANTHROPIC_API_KEY in Settings.",
+        )
+    cred = await _get_cred(db, payload.credential_id)
+    openai_key, anthropic_key = await get_effective_api_keys(db)
+    model_id = await _get_default_model_id(db)
+    ai = create_ai_service(model_id=model_id, openai_api_key=openai_key, anthropic_api_key=anthropic_key)
+
+    import json
+
+    row_json = json.dumps(payload.row, indent=2, default=str)[:6000]
+    user_prompt = f"""You are an Amazon Ads analyst. Explain this single {payload.source} row to a specialist in 3-6 short bullet points.
+Focus: what the numbers imply, whether spend/ACOS/CTR looks healthy, and one concrete next check or action.
+Use markdown bullets. Do not invent numbers not in the row.
+
+Row JSON:
+```json
+{row_json}
+```"""
+
+    messages = [
+        {
+            "role": "system",
+            "content": "You answer only about the JSON row provided. Be concise and practical.",
+        },
+        {"role": "user", "content": user_prompt},
+    ]
+    try:
+        text = await ai._completion(messages, temperature=0.25, max_tokens=900)
+    except Exception as e:
+        logger.exception("explain-row failed")
+        raise HTTPException(503, str(e)) from e
+
+    return {"explanation": text.strip(), "credential_id": str(cred.id)}
+
+
 @router.post("/insights")
 async def generate_insights(payload: InsightsRequest, db: AsyncSession = Depends(get_db)):
     """

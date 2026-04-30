@@ -20,6 +20,7 @@ from app.auth import require_auth
 from app.routers import (
     credentials, audit, harvest, optimizer, accounts, ai, approvals,
     reporting, campaigns, settings as settings_router, cron, auth, users,
+    exports, saved_views, activity,
 )
 from app.models import User
 from app.services.auth_service import hash_password
@@ -129,6 +130,9 @@ app.include_router(reporting.router, prefix="/api/reports", tags=["Reports"], de
 app.include_router(campaigns.router, prefix="/api/campaigns", tags=["Campaign Management"], dependencies=_auth)
 app.include_router(settings_router.router, prefix="/api/settings", tags=["Settings"], dependencies=_auth)
 app.include_router(users.router, prefix="/api", dependencies=[Depends(require_auth)])
+app.include_router(exports.router, prefix="/api/exports", tags=["Exports"], dependencies=_auth)
+app.include_router(saved_views.router, prefix="/api", dependencies=[Depends(require_auth)])
+app.include_router(activity.router, prefix="/api", dependencies=[Depends(require_auth)])
 app.include_router(cron.router, prefix="/api")  # No auth — uses CRON_SECRET
 
 

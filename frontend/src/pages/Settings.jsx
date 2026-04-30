@@ -25,14 +25,17 @@ import {
   ChevronDown,
   ChevronUp,
   Radio,
+  Mail,
 } from 'lucide-react'
 import StatusBadge from '../components/StatusBadge'
 import EmptyState from '../components/EmptyState'
 import { Link } from 'react-router-dom'
-import { credentials, accounts, settingsApi } from '../lib/api'
+import { credentials, accounts, settingsApi, authApi } from '../lib/api'
 import { useAccount } from '../lib/AccountContext'
+import { useAuth } from '../lib/AuthContext'
 
 export default function Settings() {
+  const { refreshUser, user } = useAuth()
   const { refreshAccounts, activeAccountId, activeAccount } = useAccount()
   const [creds, setCreds] = useState([])
   const [loading, setLoading] = useState(true)
@@ -57,6 +60,7 @@ export default function Settings() {
   const [llmLoading, setLlmLoading] = useState(true)
   const [llmSearch, setLlmSearch] = useState('')
   const [llmSaving, setLlmSaving] = useState(false)
+  const [digestSaving, setDigestSaving] = useState(false)
 
   const [apiKeys, setApiKeys] = useState(null)
   const [apiKeysLoading, setApiKeysLoading] = useState(true)
@@ -155,6 +159,19 @@ export default function Settings() {
       setStreamSubs(data?.subscriptions || [])
     } catch { setStreamSubs([]) }
     finally { setStreamSubsLoading(false) }
+  }
+
+  async function setWeeklyDigest(enabled) {
+    setDigestSaving(true)
+    setError(null)
+    try {
+      await authApi.updateMe({ weekly_digest_enabled: enabled })
+      if (refreshUser) await refreshUser()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setDigestSaving(false)
+    }
   }
 
 
@@ -945,6 +962,29 @@ export default function Settings() {
             </button>
           </form>
         )}
+      </div>
+
+      {/* Weekly digest (email) */}
+      <div className="card p-5">
+        <h3 className="text-sm font-semibold text-slate-900 mb-2 flex items-center gap-2">
+          <Mail size={18} className="text-brand-600" />
+          Notifications
+        </h3>
+        <p className="text-xs text-slate-500 mb-3">
+          Weekly digest emails summarize spend, approvals, and data freshness for all credentials. Requires Resend +{' '}
+          <code className="text-[11px] bg-slate-100 px-1 rounded">POST /api/cron/weekly-digest</code> on a schedule.
+        </p>
+        <label className="flex items-center gap-3 cursor-pointer">
+          <input
+            type="checkbox"
+            className="rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+            checked={user?.weekly_digest_enabled !== false}
+            disabled={digestSaving}
+            onChange={(e) => setWeeklyDigest(e.target.checked)}
+          />
+          <span className="text-sm text-slate-700">Send me the weekly digest</span>
+          {digestSaving ? <Loader2 size={14} className="animate-spin text-slate-400" /> : null}
+        </label>
       </div>
 
       {/* AI Models / LLM Settings */}

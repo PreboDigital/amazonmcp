@@ -32,6 +32,12 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
+  FileSearch,
+  Database,
+  AlertCircle,
+  Trash2,
+  Sparkles,
+  History,
 } from 'lucide-react'
 import {
   AreaChart, Area, BarChart, Bar, LineChart, Line,
@@ -39,10 +45,9 @@ import {
   PieChart as RePieChart, Pie, Cell,
 } from 'recharts'
 import clsx from 'clsx'
-import { reports } from '../lib/api'
+import { reports, downloadExport, savedViews as savedViewsApi, ai as aiApi } from '../lib/api'
 import { useAccount } from '../lib/AccountContext'
 import { useSync } from '../lib/SyncContext'
-import { FileSearch, Database, AlertCircle, Trash2, History } from 'lucide-react'
 import DateRangePicker from '../components/DateRangePicker'
 
 
@@ -601,7 +606,7 @@ function downloadCsv(csv, filename) {
   URL.revokeObjectURL(url)
 }
 
-function SearchTermsSection({ accountId, syncing, data, error, filter, onSync, onFilterChange, onDismissError, currencyCode = 'USD', dateRange }) {
+function SearchTermsSection({ accountId, syncing, data, error, filter, onSync, onFilterChange, onDismissError, currencyCode = 'USD', dateRange, onExplainRow }) {
   const [stTerms, setStTerms] = useState(null)
   const [stLoading, setStLoading] = useState(false)
   const [sortKey, setSortKey] = useState('cost')
@@ -906,6 +911,7 @@ function SearchTermsSection({ accountId, syncing, data, error, filter, onSync, o
                               </span>
                             </th>
                           ))}
+                          <th className="px-2 py-2.5 text-[11px] font-semibold text-slate-400 w-12 text-center">AI</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-50">
@@ -946,6 +952,18 @@ function SearchTermsSection({ accountId, syncing, data, error, filter, onSync, o
                             </td>
                             <td className="px-3 py-2.5">
                               <p className="text-[11px] text-slate-500 break-words">{t.campaign_name || '—'}</p>
+                            </td>
+                            <td className="px-2 py-2.5 text-center">
+                              {onExplainRow ? (
+                                <button
+                                  type="button"
+                                  title="Explain this row"
+                                  onClick={() => onExplainRow(t)}
+                                  className="p-1.5 rounded-md text-indigo-600 hover:bg-indigo-50 transition-colors"
+                                >
+                                  <Sparkles size={14} />
+                                </button>
+                              ) : null}
                             </td>
                           </tr>
                         ))}
@@ -1167,6 +1185,85 @@ export default function Reports() {
   const [reportHistoryLoading, setReportHistoryLoading] = useState(false)
   const [reportHistoryExpanded, setReportHistoryExpanded] = useState(false)
   const [deletingReportId, setDeletingReportId] = useState(null)
+
+  const [savedViewsList, setSavedViewsList] = useState([])
+  const [savedViewName, setSavedViewName] = useState('')
+  const [explainOpen, setExplainOpen] = useState(false)
+  const [explainMarkdown, setExplainMarkdown] = useState('')
+  const [explainLoading, setExplainLoading] = useState(false)
+
+  function exportCredProfileQs() {
+    const p = new URLSearchParams()
+    if (activeAccountId) p.set('credential_id', activeAccountId)
+    if (activeProfileId) p.set('profile_id', activeProfileId)
+    return p.toString()
+  }
+
+  function exportQuerySuffix() {
+    const p = new URLSearchParams()
+    if (activeAccountId) p.set('credential_id', activeAccountId)
+    if (activeProfileId) p.set('profile_id', activeProfileId)
+    if (dateRange.start) p.set('start_date', dateRange.start)
+    if (dateRange.end) p.set('end_date', dateRange.end)
+    return p.toString()
+  }
+
+  async function loadSavedViewsList() {
+    try {
+      const v = await savedViewsApi.list('reports')
+      setSavedViewsList(Array.isArray(v) ? v : [])
+    } catch {
+      setSavedViewsList([])
+    }
+  }
+
+  useEffect(() => {
+    loadSavedViewsList()
+  }, [activeAccountId])
+
+  async function saveReportsView() {
+    const name = savedViewName.trim()
+    if (!name) return
+    try {
+      await savedViewsApi.create({
+        name,
+        page: 'reports',
+        credential_id: activeAccountId,
+        profile_id: activeProfileId,
+        payload: { dateRange },
+      })
+      setSavedViewName('')
+      loadSavedViewsList()
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+
+  function applyReportsView(v) {
+    const dr = v.payload?.dateRange
+    if (dr?.start && dr?.end) {
+      setDateRange({
+        preset: dr.preset || 'custom',
+        start: dr.start,
+        end: dr.end,
+        label: dr.label || 'Saved view',
+      })
+    }
+  }
+
+  async function handleExplainSearchTerm(row) {
+    setExplainOpen(true)
+    setExplainMarkdown('')
+    setExplainLoading(true)
+    try {
+      const res = await aiApi.explainRow(activeAccountId, 'search_term', row)
+      setExplainMarkdown(res.explanation || '')
+    } catch (e) {
+      setExplainMarkdown(`Error: ${e.message}`)
+    } finally {
+      setExplainLoading(false)
+    }
+  }
 
   const isInitialMount = useRef(true)
   const mountedRef = useRef(true)
@@ -1584,6 +1681,84 @@ export default function Reports() {
             </span>
           )}
         </div>
+
+        <div className="mt-3 pt-3 border-t border-slate-100 flex flex-col sm:flex-row sm:flex-wrap gap-3 sm:items-end">
+          <div className="flex flex-wrap gap-2">
+            <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider w-full sm:w-auto sm:mr-2">Exports</span>
+            <button
+              type="button"
+              className="px-2.5 py-1.5 rounded-md text-xs font-medium bg-white border border-slate-200 text-slate-700 hover:bg-slate-50"
+              onClick={() => downloadExport(`/exports/audit-latest.csv?${exportCredProfileQs()}`, 'audit-latest.csv').catch((e) => setError(e.message))}
+            >
+              Audit CSV
+            </button>
+            <button
+              type="button"
+              className="px-2.5 py-1.5 rounded-md text-xs font-medium bg-white border border-slate-200 text-slate-700 hover:bg-slate-50"
+              onClick={() => downloadExport(`/exports/campaign-performance.csv?${exportQuerySuffix()}`, 'campaign-performance.csv').catch((e) => setError(e.message))}
+            >
+              Campaign perf CSV
+            </button>
+            <button
+              type="button"
+              className="px-2.5 py-1.5 rounded-md text-xs font-medium bg-white border border-slate-200 text-slate-700 hover:bg-slate-50"
+              onClick={() => downloadExport(`/exports/search-terms.csv?${exportQuerySuffix()}`, 'search-terms.csv').catch((e) => setError(e.message))}
+            >
+              Search terms CSV
+            </button>
+            <button
+              type="button"
+              className="px-2.5 py-1.5 rounded-md text-xs font-medium bg-white border border-slate-200 text-slate-700 hover:bg-slate-50"
+              onClick={() => {
+                const p = new URLSearchParams()
+                if (activeAccountId) p.set('credential_id', activeAccountId)
+                if (activeProfileId) p.set('profile_id', activeProfileId)
+                downloadExport(`/exports/neg-keyword-packet.csv?${p.toString()}`, 'neg-keyword-packet.csv').catch((e) => setError(e.message))
+              }}
+            >
+              Neg packet CSV
+            </button>
+            <button
+              type="button"
+              className="px-2.5 py-1.5 rounded-md text-xs font-medium bg-white border border-slate-200 text-slate-700 hover:bg-slate-50"
+              onClick={() => {
+                const p = new URLSearchParams()
+                if (activeAccountId) p.set('credential_id', activeAccountId)
+                downloadExport(`/exports/summary.pdf?${p.toString()}`, 'audit-summary.pdf').catch((e) => setError(e.message))
+              }}
+            >
+              Audit PDF
+            </button>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[200px]">
+            <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Saved views</span>
+            <select
+              className="text-xs border border-slate-200 rounded-md px-2 py-1.5 bg-white max-w-[160px]"
+              value=""
+              onChange={(e) => {
+                const id = e.target.value
+                e.target.value = ''
+                const v = savedViewsList.find((x) => x.id === id)
+                if (v) applyReportsView(v)
+              }}
+            >
+              <option value="">Load…</option>
+              {savedViewsList.map((v) => (
+                <option key={v.id} value={v.id}>{v.name}</option>
+              ))}
+            </select>
+            <input
+              type="text"
+              placeholder="Name view"
+              value={savedViewName}
+              onChange={(e) => setSavedViewName(e.target.value)}
+              className="text-xs border border-slate-200 rounded-md px-2 py-1.5 w-28"
+            />
+            <button type="button" className="text-xs font-medium text-indigo-600 hover:text-indigo-800" onClick={saveReportsView}>
+              Save
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* Error */}
@@ -1961,6 +2136,7 @@ export default function Reports() {
         onDismissError={dismissReportSearchTermsSync}
         currencyCode={currencyCode}
         dateRange={dateRange}
+        onExplainRow={handleExplainSearchTerm}
         key={activeAccount?.id || activeAccountId}
       />
 
@@ -2093,6 +2269,34 @@ export default function Reports() {
           </div>
         )}
       </div>
+
+      {explainOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/40"
+          onClick={() => setExplainOpen(false)}
+        >
+          <div
+            className="bg-white rounded-xl shadow-xl max-w-lg w-full max-h-[80vh] overflow-auto p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex justify-between items-center mb-3">
+              <h3 className="text-sm font-semibold text-slate-900">Row explanation</h3>
+              <button type="button" className="text-slate-400 hover:text-slate-600" onClick={() => setExplainOpen(false)}>
+                <X size={18} />
+              </button>
+            </div>
+            {explainLoading ? (
+              <div className="py-8 flex justify-center">
+                <Loader2 size={28} className="animate-spin text-indigo-500" />
+              </div>
+            ) : (
+              <div className="text-sm text-slate-700 whitespace-pre-wrap">{explainMarkdown}</div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

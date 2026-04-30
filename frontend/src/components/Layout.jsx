@@ -19,10 +19,12 @@ import {
   Users,
   LogOut,
   Clock,
+  History,
 } from 'lucide-react'
 import clsx from 'clsx'
 import { useState, useRef, useEffect } from 'react'
 import SyncStatusBanner from './SyncStatusBanner'
+import DataFreshnessBanner from './DataFreshnessBanner'
 import { useAccount } from '../lib/AccountContext'
 import { useAuth } from '../lib/AuthContext'
 import { approvals, accounts as accountsApi } from '../lib/api'
@@ -34,6 +36,7 @@ const baseNavigation = [
   { name: 'Campaigns', href: '/campaigns', icon: Zap },
   { name: 'AI Assistant', href: '/ai', icon: Brain },
   { name: 'Approval Queue', href: '/approvals', icon: Shield },
+  { name: 'Change log', href: '/activity', icon: History },
   { name: 'Audit & Reports', href: '/audit', icon: SearchCheck },
   { name: 'Keyword Harvester', href: '/harvester', icon: Sparkles },
   { name: 'Bid Optimizer', href: '/optimizer', icon: TrendingUp },
@@ -395,6 +398,7 @@ export default function Layout({ children }) {
       <main className="flex-1 overflow-y-auto lg:pt-0 pt-14 pb-20 lg:pb-0">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-4">
           <SyncStatusBanner />
+          <DataFreshnessBanner />
           {activeAccountId && activeAccount && !activeScope.canSyncCampaigns && activeScope.warning && (
             <div className="card bg-amber-50 border-amber-200 px-4 py-3 text-sm text-amber-800">
               {activeScope.warning}

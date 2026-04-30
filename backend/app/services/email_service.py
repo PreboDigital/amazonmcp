@@ -145,3 +145,29 @@ def send_sync_complete_email(
     except Exception as e:
         logger.exception(f"Failed to send sync complete email to {to_email}: {e}")
         return False
+
+
+def send_weekly_digest_email(to_email: str, html_body: str) -> bool:
+    """Send weekly digest. Returns True if sent."""
+    from app.config import get_settings
+
+    settings = get_settings()
+    if not settings.resend_api_key or not settings.from_email:
+        logger.info("Resend not configured; skipping weekly digest")
+        return False
+    try:
+        import resend
+
+        resend.api_key = settings.resend_api_key
+        params = {
+            "from": settings.from_email,
+            "to": [to_email],
+            "subject": "Weekly Amazon Ads digest",
+            "html": html_body,
+        }
+        resend.Emails.send(params)
+        logger.info("Weekly digest sent to %s", to_email)
+        return True
+    except Exception as e:
+        logger.exception("Failed to send weekly digest to %s: %s", to_email, e)
+        return False

@@ -288,6 +288,14 @@ export const ai = {
       credential_id: credentialId || null,
     }),
   }),
+  explainRow: (credentialId, source, row) => request('/ai/explain-row', {
+    method: 'POST',
+    body: JSON.stringify({
+      credential_id: credentialId || null,
+      source,
+      row,
+    }),
+  }),
 }
 
 // ── Approvals ───────────────────────────────────────────────────────
@@ -431,6 +439,13 @@ export const reports = {
     if (opts.compare) params.set('compare', 'true')
     const qs = params.toString()
     return request(`/reports/products/summary${qs ? `?${qs}` : ''}`)
+  },
+  dataFreshness: (credentialId, profileId) => {
+    const params = new URLSearchParams()
+    if (credentialId) params.set('credential_id', credentialId)
+    if (profileId) params.set('profile_id', profileId)
+    const qs = params.toString()
+    return request(`/reports/data-freshness${qs ? `?${qs}` : ''}`)
   },
 }
 
@@ -630,6 +645,7 @@ export const authApi = {
       body: JSON.stringify({ token, password }),
     }),
   whoami: () => request('/auth/whoami'),
+  updateMe: (data) => request('/auth/me', { method: 'PATCH', body: JSON.stringify(data) }),
 }
 
 // ── Users (admin) ─────────────────────────────────────────────────────
@@ -704,6 +720,52 @@ export const cronApi = {
     }),
   deleteSchedule: (scheduleId) =>
     request(`/cron/schedules/${encodeURIComponent(scheduleId)}`, { method: 'DELETE' }),
+}
+
+// ── Saved views ───────────────────────────────────────────────────────
+export const savedViews = {
+  list: (page) => {
+    const qs = page ? `?page=${encodeURIComponent(page)}` : ''
+    return request(`/saved-views${qs}`)
+  },
+  create: (body) => request('/saved-views', { method: 'POST', body: JSON.stringify(body) }),
+  delete: (id) => request(`/saved-views/${id}`, { method: 'DELETE' }),
+}
+
+// ── Activity ledger ───────────────────────────────────────────────────
+export const activity = {
+  ledger: (credentialId, limit = 80) => {
+    const params = new URLSearchParams()
+    if (credentialId) params.set('credential_id', credentialId)
+    params.set('limit', String(limit))
+    return request(`/activity/ledger?${params.toString()}`)
+  },
+}
+
+/** Download file from API with Bearer auth (CSV/PDF exports). */
+export async function downloadExport(pathWithQuery, filename) {
+  const token = getAuthToken?.()
+  const url = `${API_BASE}${pathWithQuery.startsWith('/') ? pathWithQuery : `/${pathWithQuery}`}`
+  const headers = {}
+  if (token) headers.Authorization = `Bearer ${token}`
+  const res = await fetch(url, { headers })
+  if (!res.ok) {
+    let msg = `Download failed (${res.status})`
+    try {
+      const j = await res.json()
+      if (j.detail) msg = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail)
+    } catch {
+      const t = await res.text()
+      if (t) msg = t.slice(0, 200)
+    }
+    throw new Error(msg)
+  }
+  const blob = await res.blob()
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(a.href)
 }
 
 // ── Health ───────────────────────────────────────────────────────────

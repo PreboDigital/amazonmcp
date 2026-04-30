@@ -40,6 +40,7 @@ from app.services.report_skip_service import (
     get_permanent_skip_dates,
     update_after_sync as update_skip_state_after_sync,
 )
+from app.services.data_freshness import build_tables_and_jobs_freshness, overall_freshness_status
 from app.utils import parse_uuid, utcnow
 
 logger = logging.getLogger(__name__)
@@ -1960,3 +1961,23 @@ async def product_summary(
             }
 
     return response
+
+
+@router.get("/data-freshness")
+async def data_freshness(
+    credential_id: Optional[str] = Query(None),
+    profile_id: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-table freshness for UI banner (any authenticated user)."""
+    cred = await _get_cred(db, credential_id)
+    selected = profile_id if profile_id is not None else cred.profile_id
+    core = await build_tables_and_jobs_freshness(db, cred, selected)
+    return {
+        "credential_id": str(cred.id),
+        "profile_id": selected,
+        "checked_at": utcnow().isoformat(),
+        "tables": core["tables"],
+        "latest_jobs": core["latest_jobs"],
+        "overall": {"status": overall_freshness_status(core["tables"])},
+    }
